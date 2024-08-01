@@ -6,8 +6,9 @@ Allows you to see if a string is a valid English word. Also can generate random 
 Sample Android Phone word game https://github.com/calvinhsia/WordScape
 */
 
-/* No new usings required
- Need to modify the HelloFabric.csproj to add this line:
+/*
+Usings: No new usings required
+PackageReference: Need to modify the HelloFabric.csproj to add this line:
  		<PackageReference Include="DictionaryLib_Calvin_Hsia" Version="1.0.7" />
 */
 
@@ -20,7 +21,7 @@ Sample Android Phone word game https://github.com/calvinhsia/WordScape
             {
                 length = 5;
             }
-            var randword = dict.RandomWord();
-            var result = Enumerable.Range(0, length.Value).Select(i => dict.RandomWord()).ToList();
+            var randword = dict.RandomWord(); // gets a single random word
+            var result = Enumerable.Range(0, length.Value).Select(i => dict.RandomWord()).ToList(); // gets a list of random words
             return string.Join(" ", result);
         }
