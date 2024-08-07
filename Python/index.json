@@ -1,0 +1,10 @@
+[
+    {
+        "Description": "Query Data WareHouse",
+        "File": "QueryDataWarehouse.py"
+    },
+    {
+        "Description": "Vectorize a String",
+        "File": "Vectorize a String.py"
+    }
+]

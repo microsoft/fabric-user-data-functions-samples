@@ -1,7 +1,16 @@
 # Add a Connection to warehouse and lakehouse to your user data function 
-# Example of using a FabricItemInput to query a Warehouse and then write the data to a csv in a Lakehouse
+# Example of using a FabricItemInput to query a Warehouse 
+#  and then write the data to a csv in a Lakehouse
 # Replace alias for the warehouse and lakehouse 
  
+Requirements.txt changes required:
+    uncomment the line "Pandas"
+Imports Statement changes required:
+    import json
+
+
+
+
  @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
  @app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
  @app.function("query_warehouse_and_write_to_csv")
