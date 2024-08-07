@@ -12,7 +12,8 @@
         "File": "QueryDataWarehouse.py"
     },
     {
-        "Name": "Separator"
+        "Name": "Separator",
+        "Description":"a separator"
     },
     {
         "Name": "Vectorize a String",
