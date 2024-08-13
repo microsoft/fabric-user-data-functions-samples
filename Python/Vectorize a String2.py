@@ -5,7 +5,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 def vectorize_string(text: str)-> fabric.functions.UdfResponse:
     """
     Vectorizes a string using CountVectorizer from sklearn.
-
+asdfasdfasdfasdf
     :param text: The string to be vectorized.
     :return: A vectorized representation of the string as a sparse matrix.
     """
