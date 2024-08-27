@@ -3,10 +3,10 @@
 #  and then write the data to a csv in a Lakehouse
 # Replace alias for the warehouse and lakehouse 
  
-Requirements.txt changes required:
-    uncomment the line "Pandas"
-Imports Statement changes required:
-    import json
+# Requirements.txt changes required:
+#     uncomment the line "Pandas"
+# Imports Statement changes required:
+#     import json
 
 
 

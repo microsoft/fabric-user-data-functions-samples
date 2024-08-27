@@ -16,17 +16,5 @@
         "Description": "Vectorize a String",
         "Detail": "Detailed Description of vectorize a string",
         "File": "Vectorize a String.py"
-    },
-    {
-        "Name": "Another Sample",
-        "Description": "Vectorize a String",
-        "Detail": "Detailed Description of another sample",
-        "File": "Vectorize a String.py"
-    },
-    {
-        "Name": "Another Sample2",
-        "Description": "Vectorize a String2",
-        "Detail": "Detailed Description of another sample2",
-        "File": "Vectorize a String2.py"
     }
 ]
