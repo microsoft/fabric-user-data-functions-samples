@@ -1,15 +1,15 @@
-/* Description
-Use an English language dictionary to get random words  https://www.nuget.org/packages/DictionaryLib_Calvin_Hsia
-Contains 2 English Language Dictionaries: small (53,000 words) and large (172,000 words)
-Allows you to see if a string is a valid English word. Also can generate random words. Works on Windows, Android
-Sample Android Phone word game https://github.com/calvinhsia/WordScape
-*/
+        /* Description
+        Use an English language dictionary to get random words  https://www.nuget.org/packages/DictionaryLib_Calvin_Hsia
+        Contains 2 English Language Dictionaries: small (53,000 words) and large (172,000 words)
+        Allows you to see if a string is a valid English word. Also can generate random words. Works on Windows, Android
+        Sample Android Phone word game https://github.com/calvinhsia/WordScape
+        */
 
-/* How to use:
-Usings: No new 'usings' required
-PackageReference: Need to modify the HelloFabric.csproj to add this line:
- 		<PackageReference Include="DictionaryLib_Calvin_Hsia" Version="1.0.7" />
-*/
+        /* How to use:
+        Usings: No new 'usings' required
+        PackageReference: Need to modify the HelloFabric.csproj to add this line:
+                <PackageReference Include="DictionaryLib_Calvin_Hsia" Version="1.0.7" />
+        */
 
 
         private readonly DictionaryLib.DictionaryLib dict = new(DictionaryLib.DictionaryType.Large); 

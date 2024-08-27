@@ -1,8 +1,8 @@
-/* Description 
-This sample validates a JSON string schema 
-*/
+        /* Description 
+        This sample validates a JSON string schema 
+        */
 
-[Function("ValidateJSONSchema")] 
+        [Function("ValidateJSONSchema")] 
         public bool ValidateJSONSchema(string message) // Pass the JSON object as a string for message variable
         {
             _logger.LogInformation("Validating JSON Schema for message: {message}", message);
