@@ -1,3 +1,4 @@
+
 # Add a Connection to warehouse and lakehouse to your user data function 
 # Example of using a FabricItemInput to query a Warehouse 
 #  and then write the data to a csv in a Lakehouse

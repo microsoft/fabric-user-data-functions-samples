@@ -1,3 +1,4 @@
+
         /* Description 
         This sample validates a JSON string schema 
         */
