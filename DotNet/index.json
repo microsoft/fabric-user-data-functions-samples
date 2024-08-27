@@ -1,0 +1,14 @@
+[
+    {
+        "Name": "English Words Sample",
+        "Description": "Add English Word dictionary",
+        "Detail": "Query an English Word dictionary for random words or spell checking",
+        "File": "EnglishWords.cs"
+    },
+    {
+        "Name": "ValidateJsonSchema",
+        "Description": "Validate a JSON Schema",
+        "Detail": "validate a JSON Schema",
+        "File": "ValidateJsonSchema.cs"
+    }
+]
