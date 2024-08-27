@@ -24,5 +24,3 @@
             var result = Enumerable.Range(0, length.Value).Select(i => dict.RandomWord()).ToList(); // gets a list of random words
             return string.Join(" ", result);
         }
-
-
