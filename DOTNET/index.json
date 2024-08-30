@@ -10,5 +10,11 @@
         "description": "Validate a JSON Schema",
         "detail": "validate a JSON Schema",
         "data": "ValidateJsonSchema.cs"
+    },
+    {
+        "name": "Log User Invocation",
+        "description": "add log user to sql",
+        "detail": "",
+        "data": "LogUserInvocation.cs"
     }
 ]
