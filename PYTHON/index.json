@@ -1,0 +1,54 @@
+[
+    {
+        "name": "Query data",
+        "description": "Fabric data that query data, like LakeHouse, DataWareHouse",
+        "data": [
+            {
+                "name": "QueryDataWareHouse",
+                "description": "Query Data WareHouse",
+                "detail": "detailed description of Query Data Warehouse",
+                "data": "DataSamples/QueryDataWarehouse.py"
+            },
+            {
+                "name": "Query Sql",
+                "description": "Query sql",
+                "detail": "detailed description of Query SQL",
+                "data": "DataSamples/QueryDataWarehouse.py"
+            }
+        ]
+    },
+    {
+        "name": "Utilities",
+        "description": "utils",
+        "data": [
+            {
+                "name": "String data",
+                "description": "string manipulation",
+                "data": [
+                    {
+                        "name": "Vectorize a String",
+                        "description": "Vectorize a String",
+                        "detail": "detailed description of vectorize a string",
+                        "data": "Vectorize a String.py"
+                    }
+                ]
+            },
+            {
+                "name": "Numeric Samples",
+                "description": "some number data",
+                "data": [
+                    {
+                        "name": "add 2 numbers",
+                        "description": "addd",
+                        "data": "Vectorize a String.py"
+                    },
+                    {
+                        "name": "multiply 2 numbers",
+                        "description": "multiply",
+                        "data": "Vectorize a String.py"
+                    }
+                ]
+            }
+        ]
+    }
+]
