@@ -1,6 +1,6 @@
 [
     {
-        "name": "Data Query data",
+        "name": "Query data",
         "description": "Fabric data that query data, like LakeHouse, DataWareHouse",
         "data": [
             {
@@ -18,7 +18,7 @@
         ]
     },
     {
-        "name": "Utility data",
+        "name": "Utilities",
         "description": "utils",
         "data": [
             {
@@ -34,7 +34,7 @@
                 ]
             },
             {
-                "name": "numeric data",
+                "name": "Numeric Samples",
                 "description": "some number data",
                 "data": [
                     {
