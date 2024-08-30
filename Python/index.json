@@ -1,52 +1,51 @@
 [
     {
-        "Name": "Data Query Samples",
-        "Description": "Fabric samples that query data, like LakeHouse, DataWareHouse",
-        "Samples": [
+        "name": "Data Query data",
+        "description": "Fabric data that query data, like LakeHouse, DataWareHouse",
+        "data": [
             {
-                "Name": "QueryDataWareHouse",
-                "Description": "Query Data WareHouse",
-                "Detail": "Detailed Description of Query Data Warehouse",
-                "File": "DataSamples/QueryDataWarehouse.py"
+                "name": "QueryDataWareHouse",
+                "description": "Query Data WareHouse",
+                "detail": "detailed description of Query Data Warehouse",
+                "data": "DataSamples/QueryDataWarehouse.py"
             },
             {
-                "Name": "Query Sql",
-                "Description": "Query Data WareHouse",
-                "Detail": "Detailed Description of Query SQL",
-                "File": "DataSamples/QueryDataWarehouse.py"
+                "name": "Query Sql",
+                "description": "Query sql",
+                "detail": "detailed description of Query SQL",
+                "data": "DataSamples/QueryDataWarehouse.py"
             }
         ]
     },
     {
-        "Name": "Utility Samples",
-        "Description": "utils",
-        "Samples": [
+        "name": "Utility data",
+        "description": "utils",
+        "data": [
             {
-                "Name": "String Samples",
-                "Description": "string manipulation",
-                "Samples":[
+                "name": "String data",
+                "description": "string manipulation",
+                "data": [
                     {
-                        "Name": "Vectorize a String",
-                        "Description": "Vectorize a String",
-                        "Detail": "Detailed Description of vectorize a string",
-                        "File": "Vectorize a String.py"
+                        "name": "Vectorize a String",
+                        "description": "Vectorize a String",
+                        "detail": "detailed description of vectorize a string",
+                        "data": "Vectorize a String.py"
                     }
                 ]
             },
             {
-                "Name": "numeric samples",
-                "Description": "some number samples",
-                "Samples":[
+                "name": "numeric data",
+                "description": "some number data",
+                "data": [
                     {
-                        "Name": "add 2 numbers",
-                        "Description": "addd",
-                        "File": "Vectorize a String.py"
+                        "name": "add 2 numbers",
+                        "description": "addd",
+                        "data": "Vectorize a String.py"
                     },
                     {
-                        "Name": "multiply 2 numbers",
-                        "Description": "multiply",
-                        "File": "Vectorize a String.py"
-
+                        "name": "multiply 2 numbers",
+                        "description": "multiply",
+                        "data": "Vectorize a String.py"
                     }
                 ]
             }
