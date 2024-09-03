@@ -1,3 +1,13 @@
+
+/* Description
+        This function allows you to run a query for Azure SQL Database. Update the query to read from a Table in your database.
+*/
+
+/* How to use:
+    - Add a connection for the user data function to an Azure SQL database in Fabric portal to use this function sample
+     
+*/
+
 using System.Net;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
