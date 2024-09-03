@@ -6,10 +6,10 @@
         "data": [
             {
                 "name": "QueryDataWareHouse",
-                "description": "Query Data WareHouse",
-                "detail": "detailed description of Query Data Warehouse",
+                "description": "Read from Data WareHouse",
+                "detail": "This user data function can run a query and get data from data warehouse",
                 "dateAdded": "2024-08-31T17:50:52.184Z",
-                "data": "DataSamples/QueryDataWarehouse.py"
+                "data": "readdatafromwarehouse.py"
             },
             {
                 "name": "Query Sql",
