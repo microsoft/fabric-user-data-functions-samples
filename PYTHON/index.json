@@ -9,7 +9,7 @@
                 "description": "Read from Data WareHouse",
                 "detail": "This user data function can run a query and get data from data warehouse",
                 "dateAdded": "2024-08-31T17:50:52.184Z",
-                "data": "readdatafromwarehouse.py"
+                "data": "ReadDataFromWarehouse.py"
             },
             {
                 "name": "Query Sql",
