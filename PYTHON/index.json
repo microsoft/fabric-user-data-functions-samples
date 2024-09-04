@@ -1,61 +1,96 @@
-[
-    {
-        "name": "Query data",
-        "description": "Fabric data that query data, like LakeHouse, DataWareHouse",
-        "dateAdded": "2024-08-31T17:50:52.184Z",
+[ 
+  {
+    "name": "Query Azure SQL database",
+    "description": "User data functions to work with Warehouse",
+    "data": [
+      {
+        "name": "String data",
+        "description": "string manipulation",
+        "dateAdded": "2024-09-03T19:35:01Z",
         "data": [
-            {
-                "name": "QueryDataWareHouse",
-                "description": "Read from Data WareHouse",
-                "detail": "This user data function can run a query and get data from data warehouse",
-                "dateAdded": "2024-08-31T17:50:52.184Z",
-                "data": "ReadDataFromWarehouse.py"
-            },
-            {
-                "name": "Query Sql",
-                "description": "Query sql",
-                "detail": "detailed description of Query SQL",
-                "dateAdded": "2024-08-31T17:50:52.184Z",
-                "data": "DataSamples/QueryDataWarehouse.py"
-            }
+          {
+            "name": "Query data from Azure SQL database",
+            "description": "User data function that can query data from Azure SQL database.",
+            "detail": "Once a User data function has a connection to Azure SQL database, use this sample to query data from Azure SQL database.",
+            "dateAdded": "2024-08-31T17:50:52.184Z",
+            "data": "ReadFromAzureSQL.py"
+          }
         ]
-    },
-    {
-        "name": "Utilities",
-        "description": "utils",
+      }
+    ]
+  },
+  {
+    "name": "Lakehouse",
+    "description": "User data functions to work with Lakehouse",
+    "data": [
+      {
+        "name": "Work with Lakehouse and tables",
+        "description": "User data functions to read or write files from Lakehouse and query data in lakehouse tables.",
+         "dateAdded": "2024-09-03T19:35:01Z",
         "data": [
-            {
-                "name": "String data",
-                "description": "string manipulation",
-                "dateAdded": "2024-08-31T17:50:52.184Z",
-                "data": [
-                    {
-                        "name": "Vectorize a String",
-                        "description": "Vectorize a String",
-                        "detail": "detailed description of vectorize a string",
-                        "dateAdded": "2024-08-31T17:50:52.184Z",
-                        "data": "Vectorize a String.py"
-                    }
-                ]
-            },
-            {
-                "name": "Numeric Samples",
-                "description": "some number data",
-                "data": [
-                    {
-                        "name": "add 2 numbers",
-                        "description": "addd",
-                        "dateAdded": "2024-08-31T17:50:52.184Z",
-                        "data": "Vectorize a String.py"
-                    },
-                    {
-                        "name": "multiply 2 numbers",
-                        "description": "multiply",
-                        "dateAdded": "2024-08-31T17:50:52.184Z",
-                        "data": "Vectorize a String.py"
-                    }
-                ]
-            }
+          {
+            "name": "Read files to Lakehouse",
+            "description": "You can use this function to read a CSV file into a Lakehouse",
+            "detail": "You can use this function to read a CSV file into a Lakehouse",
+             "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "ReadFromLakehouseFiles.py"
+          },
+          {
+            "name": "Write CSV file to Lakehouse",
+            "description": "You can use this function to write a CSV file into a Lakehouse",
+            "detail": "You can use this function to write a CSV file into a Lakehouse",
+            "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "WriteToLakehouse.py"
+          },
+          {
+            "name": "Query Lakehouse table",
+            "description": "You can use this function to query data from lakehouse table",
+            "detail": "You can use this function to query data from lakehouse table",
+            "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "ReadFromLakeHouseTables.py"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Warehouse",
+    "description": "User data functions to work with Warehouse",
+    "data": [
+      {
+        "name": "Write data into a warehouse",
+        "description": "Use this user data function to insert data into a warehouse table",
+        "detail": "Add a warehouse connection to the user data function and then use the function to insert data into a warehouse table",
+        "dateAdded": "2024-09-03T19:35:01Z",
+        "data": [
+          {
+            "name": "Query data from a warehouse",
+            "description": "Use this user data function to query data into a warehouse and write into a lakehouse.",
+            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse and write into a lakehouse.",
+            "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "QueryWarehouseAndWriteToCsv.py"
+          },
+          {
+            "name": "Query data from a table",
+            "description": "Query data from a table in a warehouse",
+            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
+            "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "Vectorize a String.py"
+          }
+        ]
+      }
+    ]
+  },
+  {
+        "name": "Data Manipulation",
+        "description": "User data functions that can be use to transform data.",
+        "data": [
+          {
+            "name": "Vectorize a string",
+            "description": "Function to vectorize text data from string to being represented by numeric values.",
+            "dateAdded": "2024-09-03T19:35:01Z",
+            "data": "ReadDataFromWarehouse.py"
+          }
         ]
     }
 ]
