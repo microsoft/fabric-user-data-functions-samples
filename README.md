@@ -12,13 +12,13 @@ index.JSON Format:
 
 
 ```typescript
-interface ISampleFunction {
-    name: string; // shown on 1st line of QuickPick Item
+export interface ISampleFunction {
+    name: string; // shown in BOLD on 1st line of QuickPick Item
     description: string; // shown at end of 1st line of QuickPick Item
     detail?: string; // shown on 2nd line of QuickPick Item
-    dateAdded?: string; // date added to the repo, so we can sort/filter
+    dateAdded?: string; // date added to the repo, so we can sort/filter, like '2024-08-31T17:50:52.184Z'
     tag?: string; // additional tag to filter on
-    data: ISampleFunction[] | string; // if string, it's the file name to download. Else it's an array of ISampleFunction
+    data: ISampleFunction[] | string; // if string, it's the full relative path file name from root to download. Else it's an array of ISampleFunction
 }
 
 ```
