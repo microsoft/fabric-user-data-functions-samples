@@ -13,7 +13,7 @@
  @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
  @app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
  @app.function("query_warehouse_and_write_to_csv")
- def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> fabric.functions.UdfResponse:
+ def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> str:
 
      whSqlConnection = myWarehouse.connect()
 
@@ -53,4 +53,4 @@
      csvFile.close()
      lhFileConnection.close()
 
-     return fabric.functions.UdfResponse(valJSON)
+     return valJSON
