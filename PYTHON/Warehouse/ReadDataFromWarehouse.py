@@ -2,7 +2,7 @@
 # Uncomment and fill in the Warehouse alias and Lakehouse alias you would like to use
 @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
 @app.function("query_warehouse")
-def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection) -> fabric.functions.UdfResponse:
+def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection) -> str:
 
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query
@@ -25,4 +25,4 @@ def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConn
     cursor.close()
     whSqlConnection.close()
 
-    return fabric.functions.UdfResponse(valJSON)
+    return valJSON
