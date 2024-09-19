@@ -4,7 +4,7 @@
 from sklearn.feature_extraction.text import CountVectorizer
 
 @app.function("vectorize_string")
-def vectorize_string(text: str)-> fabric.functions.UdfResponse:
+def vectorize_string(text: str)-> str:
     """
     Vectorizes a string using CountVectorizer from sklearn.
 
@@ -21,6 +21,6 @@ def vectorize_string(text: str)-> fabric.functions.UdfResponse:
         featurenames= " ,".join(str(x) for x in vectorizer.get_feature_names_out())
         print("Vectorized text:\n", vectorized_text.toarray())
         print("Feature names:\n",vectorizer.get_feature_names_out())
-        return fabric.functions.UdfResponse("vectorized_text: " + vectors + "\nfeature_names: " + featurenames)
+        return "vectorized_text: " + vectors + "\nfeature_names: " + featurenames
     except Exception as e:
-        return fabric.functions.UdfResponse("An error occurred during vectorization:", e)
+        return "An error occurred during vectorization: " + str(e)
