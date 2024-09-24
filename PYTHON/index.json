@@ -13,7 +13,7 @@
             "description": "User data function that can query data from Azure SQL database.",
             "detail": "Once a User data function has a connection to Azure SQL database, use this sample to query data from Azure SQL database.",
             "dateAdded": "2024-08-31T17:50:52.184Z",
-            "data": "ReadFromAzureSQL.py"
+            "data": "AzureSQLDB/ReadFromAzureSQL.py"
           }
         ]
       }
@@ -33,21 +33,21 @@
             "description": "You can use this function to read a CSV file into a Lakehouse",
             "detail": "You can use this function to read a CSV file into a Lakehouse",
              "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "ReadFromLakehouseFiles.py"
+            "data": "Lakehouse/ReadFromLakehouseFiles.py"
           },
           {
             "name": "Write CSV file to Lakehouse",
             "description": "You can use this function to write a CSV file into a Lakehouse",
             "detail": "You can use this function to write a CSV file into a Lakehouse",
             "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "WriteToLakehouse.py"
+            "data": "Lakehouse/WriteToLakehouse.py"
           },
           {
             "name": "Query Lakehouse table",
             "description": "You can use this function to query data from lakehouse table",
             "detail": "You can use this function to query data from lakehouse table",
             "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "ReadFromLakeHouseTables.py"
+            "data": "Lakehouse/ReadFromLakeHouseTables.py"
           }
         ]
       }
@@ -68,14 +68,14 @@
             "description": "Use this user data function to query data into a warehouse and write into a lakehouse.",
             "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse and write into a lakehouse.",
             "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "QueryWarehouseAndWriteToCsv.py"
+            "data": "Warehouse/QueryWarehouseAndWriteToCsv.py"
           },
           {
             "name": "Query data from a table",
             "description": "Query data from a table in a warehouse",
             "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
             "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Vectorize a String.py"
+            "data": "Warehouse/ReadDataFromWarehouse.py"
           }
         ]
       }
@@ -89,7 +89,7 @@
             "name": "Vectorize a string",
             "description": "Function to vectorize text data from string to being represented by numeric values.",
             "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "ReadDataFromWarehouse.py"
+            "data": "DataManipulation/VectorizeStrings.py"
           }
         ]
     }
