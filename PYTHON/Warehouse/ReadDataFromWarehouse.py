@@ -1,3 +1,7 @@
+import datetime
+import json
+
+# Query data from a table
 # Example of using a FabricItemInput to query a Warehouse and then write the data to a csv in a Lakehouse
 # Uncomment and fill in the Warehouse alias and Lakehouse alias you would like to use
 @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
@@ -10,18 +14,20 @@ def query_warehouse(myWarehouse: fabric.functions.FabricSqlConnection) -> str:
 
     cursor = whSqlConnection.cursor()
     cursor.execute(f"SELECT * FROM (VALUES ('John Smith',  31) , ('Kayla Jones', 33)) AS Employee(EmpName, DepID);")
-
+    
+    rows = [x for x in cursor]
+    columnNames = [x[0] for x in cursor.description]
     # Turn the rows into a json object
     values = []
     for row in rows:
-         item = {}
+        item = {}
         for prop, val in zip(columnNames, row):
-            if isinstance(val, (datetime, date)):
+            if isinstance(val, (datetime.date, datetime.datetime)):
                 val = val.isoformat()
             item[prop] = val
         values.append(item)
     
-    valJSON = json.dumps("values": values)
+    valJSON = json.dumps({"values": values})
     cursor.close()
     whSqlConnection.close()
 
