@@ -7,8 +7,6 @@
 #   import json
 #   import datetime  
 
-import datetime
-import json
 
 @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
 @app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
