@@ -1,4 +1,3 @@
-# Query data from a table
 # Example of using a FabricItemInput to query a Warehouse and then write the data to a csv in a Lakehouse
 # Uncomment and fill in the Warehouse alias and Lakehouse alias you would like to use
 
