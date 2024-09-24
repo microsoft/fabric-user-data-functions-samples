@@ -1,7 +1,9 @@
+# This sample vectorizes a string or text
 
-
-# This sample vectorizes a string or text 
-from sklearn.feature_extraction.text import CountVectorizer
+# Requirements.txt changes required:
+#     uncomment the line "scikit-learn"
+# Imports Statement changes required:
+#   from sklearn.feature_extraction.text import CountVectorizer
 
 @app.function("vectorize_string")
 def vectorize_string(text: str)-> str:
