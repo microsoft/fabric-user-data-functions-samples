@@ -28,7 +28,7 @@ NOTE: These are not complete runnable samples. They are snippets that are insert
 ## Contributing 
 
 You can contibute to more function samples here. Follow the structure 
-- Start with a comment block describing the code, indicating any changes in usings/packagereferences or imports/requirements.txt
+- Start with a comment block describing the code, indicating any changes in usings/packagereferences or imports/requirements.txt. Keep in mind that this code can be inserted from the Fabric Portal or from VSCode.
 - Fabric User data function code snippet
   
 ### DOTNET Samples
