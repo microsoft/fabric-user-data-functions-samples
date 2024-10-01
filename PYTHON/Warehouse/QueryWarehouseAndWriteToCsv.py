@@ -28,7 +28,7 @@ def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConn
         csvRows.append(','.join(map(str, row)))
 
     lhFileConnection = myLakehouse.connectToFiles()
-    csvFileName = "Employees" + str(round(datetime.now().timestamp())) + ".csv"
+    csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
     csvFile = lhFileConnection.get_file_client(csvFileName)
     csvFile.upload_data('\n'.join(csvRows), overwrite=True)
 
