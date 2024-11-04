@@ -19,4 +19,4 @@ def write_csv_file_in_lakehouse(mylakehouse: fabric.functions.FabricSqlConnectio
   
     csvFile.close()
     connection.close()
-    return resultsJSON
+    return "Success"
