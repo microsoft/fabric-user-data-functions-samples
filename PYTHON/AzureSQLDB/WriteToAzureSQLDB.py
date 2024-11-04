@@ -10,7 +10,7 @@ def write_to_azure_sql_db(sqlDB: udf.FabricSqlConnection):
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
 
     # Establish a connection to the SQL database
-    connection = sqlDB.connect(connection_string)
+    connection = sqlDB.connect()
     cursor = connection.cursor()
   
     # Create the table if it doesn't exist
