@@ -10,7 +10,7 @@ def read_from_azure_sql_db(sqlDB: udf.FabricSqlConnection)->str:
       query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"
   
       # Establish a connection to the SQL database
-      connection = sqlDB.connect(connection_string)
+      connection = sqlDB.connect()
       cursor = connection.cursor()
   
       # Execute the query
