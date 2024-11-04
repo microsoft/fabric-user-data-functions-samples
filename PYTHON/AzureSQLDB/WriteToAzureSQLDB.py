@@ -1,10 +1,11 @@
 # This sample allows you to read data from Azure SQL database 
 # Complete these steps before testing this funtion 
 #   1. Select Manage connections to connect to Azure SQL database 
+#   2. Copy the Alias name and replace it in line 6 
 
-@app.connection("sqlDB")
+@app.connection("sqlDB",alias="<alias for azure sql database>")
 @app.function("write_to_azure_sql_db")
-def write_to_azure_sql_db():
+def write_to_azure_sql_db(sqlDB: udf.FabricSqlConnection):
     # Replace with the data you want to insert
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
 
