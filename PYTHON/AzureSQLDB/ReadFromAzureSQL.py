@@ -5,7 +5,7 @@
 
 @app.connection("sqlDB")
 @app.function("readfromazuresqldatabase")
-def readfromazuresqldatabase(connection_string)->str:
+def readfromazuresqldatabase()->str:
     # Replace with the query you want to run
       query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"
   
