@@ -13,9 +13,9 @@ def manipulate_data(data: dict)-> str:
     df['AgeGroup'] = df['Age'].apply(lambda x: 'Adult' if x >= 18 else 'Minor')
     
     # Example: Filter rows where 'Age' is greater than 30
-    df_filtered = df[df["Age"] > 30]
+    # df_filtered = df[df["Age"] > 30]
 
     # Example: Group by 'AgeGroup' and calculate the mean age
     df_grouped = df.groupby("AgeGroup")["Age"].mean().reset_index()
-    resultsJSON = json.dumps({"values": df_grouped})          
+    resultsJSON = json.dumps({"values": df_grouped.to_json(orient='records')})          
     return resultsJSON
