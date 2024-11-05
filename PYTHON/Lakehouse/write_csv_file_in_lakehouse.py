@@ -1,22 +1,29 @@
 
-# This sample writes a CSV file from a lakehouse 
-
+# This sample writes a CSV file from a lakehouse  using pandas 
+# Complete these steps before testing this funtion 
+#   1. Select Manage connections to connect to Lakehouse. 
+#   2. Select Library Management and add pandas library 
 
 import pandas as pd 
 
+#Replace the alias "<My Lakehouse alias>" with your connection alias.
 @app.fabric_item_input(argName="mylakehouse", alias="<My Lakehouse alias>")
-@app.function("write_csv_file_from_lakehouse")
-def write_csv_file_in_lakehouse(mylakehouse: fabric.functions.FabricSqlConnection)-> str:
+@app.function("write_csv_file_in_lakehouse")
+def write_csv_file_in_lakehouse(mylakehouse: udf.FabricSqlConnection)-> str:
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33)]
-    connection = mylakehouse.connectToFiles()
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
-    csvFile = connection.get_file_client(csvFileName)
+       
     # Convert the data to a DataFrame
     df = pd.DataFrame(data, columns=['ID','EmpName', 'DepID'])
     # Write the DataFrame to a CSV file
-    df.to_csv(csvFile, index=False)
-    # csvFile.upload_data('\n'.join(csvRows), overwrite=True)
-  
+    df.to_csv(csvFileName, index=False)
+       
+    # Upload the CSV file to the Lakehouse
+    connection = mylakehouse.connectToFiles()
+    csvFile = connection.get_file_client(csvFileName)  
+    with open(csvFileName, 'r') as file:
+        csvFile.upload_data(file.read(), overwrite=True)
+
     csvFile.close()
     connection.close()
-    return "Success"
+    return f"File {csvFileName} was written to the Lakehouse. Open the Lakehouse in https://app.fabric.microsoft.com to view the files"
