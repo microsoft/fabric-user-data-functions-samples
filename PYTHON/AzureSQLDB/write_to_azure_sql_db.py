@@ -1,4 +1,4 @@
-# This sample allows you to read data from Azure SQL database 
+# This sample allows you to write data from Azure SQL database 
 # Complete these steps before testing this funtion 
 #   1. Select Manage connections to connect to Azure SQL database 
 #   2. Copy the Alias name and replace it in line 6 
