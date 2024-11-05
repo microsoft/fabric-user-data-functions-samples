@@ -15,13 +15,6 @@
             "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
             "dateAdded": "2024-11-05T00:00:00Z",
             "data": "Warehouse/query_data_from_warehouse.py"
-          },
-          {
-            "name": "Query data from a table",
-            "description": "Query data from a table in a warehouse",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
-            "dateAdded": "2024-11-05T00:00:00Z",
-            "data": "Warehouse/ReadDataFromWarehouse.py"
           }
         ]
       }
