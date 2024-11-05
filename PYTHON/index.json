@@ -47,7 +47,7 @@
             "description": "This sample reads data from a table in a lakehouse.",
             "dateAdded": "2024-11-05T00:00:00Z",
             "data": "Lakehouse/query_data_from_tables.py"
-          },
+          }
       }
     ]
   },
