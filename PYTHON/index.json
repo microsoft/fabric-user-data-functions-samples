@@ -1,26 +1,26 @@
 [ 
   {
     "name": "Warehouse",
-    "description": "User data functions to work with Warehouse",
+    "description": "Sample functions to read from and write data to a warehouse in Fabric.",
     "data": [
       {
-        "name": "Write data into a warehouse",
-        "description": "Use this user data function to insert data into a warehouse table",
-        "detail": "Add a warehouse connection to the user data function and then use the function to insert data into a warehouse table",
-        "dateAdded": "2024-09-03T19:35:01Z",
+        "name": "export data from warehouse into a lakehouse",
+        "description": "Use this user data function that write data from a warehouse into csv file and saves it in a lakehouse",
+        "detail": "Add a warehouse and lakehouse connection. Then use this sample function that write data from a warehouse into csv file and saves it in a lakehouse",
+        "dateAdded": "2024-11-05T00:00:00Z",
         "data": [
           {
             "name": "Query data from a warehouse",
-            "description": "Use this user data function to query data into a warehouse and write into a lakehouse.",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse and write into a lakehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Warehouse/QueryWarehouseAndWriteToCsv.py"
+            "description": "Use this user data function to query data into a warehouse.",
+            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
+            "dateAdded": "2024-11-05T00:00:00Z",
+            "data": "Warehouse/query_data_from_warehouse.py"
           },
           {
             "name": "Query data from a table",
             "description": "Query data from a table in a warehouse",
             "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
+            "dateAdded": "2024-11-05T00:00:00Z",
             "data": "Warehouse/ReadDataFromWarehouse.py"
           }
         ]
@@ -34,7 +34,7 @@
           {
             "name": "Vectorize a string",
             "description": "Function to vectorize text data from string to being represented by numeric values.",
-            "dateAdded": "2024-09-03T19:35:01Z",
+            "dateAdded": "2024-11-05T00:00:00Z",
             "data": "DataManipulation/VectorizeStrings.py"
           }
         ]
