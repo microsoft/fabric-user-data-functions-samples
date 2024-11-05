@@ -8,8 +8,9 @@
         "description": "Use this user data function that write data from a warehouse into csv file and saves it in a lakehouse",
         "detail": "Add a warehouse and lakehouse connection. Then use this sample function that write data from a warehouse into csv file and saves it in a lakehouse",
         "dateAdded": "2024-11-05T00:00:00Z",
-        "data": [
-          {
+        "data": "Warehouse/export_warehouse_data_to_lakehouse.py"
+      },
+        {
             "name": "Query data from a warehouse",
             "description": "Use this user data function to query data into a warehouse.",
             "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
@@ -17,8 +18,6 @@
             "data": "Warehouse/query_data_from_warehouse.py"
           }
         ]
-      }
-    ]
   },
   {
     "name": "Lakehouse",
