@@ -53,6 +53,32 @@
     ]
   },
   {
+    "name": "Azure SQL Database",
+    "description": "Sample functions to work with Azure SQL database in Fabric.",
+    "data": [
+      {
+        "name": "export data from warehouse into a lakehouse",
+        "description": "Use this user data function that write data from a warehouse into csv file and saves it in a lakehouse",
+        "detail": "Add a warehouse and lakehouse connection. Then use this sample function that write data from a warehouse into csv file and saves it in a lakehouse",
+        "dateAdded": "2024-11-05T00:00:00Z",
+        "data": [
+          {
+            "name": "Write data into a table in Azure SQL database",
+            "description": "This sample allows you to read data from Azure SQL database.",
+            "dateAdded": "2024-11-05T00:00:00Z",
+            "data": "AzureSQLDB/write_to_azure_sql_db.py"
+          },
+          {
+            "name": "Read data from a table in Azure SQL database",
+            "description": "This sample allows you to read data from Azure SQL database.",
+            "dateAdded": "2024-11-05T00:00:00Z",
+            "data": "AzureSQLDB/read_from_azure_sql_db.py"
+          }     
+        ]
+      }
+    ]
+  },
+  {
         "name": "Data Manipulation",
         "description": "User data functions that can be use to transform data.",
         "data": [
