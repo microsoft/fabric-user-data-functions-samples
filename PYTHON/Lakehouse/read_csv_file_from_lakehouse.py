@@ -9,7 +9,7 @@ import pandas as pd
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
 @app.fabric_item_input(argName="mylakehouse", alias="<My Lakehouse alias>")
 @app.function("read_csv_from_lakehouse")
-def read_csv_from_lakehouse(myLakehouse: udf.FabricLakehouseClient, csvFileName: str) -> str:
+def read_csv_from_lakehouse(mylakehouse: udf.FabricLakehouseClient, csvFileName: str) -> str:
 
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFiles()   
@@ -23,11 +23,13 @@ def read_csv_from_lakehouse(myLakehouse: udf.FabricLakehouseClient, csvFileName:
     from io import StringIO
     df = pd.read_csv(StringIO(csvData.decode('utf-8')))
 
-    # Display the DataFrame in debug console
-    print(df)
-
+    # Display the DataFrame    
+    result="" 
+    for index, row in df.iterrows():
+        result=result + "["+ (",".join([str(item) for item in row]))+"]"
+    
     # Close the connection
     csvFile.close()
     connection.close()
 
-    return "CSV file read successfully."
+    return f"CSV file read successfully.{result}"
