@@ -4,7 +4,7 @@
 
 @app.function("")
 # replace <function-name> with a new function name 
-def <function-name>(name: str) -> str:
+def <function-name>(text: str) -> str:
     # use logging.info() to log any information
     logging.info('Python UDF trigger function processed a request.')
 
