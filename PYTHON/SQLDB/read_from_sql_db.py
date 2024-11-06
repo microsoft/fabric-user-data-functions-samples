@@ -3,9 +3,9 @@
 #   1. Select Manage connections to connect to Azure SQL database 
 #   2. Copy the Alias name and replace it below
 
-@app.connection("sqlDB",alias="<alias for azure sql database>")
-@app.function("read_from_azure_sql_db")
-def read_from_azure_sql_db(sqlDB: udf.FabricSqlConnection)->str:
+@app.connection("sqlDB",alias="<alias for sql database>")
+@app.function("read_from_sql_db")
+def read_from_sql_db(sqlDB: udf.FabricSqlConnection)->str:
     # Replace with the query you want to run
       query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"
   
