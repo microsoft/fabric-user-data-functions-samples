@@ -27,7 +27,7 @@
             "name":"Write csv file into a lakehouse",
             "description":"TThis sample writes a CSV file into a lakehouse  using pandas.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"Lakehouse/manipulate_data_with_pandas.py"
+            "data":"Lakehouse/write_csv_file_in_lakehouse.py"
          },
          {
             "name":"Read csv file from lakehouse",
