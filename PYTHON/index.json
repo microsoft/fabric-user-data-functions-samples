@@ -44,20 +44,20 @@
       ]
    },
    {
-      "name":"Azure SQL Database",
+      "name":"SQL Database",
       "description":"Sample functions to work with Azure SQL database in Fabric.",
       "data":[
          {
             "name":"Write data into a table in Azure SQL database",
             "description":"This sample allows you to read data from Azure SQL database.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"AzureSQLDB/write_to_azure_sql_db.py"
+            "data":"SQLDB/write_to_azure_sql_db.py"
          },
          {
             "name":"Read data from a table in Azure SQL database",
             "description":"This sample allows you to read data from Azure SQL database.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"AzureSQLDB/read_from_azure_sql_db.py"
+            "data":"SQLDB/read_from_azure_sql_db.py"
          }
       ]
    },
