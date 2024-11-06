@@ -51,13 +51,13 @@
             "name":"Write data into a table in SQL database",
             "description":"This sample allows you to read data from SQL database.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"SQLDB/write_to_azure_sql_db.py"
+            "data":"SQLDB/write_to_sql_db.py"
          },
          {
             "name":"Read data from a table in SQL database",
             "description":"This sample allows you to read data from SQL database.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"SQLDB/read_from_azure_sql_db.py"
+            "data":"SQLDB/read_from_sql_db.py"
          }
       ]
    },
