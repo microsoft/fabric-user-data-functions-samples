@@ -1,4 +1,4 @@
-# This sample allows you to read data from Azure SQL database 
+# This sample allows you to export data from warehouse and write it to a lakehouse
 # Complete these steps before testing this funtion 
 #   1. Select Manage connections to connect to Warehouse and the Lakehouse you want to use.  
 #   2. Copy the Alias name and replace below
