@@ -1,8 +1,9 @@
-# This is an empty function definition
+# This is an empty function definition which takes a text string input and returns a string output
 # Provide input and output data types. <link to public doc on data types supported>
 # Example usage as shown below
 
-@app.function("")
+# replace <function-name> with a new function name 
+@app.function("<function-name>")
 # replace <function-name> with a new function name 
 def <function-name>(text: str) -> str:
     # use logging.info() to log any information
