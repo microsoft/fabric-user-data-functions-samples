@@ -4,7 +4,7 @@
       "description":"Sample functions to read from and write data to a warehouse in Fabric.",
       "data":[
          {
-            "name":"export data from warehouse into a lakehouse",
+            "name":"Export data from warehouse into a lakehouse",
             "description":"Use this user data function that writes data from a warehouse into a csv file and saves it in a lakehouse",
             "detail":"Add a warehouse and lakehouse connection. Then use this sample function that writes data from a warehouse into csv file and saves it in a lakehouse",
             "dateAdded":"2024-11-05T00:00:00Z",
@@ -36,7 +36,7 @@
             "data":"Lakehouse/read_csv_file_from_lakehouse.py"
          },
          {
-            "name":"query data from lakehouse tables",
+            "name":"Query data from lakehouse tables",
             "description":"This sample reads data from a table in a lakehouse.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"Lakehouse/query_data_from_tables.py"
@@ -72,22 +72,10 @@
             "data":"DataManipulation/manipulate_data_with_pandas.py"
          },
          {
-            "name":"Vectorize a string",
-            "description":"Function to vectorize text data from string to being represented by numeric values.",
-            "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"DataManipulation/vectorize_strings.py"
-         },
-         {
             "name":"Transform data with numpy library",
             "description":"This samples converts the input 2D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean of each column.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"DataManipulation/transform_data_with_numpy.py"
-         },
-         {
-            "name":"Analyze sentiment of given text",
-            "description":"This sample allows you to calculate the sentiment of given text that is passed to the function as input.",
-            "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"DataManipulation/sentiment_analysis.py"
          }
       ]
    }
