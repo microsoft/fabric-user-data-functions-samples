@@ -9,7 +9,7 @@ import pandas as pd
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
 @app.fabric_item_input(argName="mylakehouse", alias="<My Lakehouse alias>")
 @app.function("read_csv_from_lakehouse")
-def read_csv_from_lakehouse(mylakehouse: udf.FabricLakehouseClient, csvFileName: str) -> str:
+def read_csv_from_lakehouse(mylakehouse: fabric.functions.FabricLakehouseClient, csvFileName: str) -> str:
 
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFiles()   
