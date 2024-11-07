@@ -11,7 +11,7 @@
         "description": "Validate a JSON Schema",
         "detail": "validate a JSON Schema",
         "dateAdded": "2024-08-31T17:50:52.184Z",
-        "data": "ValidateJsonSchema.cs"
+        "data": "ValidateJSONSchema.cs"
     },
     {
         "name": "Log User Invocation",
