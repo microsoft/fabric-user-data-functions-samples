@@ -63,7 +63,7 @@
    },
    {
       "name":"Data Manipulation",
-      "description":"User data functions that can be use to transform data.",
+      "description":"Sample functions to transform data using pandas,numpy.",
       "data":[
          {
             "name":"Manipulate data with pandas library",
