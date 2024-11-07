@@ -18,7 +18,6 @@ export interface ISampleFunction {
     tag?: string; // additional tag to filter on
     data: ISampleFunction[] | string; // if string, it's the full relative path file name from root to download. Else it's an array of ISampleFunction
 }
-
 ```
 
 Additional filtering, sorting by user may be added in the future with tag, dateAdded
