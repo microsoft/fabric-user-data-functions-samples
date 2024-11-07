@@ -5,7 +5,7 @@
       "data":[
          {
             "name":"export data from warehouse into a lakehouse",
-            "description":"Use this user data function that writes data from a warehouse into csv file and saves it in a lakehouse",
+            "description":"Use this user data function that writes data from a warehouse into a csv file and saves it in a lakehouse",
             "detail":"Add a warehouse and lakehouse connection. Then use this sample function that writes data from a warehouse into csv file and saves it in a lakehouse",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"Warehouse/export_warehouse_data_to_lakehouse.py"
