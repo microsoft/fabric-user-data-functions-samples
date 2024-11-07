@@ -9,7 +9,7 @@ import pandas as pd
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
 @app.fabric_item_input(argName="mylakehouse", alias="<My Lakehouse alias>")
 @app.function("write_csv_file_in_lakehouse")
-def write_csv_file_in_lakehouse(mylakehouse: udf.FabricSqlConnection)-> str:
+def write_csv_file_in_lakehouse(mylakehouse: fabric.functions.FabricSqlConnection)-> str:
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33)]
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
        
