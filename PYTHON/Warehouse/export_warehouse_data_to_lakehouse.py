@@ -1,17 +1,15 @@
-# Add a Connection to warehouse and lakehouse to your user data function 
-# Example of using a FabricItemInput to query a Warehouse 
-#  and then write the data to a csv in a Lakehouse
-# Replace alias for the warehouse and lakehouse 
- 
-# Imports Statement changes required:
-#   import json
-#   import datetime  
+# This sample allows you to export data from warehouse and write it to a lakehouse
+# Complete these steps before testing this funtion 
+#   1. Select Manage connections to connect to Warehouse and the Lakehouse you want to use.  
+#   2. Copy the Alias name and replace below
 
+import json
+import datetime  
 
 @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
 @app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
-@app.function("query_warehouse_and_write_to_csv")
-def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> str:
+@app.function("export_warehouse_data_to_lakehouse")
+def export_warehouse_data_to_lakehouse(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> str:
 
     whSqlConnection = myWarehouse.connect()
 

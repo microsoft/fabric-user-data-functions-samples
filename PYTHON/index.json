@@ -1,42 +1,82 @@
-[ 
-  {
-    "name": "Warehouse",
-    "description": "User data functions to work with Warehouse",
-    "data": [
-      {
-        "name": "Write data into a warehouse",
-        "description": "Use this user data function to insert data into a warehouse table",
-        "detail": "Add a warehouse connection to the user data function and then use the function to insert data into a warehouse table",
-        "dateAdded": "2024-09-03T19:35:01Z",
-        "data": [
-          {
-            "name": "Query data from a warehouse",
-            "description": "Use this user data function to query data into a warehouse and write into a lakehouse.",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse and write into a lakehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Warehouse/QueryWarehouseAndWriteToCsv.py"
-          },
-          {
-            "name": "Query data from a table",
-            "description": "Query data from a table in a warehouse",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Warehouse/ReadDataFromWarehouse.py"
-          }
-        ]
-      }
-    ]
-  },
-  {
-        "name": "Data Manipulation",
-        "description": "User data functions that can be use to transform data.",
-        "data": [
-          {
-            "name": "Vectorize a string",
-            "description": "Function to vectorize text data from string to being represented by numeric values.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "DataManipulation/VectorizeStrings.py"
-          }
-        ]
-    }
+[
+   {
+      "name":"Warehouse",
+      "description":"Sample functions to read from and write data to a warehouse in Fabric.",
+      "data":[
+         {
+            "name":"Export data from warehouse into a lakehouse",
+            "description":"Use this user data function that writes data from a warehouse into a csv file and saves it in a lakehouse",
+            "detail":"Add a warehouse and lakehouse connection. Then use this sample function that writes data from a warehouse into csv file and saves it in a lakehouse",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Warehouse/export_warehouse_data_to_lakehouse.py"
+         },
+         {
+            "name":"Query data from a warehouse",
+            "description":"Use this user data function to query data into a warehouse.",
+            "detail":"Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Warehouse/query_data_from_warehouse.py"
+         }
+      ]
+   },
+   {
+      "name":"Lakehouse",
+      "description":"Sample functions to work with tables and files within a lakehouse in Fabric.",
+      "data":[
+         {
+            "name":"Write csv file into a lakehouse",
+            "description":"TThis sample writes a CSV file into a lakehouse  using pandas.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/write_csv_file_in_lakehouse.py"
+         },
+         {
+            "name":"Read csv file from lakehouse",
+            "description":"This sample reads a CSV file from a lakehouse  using pandas. Function takes file name as an input parameter.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/read_csv_file_from_lakehouse.py"
+         },
+         {
+            "name":"Query data from lakehouse tables",
+            "description":"This sample reads data from a table in a lakehouse.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/query_data_from_tables.py"
+         }
+      ]
+   },
+   {
+      "name":"SQL Database",
+      "description":"Sample functions to work with SQL database.",
+      "data":[
+         {
+            "name":"Write data into a table in SQL database",
+            "description":"This sample allows you to read data from SQL database.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"SQLDB/write_to_sql_db.py"
+         },
+         {
+            "name":"Read data from a table in SQL database",
+            "description":"This sample allows you to read data from SQL database.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"SQLDB/read_from_sql_db.py"
+         }
+      ]
+   },
+   {
+      "name":"Data Manipulation",
+      "description":"Sample functions to transform data using pandas,numpy.",
+      "data":[
+         {
+            "name":"Manipulate data with pandas library",
+            "description":"This sample uses pandas to manipulate a given dataset to group people by age.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"DataManipulation/manipulate_data_with_pandas.py"
+         },
+         {
+            "name":"Transform data with numpy library",
+            "description":"This samples converts the input 2D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean of each column.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"DataManipulation/transform_data_with_numpy.py"
+         }
+      ]
+   }
 ]

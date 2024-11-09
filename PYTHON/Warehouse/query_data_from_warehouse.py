@@ -6,13 +6,11 @@
 #    import json
 
 @app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
-@app.function("query_warehouse")
-def query_warehouse(myWarehouse: fabric.functions.FabricSqlConnection) -> str:
+@app.function("query_data_from_warehouse")
+def query_data_from_warehouse(myWarehouse: fabric.functions.FabricSqlConnection) -> str:
 
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query
-    # https://learn.microsoft.com/en-us/sql/connect/python/pyodbc/step-3-proof-of-concept-connecting-to-sql-using-pyodbc?view=sql-server-ver16#execute-a-query
-
     cursor = whSqlConnection.cursor()
     cursor.execute(f"SELECT * FROM (VALUES ('John Smith',  31) , ('Kayla Jones', 33)) AS Employee(EmpName, DepID);")
     
