@@ -1,7 +1,7 @@
-# This sample allows you to write data from Azure SQL database 
-# Complete these steps before testing this funtion 
-#   1. Select Manage connections to connect to Azure SQL database 
-#   2. Copy the Alias name and replace it in line 6 
+# This sample allows you to write data into a Fabric SQL Database 
+# Complete these steps before testing this function: 
+#   1. Select 'Manage connections' to connect to a Fabric SQL Database 
+#   2. Copy the Alias name and replace it inside the @app.fabric_item_input() decorator. 
 
 @app.fabric_item_input("sqlDB",alias="<alias for sql database>")
 @app.function("write_to_sql_db")
@@ -28,11 +28,9 @@ def write_to_sql_db(sqlDB: fabric.functions.FabricSqlConnection):
     cursor.executemany(insert_query, data)
 
     # Commit the transaction
-    conn.commit()
+    connection.commit()
 
-    # Close the connection
-    conn.close()
     # Close the connection
     cursor.close()
     connection.close()               
-    return "Employee table was created and data was added to this table".
+    return "Employee table was created and data was added to this table"
