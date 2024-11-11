@@ -23,9 +23,8 @@ def read_from_sql_db(sqlDB: fabric.functions.FabricSqlConnection)->str:
 
     # Close the connection
     cursor.close()
-    connection.close()  
-    resultsJSON = json.dumps({"values": results})          
-    
-    return resultsJSON
+    connection.close()
+        
+    return results
 
 
