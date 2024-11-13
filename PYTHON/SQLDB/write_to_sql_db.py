@@ -3,7 +3,7 @@
 #   1. Select 'Manage connections' to connect to a Fabric SQL Database 
 #   2. Copy the Alias name and replace it inside the @app.fabric_item_input() decorator. 
 
-@app.fabric_item_input("sqlDB",alias="<alias for sql database>")
+@app.fabric_item_input(argName="sqlDB",alias="<alias for sql database>")
 @app.function("write_to_sql_db")
 def write_to_sql_db(sqlDB: fabric.functions.FabricSqlConnection):
     # Replace with the data you want to insert
