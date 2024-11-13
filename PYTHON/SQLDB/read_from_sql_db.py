@@ -3,7 +3,7 @@
 #   1. Select Manage connections to connect to a Fabric SQL Database
 #   2. Copy the Alias name and replace it below inside the @app.fabric_item_input() decorator.
 
-@app.fabric_item_input("sqlDB", alias="<alias for sql database>")
+@app.fabric_item_input(argName="sqlDB", alias="<alias for sql database>")
 @app.function("read_from_sql_db")
 def read_from_sql_db(sqlDB: fabric.functions.FabricSqlConnection)->str:
     # Replace with the query you want to run
