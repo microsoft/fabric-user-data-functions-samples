@@ -3,7 +3,8 @@
 # 1. Select library management and add pandas library
 
 import pandas as pd 
-@app.function("manipulate_data")
+
+@udf.function()
 def manipulate_data(data: dict)-> str:
     items= data["data"]
     # Convert the data dictionary to a DataFrame
