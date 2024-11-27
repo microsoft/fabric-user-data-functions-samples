@@ -11,6 +11,7 @@
 # }
 
 import pandas as pd 
+import json 
 
 @udf.function()
 def manipulate_data(data: dict)-> str:
