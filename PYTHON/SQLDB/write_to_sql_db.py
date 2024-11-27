@@ -1,11 +1,11 @@
 # This sample allows you to write data into a Fabric SQL Database 
 # Complete these steps before testing this function: 
 #   1. Select 'Manage connections' to connect to a Fabric SQL Database 
-#   2. Copy the Alias name and replace it inside the @app.fabric_item_input() decorator. 
+#   2. Copy the Alias name and replace it inside the @udf.connection() decorator. 
 
-@app.fabric_item_input(argName="sqlDB",alias="<alias for sql database>")
-@app.function("write_to_sql_db")
-def write_to_sql_db(sqlDB: fabric.functions.FabricSqlConnection):
+@udf.connection(argName="sqlDB",alias="<alias for sql database>")
+@udf.function()
+def write_to_sql_db(sqlDB: fn.FabricSqlConnection):
     # Replace with the data you want to insert
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
 
