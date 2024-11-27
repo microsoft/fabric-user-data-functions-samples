@@ -6,10 +6,10 @@
 import json
 import datetime  
 
-@app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
-@app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
-@app.function("export_warehouse_data_to_lakehouse")
-def export_warehouse_data_to_lakehouse(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> str:
+@udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
+@udf.function()
+def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLakehouse: fn.FabricLakehouseClient) -> str:
 
     whSqlConnection = myWarehouse.connect()
 
