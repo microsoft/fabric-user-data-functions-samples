@@ -1,12 +1,14 @@
 # This sample uses pandas to manipulate data for a given age group 
 # Complete these steps before testing this function
 # 1. Select library management and add pandas library
-# Pass input 'data' in this format below 
+# Pass input 'data' as a dictionary, an example to use for this sample
 #{
+#  "data": {
 #    "name": "John",
 #    "age": 22,
-#    "gender": "male",
-#}
+#    "gender": "male"
+#  }
+# }
 
 import pandas as pd 
 
