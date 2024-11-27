@@ -5,9 +5,9 @@
 #    import datetime
 #    import json
 
-@app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
-@app.function("query_data_from_warehouse")
-def query_data_from_warehouse(myWarehouse: fabric.functions.FabricSqlConnection) -> str:
+@udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
+@udf.function()
+def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> str:
 
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query
