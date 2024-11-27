@@ -5,9 +5,9 @@
 import datetime
 import json
 
-@app.fabric_item_input(argName="mylakehouse", alias="<My Lakehouse alias>")
-@app.function("query_data_from_tables")
-def query_data_from_tables(mylakehouse: fabric.functions.FabricSqlConnection) -> str:
+@udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
+@udf.function()
+def query_data_from_tables(mylakehouse: fn.FabricSqlConnection) -> str:
 
     connection = mylakehouse.connect()
     # Use connection to execute a query
