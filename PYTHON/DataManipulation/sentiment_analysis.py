@@ -4,7 +4,7 @@
 
 from textblob import TextBlob
 
-@app.function("analyze_sentiment")
+@udf.function()
 def analyze_sentiment(text: str) -> str:
     sentimentscore= TextBlob(text).sentiment.polarity
     sentiment= "N/A"
