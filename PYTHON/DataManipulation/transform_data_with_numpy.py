@@ -4,7 +4,7 @@
 
 import numpy as np
 
-@app.function("transform_data")
+@udf.function()
 def transform_data(data: dict )-> str:
     # Extract the items from the input data
     items = data['data']['items']
