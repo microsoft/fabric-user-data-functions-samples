@@ -1,7 +1,7 @@
+
 # This sample reads data from a table in a lakehouse 
 # Complete these steps before testing this function
 # 1. Select Manage connections and add a connection to a Lakehouse 
-
 
 import json
 import datetime
