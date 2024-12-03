@@ -4,12 +4,13 @@
 
 
 import json
+import datetime
 
 @udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
 @udf.function()
-def query_data_from_tables(mylakehouse: fn.FabricSqlConnection) -> str:
+def query_data_from_tables(mylakehouse: fn.FabricLakehouseClient) -> str:
 
-    connection = mylakehouse.connect()
+    connection = mylakehouse.connectToSql()
     # Use connection to execute a query
     cursor = connection.cursor()
     cursor.execute(f"SELECT * FROM (VALUES ('John Smith',  31) , ('Kayla Jones', 33)) AS Employee(EmpName, DepID);")
