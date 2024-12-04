@@ -5,7 +5,7 @@
 
 @udf.connection(argName="sqlDB",alias="<alias for sql database>")
 @udf.function()
-def write_to_sql_db(sqlDB: fn.FabricSqlConnection):
+def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
     # Replace with the data you want to insert
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
 
