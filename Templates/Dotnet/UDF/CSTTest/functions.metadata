@@ -1,0 +1,78 @@
+[
+  {
+    "name": "HelloFabric",
+    "scriptFile": "CSTTest.dll",
+    "entryPoint": "hellofabric.FabricFunctions.HelloFabric",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "data",
+        "direction": "In",
+        "authLevel": "Anonymous",
+        "fabricBinding": true,
+        "type": "httpTrigger",
+        "methods": [
+          "post"
+        ]
+      },
+      {
+        "name": "$return",
+        "direction": "Out",
+        "type": "http",
+        "fabricBinding": true
+      }
+    ],
+    "fabricProperties": {
+      "fabricFunctionParameters": [
+        {
+          "dataType": "String",
+          "name": "name"
+        }
+      ],
+      "fabricFunctionReturnType": "String"
+    }
+  },
+  {
+    "name": "sum",
+    "scriptFile": "CSTTest.dll",
+    "entryPoint": "hellofabric.FabricFunctions.sum",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "data",
+        "direction": "In",
+        "authLevel": "Anonymous",
+        "fabricBinding": true,
+        "type": "httpTrigger",
+        "methods": [
+          "post"
+        ]
+      },
+      {
+        "name": "$return",
+        "direction": "Out",
+        "type": "http",
+        "fabricBinding": true
+      }
+    ],
+    "fabricProperties": {
+      "fabricFunctionParameters": [
+        {
+          "dataType": "Int32",
+          "name": "a"
+        },
+        {
+          "dataType": "Int32",
+          "name": "b"
+        }
+      ],
+      "fabricFunctionReturnType": "Int32"
+    }
+  }
+]
