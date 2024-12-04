@@ -15,16 +15,17 @@ def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
   
     # Create the table if it doesn't exist
     create_table_query = """
-    CREATE TABLE IF NOT EXISTS Employee (
-        EmpID INT PRIMARY KEY,
-        EmpName NVARCHAR(50),
-        DepID INT
-    );
+        IF OBJECT_ID(N'dbo.Employee', N'U') IS NULL
+        CREATE TABLE dbo.Employee (
+            EmpID INT PRIMARY KEY,
+            EmpName nvarchar(50),
+            DepID INT
+            );
     """
     cursor.execute(create_table_query)
-
+ 
     # Insert data into the table
-    insert_query = "INSERT INTO Employee (EmpName, DepID) VALUES (?, ?);"
+    insert_query = "INSERT INTO Employee (EmpID, EmpName, DepID) VALUES (?, ?, ?);"
     cursor.executemany(insert_query, data)
 
     # Commit the transaction
