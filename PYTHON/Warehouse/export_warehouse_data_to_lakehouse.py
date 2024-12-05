@@ -9,7 +9,7 @@ import datetime
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
-def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLakehouse: fn.FabricLakehouseClient) -> str:
+def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLakehouse: fn.FabricLakehouseClient) -> dict:
 
     whSqlConnection = myWarehouse.connect()
 
@@ -41,12 +41,10 @@ def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLa
             item[prop] = val
         values.append(item)
 
-    valJSON = json.dumps({"message": "File {} is written to {} Lakehouse. You can delete it from the Lakehouse after trying this sample.".format(csvFileName, myLakehouse.alias_name),
-                        "values": values})
-
     cursor.close()
     whSqlConnection.close()
     csvFile.close()
     lhFileConnection.close()
 
-    return valJSON
+    return {"message": "File {} is written to {} Lakehouse. You can delete it from the Lakehouse after trying this sample.".format(csvFileName, myLakehouse.alias_name),
+                        "values": values}
