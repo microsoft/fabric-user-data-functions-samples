@@ -5,7 +5,7 @@
 
 @udf.connection(argName="sqlDB",alias="<alias for sql database>")
 @udf.function()
-def read_from_sql_db(sqlDB: fn.FabricSqlConnection)->str:
+def read_from_sql_db(sqlDB: fn.FabricSqlConnection)-> str:
     # Replace with the query you want to run
     query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"
 

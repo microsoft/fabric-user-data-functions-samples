@@ -6,7 +6,7 @@
 
 import pandas as pd 
 
-#Replace the alias "<My Lakehouse alias>" with your connection alias.
+# Replace the alias "<My Lakehouse alias>" with your connection alias.
 @udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
 @udf.function()
 def read_csv_from_lakehouse(mylakehouse: fn.FabricLakehouseClient, csvFileName: str) -> str:

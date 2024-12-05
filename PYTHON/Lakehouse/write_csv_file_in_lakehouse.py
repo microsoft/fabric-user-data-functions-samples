@@ -5,24 +5,25 @@
 #   2. Select Library Management and add pandas library 
 
 import pandas as pd 
+import datetime
 
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
 @udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
-@app.function()
-def write_csv_file_in_lakehouse(mylakehouse: fn.FabricSqlConnection)-> str:
+@udf.function()
+def write_csv_file_in_lakehouse(mylakehouse: fn.FabricLakehouseClient)-> str:
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33)]
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
        
     # Convert the data to a DataFrame
     df = pd.DataFrame(data, columns=['ID','EmpName', 'DepID'])
     # Write the DataFrame to a CSV file
-    df.to_csv(csvFileName, index=False)
+    csv_string = df.to_csv(index=False)
        
     # Upload the CSV file to the Lakehouse
     connection = mylakehouse.connectToFiles()
     csvFile = connection.get_file_client(csvFileName)  
-    with open(csvFileName, 'r') as file:
-        csvFile.upload_data(file.read(), overwrite=True)
+    
+    csvFile.upload_data(csv_string, overwrite=True)
 
     csvFile.close()
     connection.close()

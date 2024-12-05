@@ -2,8 +2,7 @@
 # Provide input and output data types. <link to public doc on data types supported>
 # Example usage as shown below
 
-# replace <function-name> with a new function name 
-@app.function("<function-name>")
+@udf.function()
 # replace <function-name> with a new function name 
 def <function-name>(text: str) -> str:
     # use logging.info() to log any information
