@@ -10,9 +10,9 @@ import pandas as pd
 import datetime
 
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
-@udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()
-def write_csv_file_in_lakehouse(mylakehouse: fn.FabricLakehouseClient, employees: list)-> str:
+def write_csv_file_in_lakehouse(myLakehouse: fn.FabricLakehouseClient, employees: list)-> str:
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
        
     # Convert the data to a DataFrame
@@ -21,7 +21,7 @@ def write_csv_file_in_lakehouse(mylakehouse: fn.FabricLakehouseClient, employees
     csv_string = df.to_csv(index=False)
        
     # Upload the CSV file to the Lakehouse
-    connection = mylakehouse.connectToFiles()
+    connection = myLakehouse.connectToFiles()
     csvFile = connection.get_file_client(csvFileName)  
     
     csvFile.upload_data(csv_string, overwrite=True)
