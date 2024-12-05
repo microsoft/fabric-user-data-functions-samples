@@ -1,5 +1,5 @@
 
-# This sample reads a CSV file from a lakehouse  using pandas. Function takes file name as an input parameter
+# This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter
 # Complete these steps before testing this funtion 
 #   1. Select Manage connections to connect to Lakehouse. 
 #   2. Select Library Management and add pandas library 
@@ -7,9 +7,9 @@
 import pandas as pd 
 
 # Replace the alias "<My Lakehouse alias>" with your connection alias.
-@udf.connection(argName="mylakehouse", alias="<My Lakehouse alias>")
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()
-def read_csv_from_lakehouse(mylakehouse: fn.FabricLakehouseClient, csvFileName: str) -> str:
+def read_csv_from_lakehouse(myLakehouse: fn.FabricLakehouseClient, csvFileName: str) -> str:
 
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFiles()   

@@ -7,7 +7,7 @@
 
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.function()
-def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> str:
+def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> list:
 
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query
@@ -26,8 +26,7 @@ def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> str:
             item[prop] = val
         values.append(item)
     
-    valJSON = json.dumps({"values": values})
     cursor.close()
     whSqlConnection.close()
 
-    return valJSON
+    return values
