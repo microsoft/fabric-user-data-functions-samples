@@ -1,0 +1,1 @@
+[{"name": "hello_fabric", "scriptFile": "function_app.py", "bindings": [{"name": "req", "direction": "In", "type": "httpTrigger", "methods": ["post"], "route": "hello_fabric", "authLevel": "Anonymous"}], "fabricProperties": {"fabricFunctionReturnType": "str", "fabricFunctionParameters": [{"name": "name", "dataType": "str"}]}}]
