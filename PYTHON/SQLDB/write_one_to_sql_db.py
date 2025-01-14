@@ -1,13 +1,14 @@
-# This sample allows you to write data into a Fabric SQL Database 
+# Write one row of data into a table in SQL database 
+# This sample allows you to write one row of data into a Fabric SQL Database 
 # Complete these steps before testing this function: 
 #   1. Select 'Manage connections' to connect to a Fabric SQL Database 
 #   2. Copy the Alias name and replace it inside the @udf.connection() decorator. 
 
-@udf.connection(argName="sqlDB",alias="<alias for sql database>")
+@udf.connection(argName="sqlDB",alias="sqldb")
 @udf.function()
-def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
+def write_one_to_sql_db(sqlDB: fn.FabricSqlConnection, employeeId: int, employeeName: str, deptId: int) -> str:
     # Replace with the data you want to insert
-    data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
+    data = [employeeId, employeeName, deptId]
 
     # Establish a connection to the SQL database
     connection = sqlDB.connect()
@@ -26,7 +27,7 @@ def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
  
     # Insert data into the table
     insert_query = "INSERT INTO Employee (EmpID, EmpName, DepID) VALUES (?, ?, ?);"
-    cursor.executemany(insert_query, data)
+    cursor.execute(insert_query, data)
 
     # Commit the transaction
     connection.commit()
@@ -34,4 +35,4 @@ def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
     # Close the connection
     cursor.close()
     connection.close()               
-    return "Employee table was created and data was added to this table"
+    return "Employee table was created (if necessary) and data was added to this table"
