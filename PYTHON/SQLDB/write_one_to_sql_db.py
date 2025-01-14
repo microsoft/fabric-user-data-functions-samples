@@ -8,7 +8,7 @@
 @udf.function()
 def write_one_to_sql_db(sqlDB: fn.FabricSqlConnection, employeeId: int, employeeName: str, deptId: int) -> str:
     # Replace with the data you want to insert
-    data = [employeeId, employeeName, deptId]
+    data = (employeeId, employeeName, deptId)
 
     # Establish a connection to the SQL database
     connection = sqlDB.connect()
