@@ -13,7 +13,7 @@
 import pandas as pd 
 import json 
 
-@udf.function()
+@app.function()
 def manipulate_data(data: list)-> list:
     
     # Convert the data dictionary to a DataFrame
