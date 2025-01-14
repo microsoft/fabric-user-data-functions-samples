@@ -5,7 +5,7 @@
 
 from sklearn.feature_extraction.text import CountVectorizer
 
-@udf.function()
+@app.function()
 def vectorize_string(text: str)-> str:
     try:
         # Initialize the CountVectorizer
