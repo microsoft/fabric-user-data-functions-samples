@@ -3,8 +3,8 @@
 #   1. Select 'Manage connections' to connect to a Fabric SQL Database 
 #   2. Copy the Alias name and replace it inside the @udf.connection() decorator. 
 
-@udf.connection(argName="sqlDB",alias="<alias for sql database>")
-@udf.function()
+@app.fabric_item_input(argName="sqlDB",alias="<alias for sql database>")
+@app.function()
 def write_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
     # Replace with the data you want to insert
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
