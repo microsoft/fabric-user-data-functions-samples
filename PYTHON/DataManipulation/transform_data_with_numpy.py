@@ -7,7 +7,7 @@
 import numpy as np
 import json 
 
-@udf.function()
+@app.function()
 def transform_data(data: list)-> dict:
 
     # Convert the 2D list to a numpy array
