@@ -3,8 +3,9 @@
 #   1. Select Manage connections to connect to a Fabric SQL Database
 #   2. Copy the Alias name and replace it below inside the @udf.connection() decorator.
 
-@app.fabric_item_input(argName="sqlDB",alias="<alias for sql database>")
-@app.function()
+
+@udf.connection(argName="sqlDB",alias="<alias for sql database>")
+@udf.function()
 def read_from_sql_db(sqlDB: fn.FabricSqlConnection)-> list:
     # Replace with the query you want to run
     query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"

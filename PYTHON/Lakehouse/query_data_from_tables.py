@@ -7,8 +7,8 @@ import json
 import datetime
 
 # Replace the alias "<My Lakehouse alias>" with your connection alias.
-@app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse alias>")
-@app.function()
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
+@udf.function()
 def query_data_from_tables(myLakehouse: fn.FabricLakehouseClient) -> list:
     # Connect to the Lakehouse SQL Endpoint
     connection = myLakehouse.connectToSql()

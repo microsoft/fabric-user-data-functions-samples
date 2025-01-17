@@ -10,8 +10,8 @@ import pandas as pd
 import datetime
 
 #Replace the alias "<My Lakehouse alias>" with your connection alias.
-@app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse alias>")
-@app.function()
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
+@udf.function()
 def write_csv_file_in_lakehouse(myLakehouse: fn.FabricLakehouseClient, employees: list)-> str:
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
        
