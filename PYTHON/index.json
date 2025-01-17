@@ -12,7 +12,7 @@
          },
          {
             "name":"Query data from a warehouse",
-            "description":"Use this user data function to query data into a warehouse.",
+            "description":"Use this user data function to query data from a warehouse.",
             "detail":"Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"Warehouse/query_data_from_warehouse.py"
@@ -25,13 +25,13 @@
       "data":[
          {
             "name":"Write csv file into a lakehouse",
-            "description":"TThis sample writes a CSV file into a lakehouse  using pandas.",
+            "description":"This sample writes a CSV file into a lakehouse using pandas.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"Lakehouse/write_csv_file_in_lakehouse.py"
          },
          {
             "name":"Read csv file from lakehouse",
-            "description":"This sample reads a CSV file from a lakehouse  using pandas. Function takes file name as an input parameter.",
+            "description":"This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"Lakehouse/read_csv_file_from_lakehouse.py"
          },
@@ -48,10 +48,16 @@
       "description":"Sample functions to work with SQL database.",
       "data":[
          {
-            "name":"Write data into a table in SQL database",
-            "description":"This sample allows you to read data from SQL database.",
+            "name":"Write multiple rows of data into a table in SQL database",
+            "description":"This sample allows you to write multiple rows of data into a SQL database.",
             "dateAdded":"2024-11-05T00:00:00Z",
-            "data":"SQLDB/write_to_sql_db.py"
+            "data":"SQLDB/write_many_rows_to_sql_db.py"
+         },
+         {
+            "name":"Write one row of data into a table in SQL database",
+            "description":"This sample allows you to write one row of data into a SQL database.",
+            "dateAdded":"2025-01-14T00:00:00Z",
+            "data":"SQLDB/write_one_row_to_sql_db.py"
          },
          {
             "name":"Read data from a table in SQL database",
