@@ -7,7 +7,7 @@ import datetime
 
 @udf.context(argName="udfContext")
 @udf.function()
-def hello_fabric_with_userdatafunctioncontext(udfContext: fn.UserDataFunctionContext)-> str:
+def get_function_invocation_details(udfContext: fn.UserDataFunctionContext)-> str:
     invocation_id = udfContext.invocation_id
     invoking_users_username = udfContext.executing_user['PreferredUsername']
     # Other executing_user keys include: 'Oid', 'TenantId'
