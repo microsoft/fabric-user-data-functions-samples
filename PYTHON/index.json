@@ -91,7 +91,7 @@
       "data":[
          {
             "name":"Using UserDataFunctionContext",
-            "description":"This sample uses UserDataFunctionContext to metadata about the invocation.",
+            "description":"This sample uses UserDataFunctionContext to get metadata about the invocation.",
             "dateAdded":"2025-01-17T00:00:00Z",
             "data":"UDFDataTypes/use_userdatafunctioncontext.py"
          },
