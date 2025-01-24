@@ -84,5 +84,23 @@
             "data":"DataManipulation/transform_data_with_numpy.py"
          }
       ]
+   },
+   {
+      "name":"UDF Data Types",
+      "description":"Sample functions to show usage of data types supplied within the SDK library.",
+      "data":[
+         {
+            "name":"Using UserDataFunctionContext",
+            "description":"This sample uses UserDataFunctionContext to get metadata about the invocation.",
+            "dateAdded":"2025-01-17T00:00:00Z",
+            "data":"UDFDataTypes/use_userdatafunctioncontext.py"
+         },
+         {
+            "name":"Raising UserThrownError",
+            "description":"This samples raises an error if the age supplied as a parameter is < 18.",
+            "dateAdded":"2025-01-17T00:00:00Z",
+            "data":"UDFDataTypes/raise_userthrownerror.py"
+         }
+      ]
    }
 ]
