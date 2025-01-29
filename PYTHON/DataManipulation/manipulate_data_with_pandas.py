@@ -11,7 +11,6 @@
 # ]
 
 import pandas as pd 
-import json 
 
 @udf.function()
 def manipulate_data(data: list)-> list:
