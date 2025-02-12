@@ -3,7 +3,6 @@
 # Complete these steps before testing this function
 # 1. Select Manage connections and add a connection to a Lakehouse 
 
-import json
 import datetime
 
 # Replace the alias "<My Lakehouse alias>" with your connection alias.

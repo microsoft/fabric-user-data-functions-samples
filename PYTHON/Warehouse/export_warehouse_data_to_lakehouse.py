@@ -3,7 +3,6 @@
 #   1. Select Manage connections to connect to Warehouse and the Lakehouse you want to use.  
 #   2. Copy the Alias name and replace below
 
-import json
 import datetime  
 
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")

@@ -1,9 +1,7 @@
 # Example of using a FabricItemInput to query a Warehouse and then write the data to a csv in a Lakehouse
 # Uncomment and fill in the Warehouse alias and Lakehouse alias you would like to use
 
-# Imports Statement changes required:
-#    import datetime
-#    import json
+import datetime
 
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.function()
