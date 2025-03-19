@@ -79,7 +79,7 @@
          },
          {
             "name":"Transform data with numpy library",
-            "description":"This samples converts the input 2D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean of each column.",
+            "description":"This samples converts the input 1D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean of each column.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"DataManipulation/transform_data_with_numpy.py"
          }
