@@ -1,5 +1,7 @@
-# Example of using a FabricItemInput to query a Warehouse and then write the data to a csv in a Lakehouse
-# Uncomment and fill in the Warehouse alias you would like to use
+# Example of using a connection to query a Warehouse
+# Complete these steps before testing this funtion 
+#   1. Select 'Manage connections' to connect to a Warehouse
+#   2. Copy the Alias name and replace below
 
 import datetime
 
