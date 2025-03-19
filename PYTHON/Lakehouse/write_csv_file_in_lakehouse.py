@@ -1,7 +1,7 @@
 
-# This sample writes a CSV file from a lakehouse  using pandas 
+# This sample writes a CSV file from a lakehouse using pandas 
 # Complete these steps before testing this funtion 
-#   1. Select Manage connections to connect to Lakehouse. 
+#   1. Select Manage connections and add a connection to a Lakehouse 
 #   2. Select Library Management and add pandas library 
 #   3. Sample input for employees: 
 #   [[1,"John Smith", 31], [2,"Kayla Jones", 33]]
