@@ -1,8 +1,8 @@
 
 # This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter
 # Complete these steps before testing this funtion 
-#   1. Select Manage connections and add a connection to a Lakehouse
-#   2. Select Library Management and add pandas library 
+#   1. Select 'Manage connections' and add a connection to a Lakehouse
+#   2. Select 'Library management' and add pandas library 
 
 import pandas as pd 
 
