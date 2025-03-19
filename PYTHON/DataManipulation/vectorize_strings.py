@@ -1,6 +1,6 @@
-# This sample vectorizes a string or text which takes a string and returns a vectorized representation of the string. 
+# This sample vectorizes a string of text and returns a vectorized representation of the string. 
 # Complete the following before testing this function
-# 1. Select libraries management and add "scikit-learn" library 
+# 1. Select library management and add "scikit-learn" library 
 
 
 from sklearn.feature_extraction.text import CountVectorizer
