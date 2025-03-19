@@ -1,6 +1,6 @@
 # This sample allows you to read data from a Fabric SQL Database 
 # Complete these steps before testing this function 
-#   1. Select Manage connections and add a connection to a SQL Database 
+#   1. Select Manage connections and add a connection to a Fabric SQL Database 
 #   2. Copy the Alias name and replace it below inside the @udf.connection() decorator.
 
 
