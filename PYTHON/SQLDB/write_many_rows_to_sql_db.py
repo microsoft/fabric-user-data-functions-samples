@@ -1,6 +1,6 @@
 # This sample allows you to write multiple rows of data into a Fabric SQL Database 
 # Complete these steps before testing this function: 
-#   1. Select 'Manage connections' to connect to a Fabric SQL Database 
+#   1. Select 'Manage connections' and add a connection to a Fabric SQL Database 
 #   2. Copy the Alias name and replace it inside the @udf.connection() decorator. 
 
 @udf.connection(argName="sqlDB",alias="<alias for sql database>")
