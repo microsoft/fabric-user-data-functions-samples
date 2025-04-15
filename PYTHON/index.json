@@ -28,14 +28,14 @@
     ]
   },
   {
-        "name": "Data Manipulation",
-        "description": "User data functions that can be use to transform data.",
+        "name": "Vectorized functions",
+        "description": "User data functions Python functions that receive batches of input rows as Pandas DataFrames and return batches of results as Pandas data frame.",
         "data": [
           {
-            "name": "Vectorize a string",
-            "description": "Function to vectorize text data from string to being represented by numeric values.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "DataManipulation/VectorizeStrings.py"
+            "name": "Filter pandas data frame",
+            "description": "Function to filter a batch of data.",
+            "dateAdded": "2025-15-04T00:35:01Z",
+            "data": "VectorizedFunctions/vectorized-user-data-functions.py"
           }
         ]
     }
