@@ -1,9 +1,4 @@
-import pandas as pd 
-
-
-@udf.function()
-def filter_dataframe(df: pd.DataFrame, qualityConditions:dict) -> pd.DataFrame:
-    """
+ """
     Filters the dataframe based on quality conditions.
 
     Parameters:
@@ -12,25 +7,28 @@ def filter_dataframe(df: pd.DataFrame, qualityConditions:dict) -> pd.DataFrame:
 
     Returns:
     pd.DataFrame: The filtered dataframe.
+    
+    Sample data 
+    df = {
+       "name": ["Alice", "Bob", "Charlie", "Diana"],
+       "age": [25, 32, 37, 29],
+       "score": [85.5, 90.0, 67.0, 88.5]
+     }
+
+    # Example quality conditions: age > 30 and score >= 70
+    qualityConditions = {
+       "age": "> 30",
+       "score": ">= 70"
+    }
     """
-    return filter_dataframe(df, qualityConditions)
+
+import pandas as pd 
 
 @udf.function()
-def filter_dict(dfDict: dict, qualityConditions:dict) -> dict:
-    """
-    Filters the dict based on quality conditions.
+def filter_dataframe(df: pd.DataFrame, qualityConditions:dict) -> pd.DataFrame:  
+    return filter_dataframe(df, qualityConditions)
 
-    Parameters:
-    df (pd.DataFrame): The input dataframe to be filtered.
-    qualityConditions (dict): A dictionary where keys are column names and values are conditions to be met.
-
-    Returns:
-    pd.DataFrame: The filtered dataframe.
-    """
-    df = pd.DataFrame.from_dict(dfDict)
-    logging.info(f"Shape of data: {df.shape}")
-    return filter_dataframe(df, qualityConditions).to_dict()
-
+# Helper function to filter dataframe 
 def filter_dataframe(df: pd.DataFrame, qualityConditions:dict) -> pd.DataFrame:
     """
     Filters the dataframe based on quality conditions.
