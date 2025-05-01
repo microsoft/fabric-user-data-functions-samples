@@ -24,6 +24,12 @@
       "description":"Sample functions to work with tables and files within a lakehouse in Fabric.",
       "data":[
          {
+            "name":"Read a parquet csv file from a lakehouse",
+            "description":"This sample writes a parquet file from a lakehouse.",
+            "dateAdded":"2025-30-04T00:00:00Z",
+            "data":"Lakehouse/read_parquet_from_lakehouse.py"
+         },
+         {
             "name":"Write csv file into a lakehouse",
             "description":"This sample writes a CSV file into a lakehouse using pandas.",
             "dateAdded":"2024-11-05T00:00:00Z",
