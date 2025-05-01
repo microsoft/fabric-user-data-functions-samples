@@ -27,9 +27,10 @@ def read_parquet_from_lakehouse(myLakehouse: fn.FabricLakehouseClient, parquetFi
     df = pd.read_parquet(BytesIO(parquetData))
 
     # Display the DataFrame    
-    result = "" 
+    rows = [] 
     for index, row in df.iterrows():
-        result = result + "[" + (",".join([str(item) for item in row])) + "]"
+        rows.append("[" + (",".join([str(item) for item in row])) + "]")
+    result = "".join(rows)
     
     # Close the connection
     parquetFile.close()
