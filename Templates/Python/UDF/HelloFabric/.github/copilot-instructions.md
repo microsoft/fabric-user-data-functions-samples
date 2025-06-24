@@ -8,6 +8,7 @@ This is a Microsoft Fabric User Data Functions (UDF) project written in Python. 
 ### Project Structure
 - **All code goes in `function_app.py`** - single file for all functions
 - `definition.json` - contains configured libraries and connections
+- **Never modify `definition.json`** - it's managed by the Fabric portal
 
 ### Dependencies Management
 - **⚠️ CRITICAL**: Always check `definition.json` for configured libraries before using imports
@@ -25,25 +26,26 @@ This is a Microsoft Fabric User Data Functions (UDF) project written in Python. 
 ### Function Development Best Practices
 - Use descriptive snake_case names for functions
 - **Use camelCase for parameter names** (never snake_case for parameters)
+- **Don't use default values in function signatures** - handle defaults inside function logic instead
 - **Always include inline Python docstrings** to describe what functions do
 - Include proper error handling and logging
 - Test locally with F5 debugging before deployment
 
 ### Available VS Code Tasks
-- `func: host start` - Start function host
-- `pip install (functions)` - Install dependencies  
+- `func: host start` - Start function host (only do this if asked)
+- `pip install (functions)` - Install dependencies
 
 ### When Generating Code
 1. **Always check dependencies** against `definition.json`
 2. **Always check connections** against `definition.json`
 3. **Include type hints** for all functions
 4. **Add logging** for debugging
-5. **Include error handling**
+5. **Include reasonable error handling**
 6. **Warn boldly** about unconfigured libraries/connections
 
 ### Reference Files
-- **Code samples and patterns**: Use examples from the [samples-llms.txt](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/samples-llms.txt) file
-- **SDK documentation**: Query the `microsoft.docs.mcp` server for all Microsoft Fabric User Data Functions SDK documentation and guidance
+- **Code samples and patterns**: Always try to fetch examples from the [samples-llms.txt](https://raw.githubusercontent.com/kdubau/fabric-user-data-functions-samples/refs/heads/dev/kywhi/instructions-and-generate-llms/PYTHON/samples-llms.txt) file
+- **SDK documentation**: Only if samples are insufficient, try to query the `microsoft.docs.mcp` server for all Microsoft Fabric User Data Functions SDK documentation and guidance
 
 ## Querying Microsoft Documentation
 Use the `microsoft.docs.mcp` server to search Microsoft's official documentation for SDK details, API references, and implementation guidance. This provides access to the latest Microsoft Fabric documentation that may be more current than training data.
