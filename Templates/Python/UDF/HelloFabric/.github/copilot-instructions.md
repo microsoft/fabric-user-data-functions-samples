@@ -42,6 +42,10 @@ This is a Microsoft Fabric User Data Functions (UDF) project written in Python. 
 6. **Warn boldly** about unconfigured libraries/connections
 
 ### Reference Files
-- Use samples from the [Python samples folder](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/samples-llms.txt) for patterns
-- Reference the [Python SDK documentation](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/sdk-llms-full.txt) for available functions
-- Follow Microsoft Fabric UDF documentation standards
+- **Code samples and patterns**: Use examples from the [samples-llms.txt](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/samples-llms.txt) file
+- **SDK documentation**: Query the `microsoft.docs.mcp` server for all Microsoft Fabric User Data Functions SDK documentation and guidance
+
+## Querying Microsoft Documentation
+Use the `microsoft.docs.mcp` server to search Microsoft's official documentation for SDK details, API references, and implementation guidance. This provides access to the latest Microsoft Fabric documentation that may be more current than training data.
+**If the MCP server is unavailable**: Direct users to install it from https://github.com/MicrosoftDocs/mcp
+**Tool Usage**: Only reference MCP tools when actively needed for documentation queries - don't mention them proactively.
