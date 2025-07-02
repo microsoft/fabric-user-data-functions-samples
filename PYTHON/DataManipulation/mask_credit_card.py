@@ -2,7 +2,15 @@
 
 
 @udf.function()
-def mask_credit_card(card_number: int)-> str:
+def mask_credit_card(card_number: int) -> str:
+    '''
+    Description: Mask credit card number showing only the last 4 digits.
+
+    Args:
+    - card_number (int): Credit card number to be masked
+
+    Returns: str: Masked credit card number with asterisks except last 4 digits
+    '''
     # Convert the card number to a string
     card_number_str = str(card_number)
     

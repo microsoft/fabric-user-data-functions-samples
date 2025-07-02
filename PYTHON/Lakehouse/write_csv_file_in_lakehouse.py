@@ -13,6 +13,21 @@ import datetime
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()
 def write_csv_file_in_lakehouse(myLakehouse: fn.FabricLakehouseClient, employees: list)-> str:
+    '''
+    Description: Write employee data to lakehouse as timestamped CSV file using pandas.
+    
+    Args:
+        myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection.
+        employees (list): List of employee records as [ID, Name, DeptID] arrays.
+    
+    Returns:
+        str: Confirmation message with filename and viewing instructions.
+        
+    Example:
+        employees = [[1,"John Smith", 31], [2,"Kayla Jones", 33]]
+        Creates "Employees1672531200.csv" in lakehouse
+    '''
+    
     csvFileName = "Employees" + str(round(datetime.datetime.now().timestamp())) + ".csv"
        
     # Convert the data to a DataFrame

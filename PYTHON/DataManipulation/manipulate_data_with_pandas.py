@@ -13,8 +13,15 @@
 import pandas as pd 
 
 @udf.function()
-def manipulate_data(data: list)-> list:
-    
+def manipulate_data(data: list) -> list:
+    '''
+    Description: Manipulate data using pandas to group by age categories and calculate mean ages.
+
+    Args:
+    - data (list): List of dictionaries containing Name, Age, and Gender fields
+
+    Returns: list: JSON records with AgeGroup (Adult/Minor) and mean Age values
+    '''
     # Convert the data dictionary to a DataFrame
     df = pd.DataFrame(data)
         # Perform basic data manipulation

@@ -8,8 +8,15 @@ import numpy as np
 import json 
 
 @udf.function()
-def transform_data(data: list)-> dict:
+def transform_data(data: list) -> dict:
+    '''
+    Description: Transform 1D list to normalized numpy array and calculate mean.
 
+    Args:
+    - data (list): Input 1D list of numeric values
+
+    Returns: dict: Dictionary containing normalized data array and mean value
+    '''
     # Convert the 1D list to a numpy array
     np_data = np.array(data)
 

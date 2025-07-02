@@ -7,6 +7,19 @@
 @udf.connection(argName="sqlDB",alias="<alias for sql database>")
 @udf.function()
 def read_from_sql_db(sqlDB: fn.FabricSqlConnection)-> list:
+    '''
+    Description: Read employee data from SQL database using sample query.
+    
+    Args:
+        sqlDB (fn.FabricSqlConnection): Fabric SQL database connection.
+    
+    Returns:
+        list: Employee records as tuples with name and department ID.
+        
+    Example:
+        [('John Smith', 31), ('Kayla Jones', 33)]
+    '''
+    
     # Replace with the query you want to run
     query = "SELECT * FROM (VALUES ('John Smith', 31), ('Kayla Jones', 33)) AS Employee(EmpName, DepID);"
 

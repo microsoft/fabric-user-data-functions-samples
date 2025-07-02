@@ -9,6 +9,14 @@ import datetime
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()
 def query_data_from_tables(myLakehouse: fn.FabricLakehouseClient) -> list:
+    '''
+    Description: Query employee data from lakehouse tables and return as JSON objects.
+
+    Args:
+    - myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection
+
+    Returns: list: Employee records as dictionaries with EmpName and DepID fields
+    '''
     # Connect to the Lakehouse SQL Endpoint
     connection = myLakehouse.connectToSql()
     

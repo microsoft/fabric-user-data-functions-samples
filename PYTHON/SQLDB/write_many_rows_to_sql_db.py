@@ -6,6 +6,19 @@
 @udf.connection(argName="sqlDB",alias="<alias for sql database>")
 @udf.function()
 def write_many_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
+    '''
+    Description: Insert multiple employee records into SQL database, creating table if needed.
+    
+    Args:
+        sqlDB (fn.FabricSqlConnection): Fabric SQL database connection.
+    
+    Returns:
+        str: Confirmation message about table creation and data insertion.
+        
+    Example:
+        Inserts sample employee records: John Smith, Kayla Jones, Edward Harris
+    '''
+    
     # Replace with the data you want to insert
     data = [(1,"John Smith", 31), (2,"Kayla Jones", 33),(3,"Edward Harris", 33)]
 
@@ -14,14 +27,14 @@ def write_many_to_sql_db(sqlDB: fn.FabricSqlConnection) -> str:
     cursor = connection.cursor()
   
     # Create the table if it doesn't exist
-    create_table_query = """
+    create_table_query = '''
         IF OBJECT_ID(N'dbo.Employee', N'U') IS NULL
         CREATE TABLE dbo.Employee (
             EmpID INT PRIMARY KEY,
             EmpName nvarchar(50),
             DepID INT
             );
-    """
+    '''
     cursor.execute(create_table_query)
  
     # Insert data into the table
