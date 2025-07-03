@@ -18,7 +18,7 @@ def get_function_invocation_details(udfContext: fn.UserDataFunctionContext) -> s
         str: Welcome message with username, timestamp, and invocation ID.
         
     Example:
-        "Welcome to Fabric Functions, user@example.com, at 2025-07-01 10:30:00! Invocation ID: abc123"
+       Returns "Welcome to Fabric Functions, user@example.com, at 2025-07-01 10:30:00! Invocation ID: abc123"
     '''
     invocation_id = udfContext.invocation_id
     invoking_users_username = udfContext.executing_user['PreferredUsername']

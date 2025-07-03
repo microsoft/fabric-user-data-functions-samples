@@ -17,7 +17,7 @@ def read_from_sql_db(sqlDB: fn.FabricSqlConnection)-> list:
         list: Employee records as tuples with name and department ID.
         
     Example:
-        [('John Smith', 31), ('Kayla Jones', 33)]
+        Returns [('John Smith', 31), ('Kayla Jones', 33)]
     '''
     
     # Replace with the query you want to run

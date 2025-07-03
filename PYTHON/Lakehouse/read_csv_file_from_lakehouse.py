@@ -19,10 +19,6 @@ def read_csv_from_lakehouse(myLakehouse: fn.FabricLakehouseClient, csvFileName: 
     
     Returns: 
         str: Confirmation message with formatted CSV data rows.
-        
-    Example:
-        csvFileName = "employees.csv"
-        Returns formatted rows from the CSV file
     '''
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFiles()   

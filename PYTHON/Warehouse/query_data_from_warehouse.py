@@ -18,7 +18,7 @@ def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> list:
         list: Employee records as dictionaries with EmpName and DepID fields.
         
     Example:
-        [{'EmpName': 'John Smith', 'DepID': 31}, {'EmpName': 'Kayla Jones', 'DepID': 33}]
+        Returns [{'EmpName': 'John Smith', 'DepID': 31}, {'EmpName': 'Kayla Jones', 'DepID': 33}]
     '''
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query

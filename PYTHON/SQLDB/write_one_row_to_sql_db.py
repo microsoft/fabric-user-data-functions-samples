@@ -19,8 +19,6 @@ def write_one_to_sql_db(sqlDB: fn.FabricSqlConnection, employeeId: int, employee
     Returns:
         str: Confirmation message about table creation and data insertion.
         
-    Example:
-        write_one_to_sql_db(db_conn, 123, "John Doe", 5) -> "Employee table was created..."
     '''
 
     # Replace with the data you want to insert
