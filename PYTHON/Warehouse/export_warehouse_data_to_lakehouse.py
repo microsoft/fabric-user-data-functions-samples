@@ -1,5 +1,8 @@
 import datetime  
 
+
+# Select 'Manage connections' and add a connection to a Warehouse and a Lakehouse.
+#  Replace the aliases "<My Warehouse Alias>" and "<My Lakehouse Alias>" with your connection aliases.
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()

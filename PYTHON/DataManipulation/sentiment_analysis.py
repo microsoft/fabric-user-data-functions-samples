@@ -1,6 +1,3 @@
-# This sample allows you to calculate the sentiment of given text that is passed to the function as input.
-# Complete these steps before testing this funtion 
-#   1. Select library management and add textblob library 
 
 from textblob import TextBlob
 

@@ -1,10 +1,6 @@
-# Example of using a connection to query a Warehouse
-# Complete these steps before testing this funtion 
-#   1. Select 'Manage connections' to connect to a Warehouse
-#   2. Copy the Alias name and replace below
-
 import datetime
-
+#Select 'Manage connections' to connect to a Warehouse
+#Replace the alias "<My Warehouse Alias>" with your connection alias.
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.function()
 def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> list:

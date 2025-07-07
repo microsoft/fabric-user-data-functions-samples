@@ -1,7 +1,3 @@
-# This sample function raises a UserThrownError if the age given is less than 18.
-# The UserThrownError is a special type of error that can be used (or extended with a custom error class)
-# to make an invocation fail and allow context to be provided about why the function failed.
-
 import datetime
 
 @udf.function()

@@ -1,10 +1,6 @@
 
-# This sample reads data from a table in a lakehouse 
-# Complete these steps before testing this function
-# 1. Select 'Manage connections' and add a connection to a Lakehouse 
-
 import datetime
-
+# Select 'Manage connections' and add a connection to a Lakehouse.
 # Replace the alias "<My Lakehouse alias>" with your connection alias.
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()

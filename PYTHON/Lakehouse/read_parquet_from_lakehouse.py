@@ -1,13 +1,9 @@
-# This sample reads a parquet file from a lakehouse
-# Complete these steps before testing this function
-# 1. Select 'Manage connections' and add a connection to a Lakehouse which has a parquet file
-# 2. Select 'Library management' and add the pyarrow, pandas libraries
-# 3. Replace the alias "<My Lakehouse alias>" with your connection alias.
 
 import pandas as pd
 from io import BytesIO 
-import pyarrow.parquet as pq # This is engine needed to read parquet files
+import pyarrow.parquet as pq 
 
+#Select 'Manage connections' and add a connection to a Lakehouse which has a parquet file
 # Replace the alias "<My Lakehouse alias>" with your connection alias.
 @udf.connection(argName="myLakehouse", alias="<Lakehouse-alias>")
 @udf.function()

@@ -1,9 +1,3 @@
-# This samples converts the input 1D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean.
-# Complete these steps before testing this function
-# 1. Select 'Library management' and add numpy library
-# 2. Pass input as a list, an example to use for this sample:
-# [1, 2, 3, 4, 5]
-
 import numpy as np
 import json 
 
@@ -14,6 +8,7 @@ def transform_data(data: list) -> dict:
 
     Args:
     - data (list): Input 1D list of numeric values
+      Example: [1, 2, 3, 4, 5]
 
     Returns: dict: Dictionary containing normalized data array and mean value
     '''

@@ -1,8 +1,3 @@
-# This sample uses a parameter with data type UserDataFunctionContext,
-# which is a parameter that contains certain metadata about the function
-# invocation, such as the invocation id and some properties of the token
-# used to invoke the function.
-
 import datetime
 
 @udf.context(argName="udfContext")

@@ -1,5 +1,3 @@
-# This sample allows you to pass a credit card as integer and mask the card leaving the last 4 digits. 
-
 
 @udf.function()
 def mask_credit_card(card_number: int) -> str:

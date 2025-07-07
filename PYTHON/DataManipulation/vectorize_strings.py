@@ -1,8 +1,3 @@
-# This sample vectorizes a string of text and returns a vectorized representation of the string. 
-# Complete the following before testing this function
-# 1. Select 'Library management' and add "scikit-learn" library 
-
-
 from sklearn.feature_extraction.text import CountVectorizer
 
 @udf.function()
