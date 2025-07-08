@@ -24,9 +24,9 @@
       "description":"Sample functions to work with tables and files within a lakehouse in Fabric.",
       "data":[
          {
-            "name":"Read a parquet csv file from a lakehouse",
-            "description":"This sample writes a parquet file from a lakehouse.",
-            "dateAdded":"2025-30-04T00:00:00Z",
+            "name":"Read a parquet file from a lakehouse",
+            "description":"This sample reads a parquet file from a lakehouse.",
+            "dateAdded":"2025-04-30T00:00:00Z",
             "data":"Lakehouse/read_parquet_from_lakehouse.py"
          },
          {
@@ -75,7 +75,7 @@
    },
    {
       "name":"Data Manipulation",
-      "description":"Sample functions to transform data using pandas,numpy.",
+      "description":"Sample functions to transform data using pandas, numpy, and other libraries.",
       "data":[
          {
             "name":"Manipulate data with pandas library",
@@ -88,6 +88,24 @@
             "description":"This samples converts the input 1D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"DataManipulation/transform_data_with_numpy.py"
+         },
+         {
+            "name":"Vectorize strings with scikit-learn",
+            "description":"This sample vectorizes a string of text using CountVectorizer and returns a vectorized representation.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/vectorize_strings.py"
+         },
+         {
+            "name":"Sentiment analysis with TextBlob",
+            "description":"This sample analyzes sentiment of input text using TextBlob and classifies as Happy, Sad, or Neutral.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/sentiment_analysis.py"
+         },
+         {
+            "name":"Mask credit card numbers",
+            "description":"This sample masks credit card numbers showing only the last 4 digits for security purposes.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/mask_credit_card.py"
          }
       ]
    },

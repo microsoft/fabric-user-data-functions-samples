@@ -1,11 +1,17 @@
-# This sample allows you to calculate the sentiment of given text that is passed to the function as input.
-# Complete these steps before testing this funtion 
-#   1. Select library management and add textblob library 
 
 from textblob import TextBlob
 
 @udf.function()
 def analyze_sentiment(text: str) -> str:
+    '''
+    Description: Analyze sentiment of input text using TextBlob and classify as Happy, Sad, or Neutral.
+
+    Args:
+    - text (str): Input text string to analyze for sentiment
+
+    Returns: str: Formatted message with text and sentiment classification (Happy/Sad/Neutral)
+    '''
+    
     sentimentscore= TextBlob(text).sentiment.polarity
     sentiment= "N/A"
     # Classify sentiment based on polarity value

@@ -1,14 +1,25 @@
-# This sample allows you to export data from warehouse and write it to a lakehouse
-# Complete these steps before testing this funtion 
-#   1. Select 'Manage connections' to connect to Warehouse and the Lakehouse you want to use.  
-#   2. Copy the Alias name and replace below
-
 import datetime  
 
+
+# Select 'Manage connections' and add a connection to a Warehouse and a Lakehouse.
+#  Replace the aliases "<My Warehouse Alias>" and "<My Lakehouse Alias>" with your connection aliases.
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
 def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLakehouse: fn.FabricLakehouseClient) -> dict:
+    '''
+    Description: Export employee data from warehouse to lakehouse as timestamped CSV file.
+    
+    Args:
+        myWarehouse (fn.FabricSqlConnection): Fabric warehouse connection.
+        myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection.
+    
+    Returns:
+        dict: Contains confirmation message and employee data as JSON objects.
+        
+    Example:
+        Creates "Employees1672531200.csv" with sample employee records.
+    '''
 
     whSqlConnection = myWarehouse.connect()
 

@@ -1,14 +1,21 @@
-# Example of using a connection to query a Warehouse
-# Complete these steps before testing this funtion 
-#   1. Select 'Manage connections' to connect to a Warehouse
-#   2. Copy the Alias name and replace below
-
 import datetime
-
+#Select 'Manage connections' to connect to a Warehouse
+#Replace the alias "<My Warehouse Alias>" with your connection alias.
 @udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
 @udf.function()
 def query_data_from_warehouse(myWarehouse: fn.FabricSqlConnection) -> list:
-
+    '''
+    Description: Query employee data from a Fabric warehouse and return as JSON objects.
+    
+    Args:
+        myWarehouse (fn.FabricSqlConnection): Fabric warehouse connection.
+    
+    Returns:
+        list: Employee records as dictionaries with EmpName and DepID fields.
+        
+    Example:
+        Returns [{'EmpName': 'John Smith', 'DepID': 31}, {'EmpName': 'Kayla Jones', 'DepID': 33}]
+    '''
     whSqlConnection = myWarehouse.connect()
     # Use connection to execute a query
     cursor = whSqlConnection.cursor()

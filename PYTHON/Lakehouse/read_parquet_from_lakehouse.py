@@ -1,18 +1,28 @@
-# This sample reads a parquet file from a lakehouse
-# Complete these steps before testing this function
-# 1. Select 'Manage connections' and add a connection to a Lakehouse which has a parquet file
-# 2. Select 'Library management' and add the pyarrow, pandas libraries
-# 3. Replace the alias "<My Lakehouse alias>" with your connection alias.
 
 import pandas as pd
 from io import BytesIO 
-import pyarrow.parquet as pq # This is engine needed to read parquet files
+import pyarrow.parquet as pq 
 
+#Select 'Manage connections' and add a connection to a Lakehouse which has a parquet file
 # Replace the alias "<My Lakehouse alias>" with your connection alias.
 @udf.connection(argName="myLakehouse", alias="<Lakehouse-alias>")
 @udf.function()
 def read_parquet_from_lakehouse(myLakehouse: fn.FabricLakehouseClient, parquetFileName: str) -> str:
-
+    '''
+    Description: Read parquet file from lakehouse and return data as formatted string.
+    
+    Args:
+        myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection.
+        parquetFileName (str): Parquet file name or path relative to Files folder.
+    
+    Returns:
+        str: Confirmation message with formatted parquet data rows.
+        
+    Example:
+        parquetFileName = "data.parquet" or "Folder1/data.parquet"
+        Returns formatted rows from the parquet file
+    '''
+        
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFiles()   
 
