@@ -6,13 +6,13 @@ You can find these sample code snippets for functions that can be used in Fabric
 
 **Fabric portal**
 1. Open User data functions in the portal and select  **Insert samples** to add your code snippet. 
-    ![Sample code snippet for Fabric User data functions in portal](sample-code-snippet-functions-fabric-portal.png)
+    ![Sample code snippet for Fabric User data functions in portal](images/sample-code-snippet-functions-fabric-portal.png)
 
 **Fabric User data functions in VS Code**
 1. Select ~**Local folder** and open **Functions**. Select **+** to add a new function from a sample. 
-    ![Add function](add-function-in-VS-Code.png)
+    ![Add function](images/add-function-in-VS-Code.png)
 2. View all the sample categories to select a sample to add within function_app.py.
-    ![View code samples in VS Code](view-code-samples-in-VS-Code.png)
+    ![View code samples in VS Code](images/view-code-samples-in-VS-Code.png)
 
  
 
