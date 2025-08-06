@@ -44,7 +44,7 @@ This is a Microsoft Fabric User Data Functions (UDF) project written in Python. 
 6. **Warn boldly** about unconfigured libraries/connections
 
 ### Reference Files
-- **Code samples and patterns**: Always try to fetch examples from the [samples-llms.txt](https://raw.githubusercontent.com/kdubau/fabric-user-data-functions-samples/refs/heads/dev/kywhi/instructions-and-generate-llms/PYTHON/samples-llms.txt) file
+- **Code samples and patterns**: Always try to fetch examples from the [samples-llms.txt](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/dev/kywhi/instructions-and-generate-llms/PYTHON/samples-llms.txt) file
 - **SDK documentation**: Only if samples are insufficient, try to query the `microsoft.docs.mcp` server for all Microsoft Fabric User Data Functions SDK documentation and guidance
 
 ## Querying Microsoft Documentation
