@@ -1,9 +1,7 @@
 import pandas as pd
 import logging
 
-import pandas as pd
-import logging
-
+@udf.function()
 def filter_customers_by_country_df(df: pd.DataFrame, countryname: str) -> pd.DataFrame:
     """
     Filters customer and order information by country name from a Pandas DataFrame.
@@ -45,13 +43,5 @@ def filter_customers_by_country_df(df: pd.DataFrame, countryname: str) -> pd.Dat
     except Exception as e:
         logging.error(f'Error filtering customers by country: {str(e)}')
         return pd.DataFrame()
-
-        # Convert back to list of dictionaries
-        result = filtered_df.to_dict('records')
         
-        logging.info(f'Found {len(result)} customers from {countryname}')
-        return result
-        
-    except Exception as e:
-        logging.error(f'Error filtering customers by country: {str(e)}')
-        return []
+   

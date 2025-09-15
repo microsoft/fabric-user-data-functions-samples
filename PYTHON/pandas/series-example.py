@@ -11,17 +11,20 @@ def summarize_age_distribution(ageSeries: pd.Series) -> str:
     Returns:
         str: Summary string describing the distribution.
     """
-    if ageSeries.empty:
-        return "No age data provided."
-
-    summary = (
-        f"Age Summary:\n"
-        f"- Count: {ageSeries.count()}\n"
-        f"- Mean: {ageSeries.mean():.2f}\n"
-        f"- Median: {ageSeries.median():.2f}\n"
-        f"- Min: {ageSeries.min()}\n"
-        f"- Max: {ageSeries.max()}\n"
-        f"- Std Dev: {ageSeries.std():.2f}"
-    )
-    return summary
+    try:
+        if ageSeries.empty:
+            return "No age data provided."
+        summary = (
+            f"Age Summary:\n"
+            f"- Count: {ageSeries.count()}\n"
+            f"- Mean: {ageSeries.mean():.2f}\n"
+            f"- Median: {ageSeries.median():.2f}\n"
+            f"- Min: {ageSeries.min()}\n"
+            f"- Max: {ageSeries.max()}\n"
+            f"- Std Dev: {ageSeries.std():.2f}"
+        )
+        return summary
+    
+    except Exception as e:
+        return f"Error processing age data: {str(e)}"
 

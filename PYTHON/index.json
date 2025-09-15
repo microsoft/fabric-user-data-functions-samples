@@ -91,7 +91,7 @@
          },
          {
             "name":"Summarize age distribution with pandas Series",
-            "description":"This sample takes an input for list of ages as pandas Series object and then provides a summarizes the distribution of ages.",
+            "description":"This sample takes a list of ages as a pandas Series object and then summarizes the distribution of ages.",
             "dateAdded":"2025-15-09T00:00:00Z",
             "data":"pandas/series-example.py"
          },
