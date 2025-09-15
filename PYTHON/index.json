@@ -77,11 +77,23 @@
       "name":"Data Manipulation",
       "description":"Sample functions to transform data using pandas, numpy, and other libraries.",
       "data":[
-         {
+        {
             "name":"Manipulate data with pandas library",
             "description":"This sample uses pandas to manipulate a given dataset to group people by age.",
             "dateAdded":"2024-11-05T00:00:00Z",
             "data":"DataManipulation/manipulate_data_with_pandas.py"
+         },
+         {
+            "name":"Filter data using pandas dataframes",
+            "description":"This sample takes as input customers object data as a pandas dataframe type and filters the data based on country.",
+            "dateAdded":"2025-15-09T00:00:00Z",
+            "data":"pandas/dataframe-example.py"
+         },
+         {
+            "name":"Summarize age distribution with pandas Series",
+            "description":"This sample takes an input for list of ages as pandas Series object and then provides a summarizes the distribution of ages.",
+            "dateAdded":"2025-15-09T00:00:00Z",
+            "data":"pandas/series-example.py"
          },
          {
             "name":"Transform data with numpy library",
