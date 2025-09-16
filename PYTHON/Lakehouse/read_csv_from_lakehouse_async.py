@@ -10,6 +10,16 @@ import pandas as pd
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse alias>")
 @udf.function()
 async def read_csv_from_lakehouse(myLakehouse: fn.FabricLakehouseClient, csvFileName: str) -> str:
+    '''
+    Description: Read CSV file from lakehouse and return data as formatted string.
+    
+    Args:
+        myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection.
+        csvFileName (str): CSV file name in the lakehouse Files folder.
+    
+    Returns: 
+        str: Confirmation message with formatted CSV data rows.
+    '''  
 
     # Connect to the Lakehouse
     connection = myLakehouse.connectToFilesAsync()   
