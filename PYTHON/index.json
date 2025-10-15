@@ -74,6 +74,18 @@
       ]
    },
    {
+      "name":"Variable Library",
+      "description":"Sample functions to retrieve configuration values and secrets from Fabric Variable Library.",
+      "data":[
+         {
+            "name":"Get variables from Variable Library",
+            "description":"This sample retrieves API keys and configuration values from a Fabric Variable Library.",
+            "dateAdded":"2025-10-15T00:00:00Z",
+            "data":"VariableLibrary/get_variables_from_library.py"
+         }
+      ]
+   },
+   {
       "name":"Data Manipulation",
       "description":"Sample functions to transform data using pandas, numpy, and other libraries.",
       "data":[
