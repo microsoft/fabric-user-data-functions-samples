@@ -75,12 +75,13 @@
    },
    {
       "name":"Variable Library",
-      "description":"Sample functions to retrieve configuration values and secrets from Fabric Variable Library.",
+      "description":"Sample function to retrieve values and from Fabric Variable Library.",
       "data":[
          {
             "name":"Get variables from Variable Library",
-            "description":"This sample retrieves API keys and configuration values from a Fabric Variable Library.",
-            "dateAdded":"2025-10-15T00:00:00Z",
+            "description":"This sample retrieves date format for data ingestion using date format configuration from Variable Library.",
+            "detail":"Add a Variable Library connection and store a DATE_FORMAT variable. Use this function to standardize date strings before data ingestion.",
+            "dateAdded":"2025-10-17T00:00:00Z",
             "data":"VariableLibrary/get_variables_from_library.py"
          }
       ]
