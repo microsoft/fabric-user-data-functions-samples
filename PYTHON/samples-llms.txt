@@ -27,6 +27,13 @@ Sample functions to work with SQL database.
 - [Write one row of data into a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/write_one_row_to_sql_db.py): This sample allows you to write one row of data into a SQL database.
 - [Read data from a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/read_from_sql_db.py): This sample allows you to read data from SQL database.
 
+## Variable Library
+
+Sample function to retrieve values and from Fabric Variable Library.
+
+- [Get variables from Variable Library](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/VariableLibrary/get_variables_from_library.py): This sample retrieves date format for data ingestion using date format configuration from Variable Library.
+- [Chat completion with Azure OpenAI](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/VariableLibrary/chat_completion_with_azure_openai.py): This sample sends a chat completion request to Azure OpenAI using an API key securely retrieved via a generic Key Vault connection.
+
 ## Data Manipulation
 
 Sample functions to transform data using pandas,numpy.

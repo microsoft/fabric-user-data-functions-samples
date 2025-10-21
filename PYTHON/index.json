@@ -86,8 +86,8 @@
       },
       {
         "name": "Chat completion with Azure OpenAI",
-        "description": "This sample sends a chat completion request to Azure OpenAI using API key securely retrieved from Azure Key Vault.",
-        "detail": "Create an Azure OpenAI endpoint and store API key in Azure Key Vault. Add a Variable Library connection with KEY_VAULT_URL, API_KEY_SECRET_NAME, ENDPOINT, and MODEL variables. The function fetches the API key securely from Key Vault at runtime.",
+        "description": "This sample sends a chat completion request to Azure OpenAI using an API key securely retrieved via a generic Key Vault connection.",
+        "detail": "Create an Azure OpenAI endpoint and store the API key in Azure Key Vault. Add: (1) a Generic connection with audience type KeyVault, (2) a Variable Library connection with KEY_VAULT_URL, API_KEY_SECRET_NAME, ENDPOINT, and MODEL variables. The function uses the generic connection to obtain an access token and then fetches the secret from Key Vault at runtime.",
         "dateAdded": "2025-10-20T00:00:00Z",
         "data": "VariableLibrary/chat_completion_with_azure_openai.py"
       }

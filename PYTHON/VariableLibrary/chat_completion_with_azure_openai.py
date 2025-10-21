@@ -1,27 +1,29 @@
 # Select 'Manage connections' and add a connection to a Variable Library
 # Replace the alias "<My Variable Library Alias>" with your connection alias.
 from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 
+udf = fn.UserDataFunctions()
+
+@udf.generic_connection(argName="keyVaultClient", audienceType="KeyVault")
 @udf.connection(argName="varLib", alias="<My Variable Library Alias>")
 @udf.function()
-def chat_request(prompt: str, varLib: fn.FabricVariablesClient) -> str:   
+def chat_request(prompt: str, keyVaultClient: fn.FabricItem, varLib: fn.FabricVariablesClient) -> str:   
     '''
     Description: Sends a chat completion request to an Azure OpenAI model using configuration values 
     retrieved from a Fabric Variable Library and Azure Key Vault.
     
-    Pre-requisites: 
-        * Create an Azure OpenAI endpoint in Azure Portal
-        * Create an Azure Key Vault and store your Azure OpenAI API key as a secret
-        * Grant your Fabric workspace/app access to read secrets from Key Vault
-        * Create a Variable Library in Fabric and add variables for:
-          - KEY_VAULT_URL: Your Azure Key Vault URL (e.g., "https://your-keyvault.vault.azure.net/")
-          - API_KEY_SECRET_NAME: Name of the secret in Key Vault containing the API key
-          - ENDPOINT: Your Azure OpenAI endpoint URL
-          - MODEL: Your deployed model name
-        * Add the openai, azure-identity, and azure-keyvault-secrets libraries to your function dependencies
-        * Ensure fabric-user-data-functions library is using the latest version
+        Pre-requisites: 
+                * Create an Azure OpenAI endpoint in Azure Portal
+                * Create an Azure Key Vault and store your Azure OpenAI API key as a secret
+                * Grant your Fabric User Data Functions item owner's identity access to read secrets (Access policies or RBAC). Guidance: https://learn.microsoft.com/en-us/fabric/data-factory/azure-key-vault-reference-overview
+                * Create a Variable Library in Fabric and add variables for:
+                    - KEY_VAULT_URL: Your Azure Key Vault URL (e.g., "https://your-keyvault.vault.azure.net/")
+                    - API_KEY_SECRET_NAME: Name of the secret in Key Vault containing the API key
+                    - ENDPOINT: Your Azure OpenAI endpoint URL
+                    - MODEL: Your deployed model name
+                * Add the openai and azure-keyvault-secrets libraries to your function dependencies
+                * Ensure fabric-user-data-functions library is using the latest version
     
     Args:
         prompt (str): The user input or query to be processed by the model.
@@ -33,8 +35,8 @@ def chat_request(prompt: str, varLib: fn.FabricVariablesClient) -> str:
 
     Workflow:
         1. Fetch Key Vault URL, secret name, endpoint, and model details from Variable Library.
-        2. Authenticate to Azure Key Vault using DefaultAzureCredential.
-        3. Retrieve the API key securely from Azure Key Vault.
+        2. Use the generic Key Vault connection to obtain an access token (managed by Fabric).
+        3. Retrieve the API key securely from Azure Key Vault using SecretClient.
         4. Initialize the AzureOpenAI client with the retrieved configuration.
         5. Send a chat completion request with the given prompt and system instructions.
         6. Return the content of the first message in the response.
@@ -53,11 +55,11 @@ def chat_request(prompt: str, varLib: fn.FabricVariablesClient) -> str:
     variables = varLib.getVariables()
     key_vault_url = variables["KEY_VAULT_URL"]
     api_key_secret_name = variables["API_KEY_SECRET_NAME"]
-    endpoint = variables["ENDPOINT"]    
+    endpoint = variables["ENDPOINT"]
     model_name = variables["MODEL"]
-    
-    # Authenticate to Azure Key Vault and retrieve API key securely
-    credential = DefaultAzureCredential()
+
+    # Obtain a credential from the generic Key Vault connection (Fabric-managed identity)
+    credential = keyVaultClient.get_access_token()
     secret_client = SecretClient(vault_url=key_vault_url, credential=credential)
     key = secret_client.get_secret(api_key_secret_name).value
 
