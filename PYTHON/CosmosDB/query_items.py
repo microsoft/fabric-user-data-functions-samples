@@ -5,7 +5,7 @@ from azure.cosmos import exceptions
 
 @udf.generic_connection(argName="cosmosDb", audienceType="CosmosDB")
 @udf.function()
-def query_products(cosmosDb: fn.FabricItem, categoryName: str, productId: str, newPrice: float) -> list[dict[str, Any]]:
+def query_products(cosmosDb: fn.FabricItem, categoryName: str) -> list[dict[str, Any]]:
 
     '''
     Description: 
