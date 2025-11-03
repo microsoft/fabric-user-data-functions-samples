@@ -42,6 +42,12 @@
             "data":"Lakehouse/read_csv_file_from_lakehouse.py"
          },
          {
+            "name":"Read csv file from lakehouse (Async)",
+            "description":"This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter. This is an async version of the function.",
+            "dateAdded":"2025-06-12T00:00:00Z",
+            "data":"Lakehouse/read_csv_file_from_lakehouse_async.py"
+         },
+         {
             "name":"Query data from lakehouse tables",
             "description":"This sample reads data from a table in a lakehouse.",
             "dateAdded":"2024-11-05T00:00:00Z",
