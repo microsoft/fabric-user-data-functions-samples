@@ -1,18 +1,15 @@
-# This sample vectorizes a string or text
+from sklearn.feature_extraction.text import CountVectorizer
 
-# Requirements.txt changes required:
-#     uncomment the line "scikit-learn"
-# Imports Statement changes required:
-#   from sklearn.feature_extraction.text import CountVectorizer
+@udf.function()
+def vectorize_string(text: str) -> str:
+    '''
+    Description: Vectorize a string of text using CountVectorizer and return vectorized representation.
 
-@app.function("vectorize_string")
-def vectorize_string(text: str)-> str:
-    """
-    Vectorizes a string using CountVectorizer from sklearn.
+    Args:
+    - text (str): Input text string to be vectorized
 
-    :param text: The string to be vectorized.
-    :return: A vectorized representation of the string as a sparse matrix.
-    """
+    Returns: str: Formatted string containing vectorized text array and feature names
+    '''
     try:
         # Initialize the CountVectorizer
         vectorizer = CountVectorizer()
