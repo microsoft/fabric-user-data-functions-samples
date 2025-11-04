@@ -1,17 +1,25 @@
-# Add a Connection to warehouse and lakehouse to your user data function 
-# Example of using a FabricItemInput to query a Warehouse 
-#  and then write the data to a csv in a Lakehouse
-# Replace alias for the warehouse and lakehouse 
- 
-# Imports Statement changes required:
-#   import json
-#   import datetime  
+import datetime  
 
 
-@app.fabric_item_input(argName="myWarehouse", alias="<My Warehouse Alias>")
-@app.fabric_item_input(argName="myLakehouse", alias="<My Lakehouse Alias>")
-@app.function("query_warehouse_and_write_to_csv")
-def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConnection, myLakehouse: fabric.functions.FabricLakehouseClient) -> str:
+# Select 'Manage connections' and add a connection to a Warehouse and a Lakehouse.
+#  Replace the aliases "<My Warehouse Alias>" and "<My Lakehouse Alias>" with your connection aliases.
+@udf.connection(argName="myWarehouse", alias="<My Warehouse Alias>")
+@udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
+@udf.function()
+def export_warehouse_data_to_lakehouse(myWarehouse: fn.FabricSqlConnection, myLakehouse: fn.FabricLakehouseClient) -> dict:
+    '''
+    Description: Export employee data from warehouse to lakehouse as timestamped CSV file.
+    
+    Args:
+        myWarehouse (fn.FabricSqlConnection): Fabric warehouse connection.
+        myLakehouse (fn.FabricLakehouseClient): Fabric lakehouse connection.
+    
+    Returns:
+        dict: Contains confirmation message and employee data as JSON objects.
+        
+    Example:
+        Creates "Employees1672531200.csv" with sample employee records.
+    '''
 
     whSqlConnection = myWarehouse.connect()
 
@@ -43,12 +51,10 @@ def query_warehouse_and_write_to_csv(myWarehouse: fabric.functions.FabricSqlConn
             item[prop] = val
         values.append(item)
 
-    valJSON = json.dumps({"message": "File {} is written to {} Lakehouse. You can delete it from the Lakehouse after trying this sample.".format(csvFileName, myLakehouse.alias_name),
-                        "values": values})
-
     cursor.close()
     whSqlConnection.close()
     csvFile.close()
     lhFileConnection.close()
 
-    return valJSON
+    return {"message": "File {} is written to {} Lakehouse. You can delete it from the Lakehouse after trying this sample.".format(csvFileName, myLakehouse.alias_name),
+                        "values": values}
