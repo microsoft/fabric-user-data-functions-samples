@@ -1,0 +1,42 @@
+# Microsoft Fabric User Data Functions - Python Samples
+
+> Comprehensive collection of serverless Python functions for the Microsoft Fabric platform
+
+This repository contains sample User Data Functions (UDFs) for Microsoft Fabric, demonstrating how to create serverless functions that can process data, connect to various Fabric data sources, and perform data transformations. These functions can be invoked from KQL queries, Spark notebooks, and other Fabric services to extend data processing capabilities.
+
+## Warehouse
+
+Sample functions to read from and write data to a warehouse in Fabric.
+
+- [Export data from warehouse into a lakehouse](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/Warehouse/export_warehouse_data_to_lakehouse.py): Use this user data function that writes data from a warehouse into a csv file and saves it in a lakehouse
+- [Query data from a warehouse](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/Warehouse/query_data_from_warehouse.py): Use this user data function to query data from a warehouse.
+
+## Lakehouse
+
+Sample functions to work with tables and files within a lakehouse in Fabric.
+
+- [Write csv file into a lakehouse](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/Lakehouse/write_csv_file_in_lakehouse.py): This sample writes a CSV file into a lakehouse using pandas.
+- [Read csv file from lakehouse](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/Lakehouse/read_csv_file_from_lakehouse.py): This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter.
+- [Query data from lakehouse tables](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/Lakehouse/query_data_from_tables.py): This sample reads data from a table in a lakehouse.
+
+## SQL Database
+
+Sample functions to work with SQL database.
+
+- [Write multiple rows of data into a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/write_many_rows_to_sql_db.py): This sample allows you to write multiple rows of data into a SQL database.
+- [Write one row of data into a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/write_one_row_to_sql_db.py): This sample allows you to write one row of data into a SQL database.
+- [Read data from a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/read_from_sql_db.py): This sample allows you to read data from SQL database.
+
+## Data Manipulation
+
+Sample functions to transform data using pandas,numpy.
+
+- [Manipulate data with pandas library](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/DataManipulation/manipulate_data_with_pandas.py): This sample uses pandas to manipulate a given dataset to group people by age.
+- [Transform data with numpy library](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/DataManipulation/transform_data_with_numpy.py): This samples converts the input 1D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean.
+
+## UDF Data Types
+
+Sample functions to show usage of data types supplied within the SDK library.
+
+- [Using UserDataFunctionContext](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/UDFDataTypes/use_userdatafunctioncontext.py): This sample uses UserDataFunctionContext to get metadata about the invocation.
+- [Raising UserThrownError](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/UDFDataTypes/raise_userthrownerror.py): This samples raises an error if the age supplied as a parameter is < 18.

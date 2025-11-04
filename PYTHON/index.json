@@ -1,42 +1,148 @@
-[ 
-  {
-    "name": "Warehouse",
-    "description": "User data functions to work with Warehouse",
-    "data": [
-      {
-        "name": "Write data into a warehouse",
-        "description": "Use this user data function to insert data into a warehouse table",
-        "detail": "Add a warehouse connection to the user data function and then use the function to insert data into a warehouse table",
-        "dateAdded": "2024-09-03T19:35:01Z",
-        "data": [
-          {
-            "name": "Query data from a warehouse",
-            "description": "Use this user data function to query data into a warehouse and write into a lakehouse.",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a warehouse and write into a lakehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Warehouse/QueryWarehouseAndWriteToCsv.py"
-          },
-          {
-            "name": "Query data from a table",
-            "description": "Query data from a table in a warehouse",
-            "detail": "Add a warehouse connection to the user data function and then use the function to query data from a table in a warehouse.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "Warehouse/ReadDataFromWarehouse.py"
-          }
-        ]
-      }
-    ]
-  },
-  {
-        "name": "Data Manipulation",
-        "description": "User data functions that can be use to transform data.",
-        "data": [
-          {
-            "name": "Vectorize a string",
-            "description": "Function to vectorize text data from string to being represented by numeric values.",
-            "dateAdded": "2024-09-03T19:35:01Z",
-            "data": "DataManipulation/VectorizeStrings.py"
-          }
-        ]
-    }
+[
+   {
+      "name":"Warehouse",
+      "description":"Sample functions to read from and write data to a warehouse in Fabric.",
+      "data":[
+         {
+            "name":"Export data from warehouse into a lakehouse",
+            "description":"Use this user data function that writes data from a warehouse into a csv file and saves it in a lakehouse",
+            "detail":"Add a warehouse and lakehouse connection. Then use this sample function that writes data from a warehouse into csv file and saves it in a lakehouse",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Warehouse/export_warehouse_data_to_lakehouse.py"
+         },
+         {
+            "name":"Query data from a warehouse",
+            "description":"Use this user data function to query data from a warehouse.",
+            "detail":"Add a warehouse connection to the user data function and then use the function to query data from a warehouse.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Warehouse/query_data_from_warehouse.py"
+         }
+      ]
+   },
+   {
+      "name":"Lakehouse",
+      "description":"Sample functions to work with tables and files within a lakehouse in Fabric.",
+      "data":[
+         {
+            "name":"Read a parquet file from a lakehouse",
+            "description":"This sample reads a parquet file from a lakehouse.",
+            "dateAdded":"2025-04-30T00:00:00Z",
+            "data":"Lakehouse/read_parquet_from_lakehouse.py"
+         },
+         {
+            "name":"Write csv file into a lakehouse",
+            "description":"This sample writes a CSV file into a lakehouse using pandas.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/write_csv_file_in_lakehouse.py"
+         },
+         {
+            "name":"Read csv file from lakehouse",
+            "description":"This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/read_csv_file_from_lakehouse.py"
+         },
+         {
+            "name":"Read csv file from lakehouse (Async)",
+            "description":"This sample reads a CSV file from a lakehouse using pandas. Function takes file name as an input parameter. This is an async version of the function.",
+            "dateAdded":"2025-06-12T00:00:00Z",
+            "data":"Lakehouse/read_csv_file_from_lakehouse_async.py"
+         },
+         {
+            "name":"Query data from lakehouse tables",
+            "description":"This sample reads data from a table in a lakehouse.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"Lakehouse/query_data_from_tables.py"
+         }
+      ]
+   },
+   {
+      "name":"SQL Database",
+      "description":"Sample functions to work with SQL database.",
+      "data":[
+         {
+            "name":"Write multiple rows of data into a table in SQL database",
+            "description":"This sample allows you to write multiple rows of data into a SQL database.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"SQLDB/write_many_rows_to_sql_db.py"
+         },
+         {
+            "name":"Write one row of data into a table in SQL database",
+            "description":"This sample allows you to write one row of data into a SQL database.",
+            "dateAdded":"2025-01-14T00:00:00Z",
+            "data":"SQLDB/write_one_row_to_sql_db.py"
+         },
+         {
+            "name":"Read data from a table in SQL database",
+            "description":"This sample allows you to read data from SQL database.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"SQLDB/read_from_sql_db.py"
+         }
+      ]
+   },
+   {
+      "name":"Data Manipulation",
+      "description":"Sample functions to transform data using pandas, numpy, and other libraries.",
+      "data":[
+        {
+            "name":"Manipulate data with pandas library",
+            "description":"This sample uses pandas to manipulate a given dataset to group people by age.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"DataManipulation/manipulate_data_with_pandas.py"
+         },
+         {
+            "name":"Filter data using pandas dataframes",
+            "description":"This sample takes as input customers object data as a pandas dataframe type and filters the data based on country.",
+            "dateAdded":"2025-15-09T00:00:00Z",
+            "data":"pandas/dataframe-example.py"
+         },
+         {
+            "name":"Summarize age distribution with pandas Series",
+            "description":"This sample takes a list of ages as a pandas Series object and then summarizes the distribution of ages.",
+            "dateAdded":"2025-15-09T00:00:00Z",
+            "data":"pandas/series-example.py"
+         },
+         {
+            "name":"Transform data with numpy library",
+            "description":"This samples converts the input 1D list to a numpy array. The output is normalized to the range [0, 1] and we calculate the mean.",
+            "dateAdded":"2024-11-05T00:00:00Z",
+            "data":"DataManipulation/transform_data_with_numpy.py"
+         },
+         {
+            "name":"Vectorize strings with scikit-learn",
+            "description":"This sample vectorizes a string of text using CountVectorizer and returns a vectorized representation.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/vectorize_strings.py"
+         },
+         {
+            "name":"Sentiment analysis with TextBlob",
+            "description":"This sample analyzes sentiment of input text using TextBlob and classifies as Happy, Sad, or Neutral.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/sentiment_analysis.py"
+         },
+         {
+            "name":"Mask credit card numbers",
+            "description":"This sample masks credit card numbers showing only the last 4 digits for security purposes.",
+            "dateAdded":"2025-07-01T00:00:00Z",
+            "data":"DataManipulation/mask_credit_card.py"
+         }
+      ]
+   },
+   {
+      "name":"UDF Data Types",
+      "description":"Sample functions to show usage of data types supplied within the SDK library.",
+      "data":[
+         {
+            "name":"Using UserDataFunctionContext",
+            "description":"This sample uses UserDataFunctionContext to get metadata about the invocation.",
+            "dateAdded":"2025-01-17T00:00:00Z",
+            "data":"UDFDataTypes/use_userdatafunctioncontext.py"
+         },
+         {
+            "name":"Raising UserThrownError",
+            "description":"This samples raises an error if the age supplied as a parameter is < 18.",
+            "dateAdded":"2025-01-17T00:00:00Z",
+            "data":"UDFDataTypes/raise_userthrownerror.py"
+         }
+      ]
+   }
 ]
