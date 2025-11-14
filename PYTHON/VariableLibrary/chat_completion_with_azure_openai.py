@@ -3,8 +3,6 @@
 from openai import AzureOpenAI
 from azure.keyvault.secrets import SecretClient
 
-udf = fn.UserDataFunctions()
-
 @udf.generic_connection(argName="keyVaultClient", audienceType="KeyVault")
 @udf.connection(argName="varLib", alias="<My Variable Library Alias>")
 @udf.function()
