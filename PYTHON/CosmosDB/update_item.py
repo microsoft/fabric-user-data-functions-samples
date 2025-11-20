@@ -57,9 +57,12 @@ def update_product(cosmosDb: fn.FabricItem, categoryName: str, productId: str, n
         # Update the product's price
         product["currentPrice"] = newPrice
         
+        now = datetime.now().replace(microsecond=0)
+        current_time_iso = now.isoformat()
+        
         # Append to the price history
         product["priceHistory"].append({
-            "date": datetime.now(timezone.utc).isoformat() + "Z",
+            "date": current_time_iso,
             "price": newPrice
         })
 
