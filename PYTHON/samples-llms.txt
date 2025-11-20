@@ -27,15 +27,12 @@ Sample functions to work with SQL database.
 - [Write one row of data into a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/write_one_row_to_sql_db.py): This sample allows you to write one row of data into a SQL database.
 - [Read data from a table in SQL database](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/SQLDB/read_from_sql_db.py): This sample allows you to read data from SQL database.
 
-## CosmosDB
+## Variable Library
 
-Sample functions to work with Azure Cosmos DB for NoSQL containers in Fabric.
+Sample function to retrieve values and from Fabric Variable Library.
 
-- [Create a single item in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/create_item.py): This sample inserts a new single document item into a container for a Cosmos DB artifact.
-- [Query multiple items from Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/query_items.py): This sample queries for multiple items from a Cosmos DB container using parameterized queries with partition key filtering.
-- [Read a single item from Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/read_item.py): This sample gets a single document from a Cosmos DB container using partition key and item id.
-- [Update an item in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/update_item.py): This sample reads and updates a single document in a Cosmos DB container, modifying the price adding to the price history array, then updating the document in Cosmos DB.
-- [Vector search items in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/vector_query_items.py): This sample performs vector similarity search on a Cosmos DB container using embeddings generated from Azure OpenAI.
+- [Get variables from Variable Library](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/VariableLibrary/get_variables_from_library.py): This sample retrieves date format for data ingestion using date format configuration from Variable Library.
+- [Chat completion with Azure OpenAI](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/VariableLibrary/chat_completion_with_azure_openai.py): This sample sends a chat completion request to Azure OpenAI using an API key securely retrieved via a generic Key Vault connection.
 
 ## Data Manipulation
 
