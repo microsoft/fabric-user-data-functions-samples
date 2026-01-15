@@ -47,3 +47,13 @@ Sample functions to show usage of data types supplied within the SDK library.
 
 - [Using UserDataFunctionContext](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/UDFDataTypes/use_userdatafunctioncontext.py): This sample uses UserDataFunctionContext to get metadata about the invocation.
 - [Raising UserThrownError](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/UDFDataTypes/raise_userthrownerror.py): This samples raises an error if the age supplied as a parameter is < 18.
+
+## CosmosDB
+
+Sample functions to work with Azure Cosmos DB for NoSQL containers in Fabric.
+
+- [Create a single item in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/create_item.py): This sample inserts a new single document item into a container for a Cosmos DB artifact.
+- [Query multiple items from Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/query_items.py): This sample queries for multiple items from a Cosmos DB container using parameterized queries with partition key filtering.
+- [Read a single item from Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/read_item.py): This sample gets a single document from a Cosmos DB container using partition key and item id.
+- [Update an item in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/update_item.py): This sample reads and updates a single document in a Cosmos DB container, modifying the price adding to the price history array, then updating the document in Cosmos DB.
+- [Vector search items in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/vector_query_items.py): This sample performs vector similarity search on a Cosmos DB container using embeddings generated from Azure OpenAI.
