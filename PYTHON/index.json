@@ -194,5 +194,23 @@
             "data":"CosmosDB/vector_query_items.py"
          }
       ]
+   },
+   {
+      "name":"Business Events",
+      "description":"Sample functions to generate business events using Fabric Business Events.",
+      "data":[
+         {
+            "name":"Generate a business event",
+            "description":"This sample demonstrates how to generate a business event to notify downstream systems when an order has shipped.",
+            "dateAdded":"2026-01-28T00:00:00Z",
+            "data":"BusinessEvents/generate_event.py"
+         },
+         {
+            "name":"Query lakehouse and generate events",
+            "description":"This sample queries inventory data from a lakehouse and generates business events for low stock items.",
+            "dateAdded":"2026-01-28T00:00:00Z",
+            "data":"BusinessEvents/query_lakehouse_and_generate_event.py"
+         }
+      ]
    }
 ]
