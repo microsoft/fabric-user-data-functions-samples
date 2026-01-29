@@ -25,7 +25,7 @@ def query_and_generate_inventory_event(
         Pre-requisites:
             * Create a Business Events item in Microsoft Fabric with an event type (e.g., "inventory.low_stock")
             * Create a Lakehouse with an inventory table containing columns: ProductId, ProductName, StockLevel
-            * Add connections to both the Event Definition item and the Lakehouse in your User Data Function
+            * Add connections to both the Schema Set item and the Lakehouse in your User Data Function
     
     Args:
         businessEventsClient (fn.FabricBusinessEventsClient): Fabric Business Events connection client

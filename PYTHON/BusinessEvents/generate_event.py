@@ -15,7 +15,7 @@ def generate_order_shipped_event(businessEventsClient: fn.FabricBusinessEventsCl
         
         Pre-requisites:
             * Create a Business Events item in Microsoft Fabric
-            * Add a connection to the Business Events item in your User Data Function
+            * Add a connection to the Schema Set where the Business Events item is defined in your User Data Function
             * Define the event schema/type in your Business Events item (e.g., "order.shipped")
     
     Args:

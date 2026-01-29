@@ -57,3 +57,10 @@ Sample functions to work with Azure Cosmos DB for NoSQL containers in Fabric.
 - [Read a single item from Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/read_item.py): This sample gets a single document from a Cosmos DB container using partition key and item id.
 - [Update an item in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/update_item.py): This sample reads and updates a single document in a Cosmos DB container, modifying the price adding to the price history array, then updating the document in Cosmos DB.
 - [Vector search items in Cosmos DB container](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/CosmosDB/vector_query_items.py): This sample performs vector similarity search on a Cosmos DB container using embeddings generated from Azure OpenAI.
+
+## Business Events
+
+Sample functions to generate business events using Fabric Business Events.
+
+- [Generate a business event](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/generate_event.py): This sample demonstrates how to generate a business event to notify downstream systems when an order has shipped.
+- [Query lakehouse and generate events](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/query_lakehouse_and_generate_event.py): This sample queries inventory data from a lakehouse and generates business events for low stock items.
