@@ -1,10 +1,10 @@
-# Select 'Manage connections' and add a connection to an Event Definition item
-# Replace the alias "<My Event Definition Alias>" with your connection alias.
+# Select 'Manage connections' and add a connection to an Event Schema Set item
+# Replace the alias "<My Event Schema Set Alias>" with your connection alias.
 import fabric.functions as fn
 
 udf = fn.UserDataFunctions()
 
-@udf.connection(argName="businessEventsClient", alias="<My Event Definition Alias>")
+@udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.function()
 def generate_order_shipped_event(businessEventsClient: fn.FabricBusinessEventsClient) -> str:
     '''

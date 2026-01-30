@@ -1,19 +1,15 @@
-# Select 'Manage connections' and add connections to an Event Definition item and a Lakehouse
-# Replace the alias "<My Event Definition Alias>" with your Event Definition connection alias.
+# Select 'Manage connections' and add connections to an Event Schema Set item and a Lakehouse
+# Replace the alias "<My Event Schema Set Alias>" with your Event Schema Set connection alias.
 # Replace the alias "<My Lakehouse Alias>" with your Lakehouse connection alias.
 import fabric.functions as fn
 import datetime
 
 udf = fn.UserDataFunctions()
 
-@udf.connection(argName="businessEventsClient", alias="<My Event Definition Alias>")
+@udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
-def query_and_generate_inventory_event(
-    businessEventsClient: fn.FabricBusinessEventsClient, 
-    myLakehouse: fn.FabricLakehouseClient,
-    threshold: int = 10
-) -> str:
+def query_and_generate_inventory_event(businessEventsClient: fn.FabricBusinessEventsClient, myLakehouse: fn.FabricLakehouseClient, threshold: int = 10) -> str:
     '''
     Description: Query inventory data from a lakehouse and generate business events for low stock items.
     
