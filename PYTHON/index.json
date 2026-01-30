@@ -210,6 +210,12 @@
             "description":"This sample queries inventory data from a lakehouse and generates business events for low stock items.",
             "dateAdded":"2026-01-28T00:00:00Z",
             "data":"BusinessEvents/query_lakehouse_and_generate_event.py"
+         },
+         {
+            "name":"Generate sale summary event",
+            "description":"This sample queries sale data from a lakehouse, aggregates by stock item, and generates a business event with the sale summary.",
+            "dateAdded":"2026-01-30T00:00:00Z",
+            "data":"BusinessEvents/generate_sale_summary_event.py"
          }
       ]
    }
