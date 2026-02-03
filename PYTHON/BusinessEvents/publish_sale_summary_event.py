@@ -9,15 +9,9 @@ udf = fn.UserDataFunctions()
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
-def generate_sale_summary_event(
-    businessEventsClient: fn.FabricBusinessEventsClient, 
-    myLakehouse: fn.FabricLakehouseClient,
-    customerKey: int,
-    saleKey: int,
-    salesPersonKey: int
-) -> str:
+def publish_sale_summary_event(businessEventsClient: fn.FabricBusinessEventsClient, myLakehouse: fn.FabricLakehouseClient, customerKey: int, saleKey: int, salesPersonKey: int) -> str:
     '''
-    Description: Query sale data from a lakehouse and generate a business event with the sale summary.
+    Description: Query sale data from a lakehouse and publish a business event with the sale summary.
     
         This sample demonstrates how to query sales data from a Lakehouse, aggregate it by 
         stock item, and publish a business event containing the sale summary. This pattern 
@@ -40,18 +34,18 @@ def generate_sale_summary_event(
         salesPersonKey (int): The sales person identifier to filter sales.
 
     Returns:
-        str: Summary message indicating the event was generated with item count.
+        str: Summary message indicating the event was published with item count.
 
     Workflow:
         1. Connect to the Lakehouse SQL endpoint.
         2. Query the fact_sale table filtering by customerKey, saleKey, and salesPersonKey.
         3. Aggregate the results by StockItemKey, summing quantities and totals.
-        4. Generate a business event with the sale summary details.
+        4. Publish a business event with the sale summary details.
         5. Return a confirmation message.
         
     Example:
-        generate_sale_summary_event(businessEventsClient, myLakehouse, customerKey=100, saleKey=5001, salesPersonKey=25) 
-        returns "Generated sale summary event for sale 5001 with 3 line items totaling $1,234.56"
+        publish_sale_summary_event(businessEventsClient, myLakehouse, customerKey=100, saleKey=5001, salesPersonKey=25) 
+        returns "Published sale summary event for sale 5001 with 3 line items totaling $1,234.56"
     '''
     
     # Connect to the Lakehouse SQL Endpoint
@@ -102,15 +96,15 @@ def generate_sale_summary_event(
         "eventTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }
     
-    # Generate the business event
-    businessEventsClient.GenerateEvent(
+    # Publish the business event
+    businessEventsClient.PublishEvent(
         type="sale.summary", 
         event_data=event_data, 
-        version_id="V1"
+        data_version="V1"
     )
     
     # Close the connection
     cursor.close()
     connection.close()
     
-    return f"Generated sale summary event for sale {saleKey} with {len(line_items)} line items totaling ${grand_total:,.2f}"
+    return f"Published sale summary event for sale {saleKey} with {len(line_items)} line items totaling ${grand_total:,.2f}"

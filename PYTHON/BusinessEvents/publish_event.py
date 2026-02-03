@@ -6,47 +6,49 @@ udf = fn.UserDataFunctions()
 
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.function()
-def generate_order_shipped_event(businessEventsClient: fn.FabricBusinessEventsClient) -> str:
+def publish_order_shipped_event(businessEventsClient: fn.FabricBusinessEventsClient, orderId: str, deliverAddress: str) -> str:
     '''
-    Description: Generate a business event to notify downstream systems when an order has shipped.
+    Description: Publish a business event to notify downstream systems when an order has shipped.
     
         This sample demonstrates how to use the FabricBusinessEventsClient to publish 
         business events that can be consumed by other applications and services.
         
         Pre-requisites:
-            * Create a Business Events item in Microsoft Fabric
+            * Create a Business Events in Microsoft Fabric
             * Add a connection to the Schema Set where the Business Events item is defined in your User Data Function
             * Define the event schema/type in your Business Events item (e.g., "order.shipped")
     
     Args:
         businessEventsClient (fn.FabricBusinessEventsClient): Fabric Business Events connection client
             used to publish events to the Business Events item.
+        orderId (str): The unique identifier for the order that has shipped.
+        deliverAddress (str): The delivery address for the shipped order.
 
     Returns:
-        str: Confirmation message indicating the event was generated successfully.
+        str: Confirmation message indicating the event was published successfully.
 
     Workflow:
-        1. Prepare the event data payload with relevant order information.
-        2. Use the GenerateEvent method to publish the event.
+        1. Prepare the event data payload with the provided order information.
+        2. Use the PublishEvent method to publish the event.
         3. Return a confirmation message.
         
     Example:
-        generate_order_shipped_event(businessEventsClient) 
-        returns "Event 'order.shipped' generated successfully for order 12345"
+        publish_order_shipped_event(businessEventsClient, orderId="12345", deliverAddress="123 Main St") 
+        returns "Event 'order.shipped' published successfully for order 12345"
     '''
     
     # Prepare the event data payload
     event_data = {
-        "orderId": "12345",
+        "orderId": orderId,
         "status": "shipped",
-        "orderDeliverAddress": "123 Main St"
+        "orderDeliverAddress": deliverAddress
     }
     
-    # Generate the business event
-    businessEventsClient.GenerateEvent(
+    # Publish the business event
+    businessEventsClient.PublishEvent(
         type="order.shipped", 
         event_data=event_data, 
-        version_id="V1"
+        data_version="V1"
     )
     
-    return f"Event 'order.shipped' generated successfully for order {event_data['orderId']}"
+    return f"Event 'order.shipped' published successfully for order {orderId}"

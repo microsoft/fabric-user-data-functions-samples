@@ -60,8 +60,8 @@ Sample functions to work with Azure Cosmos DB for NoSQL containers in Fabric.
 
 ## Business Events
 
-Sample functions to generate business events using Fabric Business Events.
+Sample functions to publish business events using Fabric Business Events.
 
-- [Generate a business event](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/generate_event.py): This sample demonstrates how to generate a business event to notify downstream systems when an order has shipped.
-- [Query lakehouse and generate events](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/query_lakehouse_and_generate_event.py): This sample queries inventory data from a lakehouse and generates business events for low stock items.
-- [Generate sale summary event](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/generate_sale_summary_event.py): This sample queries sale data from a lakehouse, aggregates by stock item, and generates a business event with the sale summary.
+- [Publish a business event](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/publish_event.py): This sample demonstrates how to publish a business event to notify downstream systems when an order has shipped.
+- [Query lakehouse and publish events](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/query_lakehouse_and_publish_event.py): This sample queries inventory data from a lakehouse and publishes business events for low stock items.
+- [Publish sale summary event](https://raw.githubusercontent.com/microsoft/fabric-user-data-functions-samples/refs/heads/main/PYTHON/BusinessEvents/publish_sale_summary_event.py): This sample queries sale data from a lakehouse, aggregates by stock item, and publishes a business event with the sale summary.

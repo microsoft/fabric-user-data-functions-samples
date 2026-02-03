@@ -9,17 +9,17 @@ udf = fn.UserDataFunctions()
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
-def query_and_generate_inventory_event(businessEventsClient: fn.FabricBusinessEventsClient, myLakehouse: fn.FabricLakehouseClient, threshold: int = 10) -> str:
+def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEventsClient, myLakehouse: fn.FabricLakehouseClient, threshold: int = 10) -> str:
     '''
-    Description: Query inventory data from a lakehouse and generate business events for low stock items.
+    Description: Query inventory data from a lakehouse and publish business events for low stock items.
     
         This sample demonstrates how to combine a Lakehouse connection with Business Events
         to query data and publish events based on the results. This pattern is useful for
-        data-driven event generation scenarios like inventory alerts, threshold notifications,
+        data-driven event publishing scenarios like inventory alerts, threshold notifications,
         or data change events.
         
         Pre-requisites:
-            * Create a Business Events item in Microsoft Fabric with an event type (e.g., "inventory.low_stock")
+            * Create a Business Events in Microsoft Fabric with an event type (e.g., "inventory.low_stock")
             * Create a Lakehouse with an inventory table containing columns: ProductId, ProductName, StockLevel
             * Add connections to both the Schema Set item and the Lakehouse in your User Data Function
     
@@ -32,17 +32,17 @@ def query_and_generate_inventory_event(businessEventsClient: fn.FabricBusinessEv
             Defaults to 10.
 
     Returns:
-        str: Summary message indicating how many low stock events were generated.
+        str: Summary message indicating how many low stock events were published.
 
     Workflow:
         1. Connect to the Lakehouse SQL endpoint.
         2. Query the inventory table for products with stock below the threshold.
-        3. For each low stock product, generate a business event with product details.
-        4. Return a summary of events generated.
+        3. For each low stock product, publish a business event with product details.
+        4. Return a summary of events published.
         
     Example:
-        query_and_generate_inventory_event(businessEventsClient, myLakehouse, threshold=5) 
-        returns "Generated 3 low stock events for products below threshold of 5"
+        query_and_publish_inventory_event(businessEventsClient, myLakehouse, threshold=5) 
+        returns "Published 3 low stock events for products below threshold of 5"
     '''
     
     # Connect to the Lakehouse SQL Endpoint
@@ -57,11 +57,11 @@ def query_and_generate_inventory_event(businessEventsClient: fn.FabricBusinessEv
     """
     cursor.execute(query)
     
-    # Process results and generate events
+    # Process results and publish events
     rows = [row for row in cursor]
     column_names = [col[0] for col in cursor.description]
     
-    events_generated = 0
+    events_published = 0
     
     for row in rows:
         # Build the event data from query results
@@ -80,16 +80,16 @@ def query_and_generate_inventory_event(businessEventsClient: fn.FabricBusinessEv
             "alertTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
         
-        # Generate the business event for this low stock item
-        businessEventsClient.GenerateEvent(
+        # Publish the business event for this low stock item
+        businessEventsClient.PublishEvent(
             type="inventory.low_stock", 
             event_data=event_data, 
-            version_id="V1"
+            data_version="V1"
         )
-        events_generated += 1
+        events_published += 1
     
     # Close the connection
     cursor.close()
     connection.close()
     
-    return f"Generated {events_generated} low stock events for products below threshold of {threshold}"
+    return f"Published {events_published} low stock events for products below threshold of {threshold}"
