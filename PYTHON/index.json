@@ -207,7 +207,7 @@
          },
          {
             "name":"Query lakehouse and publish events",
-            "description":"This sample queries inventory data from a lakehouse and publishes business events for low stock items.",
+            "description":"This sample queries inventory data from a lakehouse and publishes multiple business events in a single batch call for low stock items.",
             "dateAdded":"2026-01-28T00:00:00Z",
             "data":"BusinessEvents/query_lakehouse_and_publish_event.py"
          },

@@ -14,9 +14,9 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
     Description: Query inventory data from a lakehouse and publish business events for low stock items.
     
         This sample demonstrates how to combine a Lakehouse connection with Business Events
-        to query data and publish events based on the results. This pattern is useful for
+        to query data and publish multiple events in a single batch. This pattern is useful for
         data-driven event publishing scenarios like inventory alerts, threshold notifications,
-        or data change events.
+        or data change events where you need to efficiently publish many events at once.
         
         Pre-requisites:
             * Create a Business Events in Microsoft Fabric with an event type (e.g., "inventory.low_stock")
@@ -37,8 +37,9 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
     Workflow:
         1. Connect to the Lakehouse SQL endpoint.
         2. Query the inventory table for products with stock below the threshold.
-        3. For each low stock product, publish a business event with product details.
-        4. Return a summary of events published.
+        3. Build a list of event data for all low stock products.
+        4. Publish all events in a single batch call.
+        5. Return a summary of events published.
         
     Example:
         query_and_publish_inventory_event(businessEventsClient, myLakehouse, threshold=5) 
@@ -57,11 +58,12 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
     """
     cursor.execute(query)
     
-    # Process results and publish events
+    # Process results and build event data list
     rows = [row for row in cursor]
     column_names = [col[0] for col in cursor.description]
     
-    events_published = 0
+    # Build a list of events for batch publishing
+    events_list = []
     
     for row in rows:
         # Build the event data from query results
@@ -71,7 +73,7 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
                 value = value.isoformat()
             product_data[col_name] = value
         
-        # Add event metadata
+        # Add event to the list
         event_data = {
             "productId": product_data.get("ProductId"),
             "productName": product_data.get("ProductName"),
@@ -79,17 +81,18 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
             "threshold": threshold,
             "alertTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
-        
-        # Publish the business event for this low stock item
+        events_list.append(event_data)
+    
+    # Publish all events in a single batch call
+    if events_list:
         businessEventsClient.PublishEvent(
             type="inventory.low_stock", 
-            event_data=event_data, 
+            event_data=events_list, 
             data_version="V1"
         )
-        events_published += 1
     
     # Close the connection
     cursor.close()
     connection.close()
     
-    return f"Published {events_published} low stock events for products below threshold of {threshold}"
+    return f"Published {len(events_list)} low stock events for products below threshold of {threshold}"
