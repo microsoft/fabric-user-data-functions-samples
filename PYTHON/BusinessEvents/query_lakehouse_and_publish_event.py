@@ -53,7 +53,7 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
     # Query for products with low stock
     query = f"""
         SELECT ProductId, ProductName, StockLevel 
-        FROM Inventory 
+        FROM dbo.Inventory 
         WHERE StockLevel < {threshold}
     """
     cursor.execute(query)

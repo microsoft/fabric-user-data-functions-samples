@@ -3,6 +3,7 @@
 # Replace the alias "<My Lakehouse Alias>" with your Lakehouse connection alias.
 import fabric.functions as fn
 import datetime
+import json
 
 udf = fn.UserDataFunctions()
 
@@ -20,8 +21,7 @@ def publish_sale_summary_event(businessEventsClient: fn.FabricBusinessEventsClie
         
         Pre-requisites:
             * Create a Business Events item in Microsoft Fabric with an event type (e.g., "sale.summary")
-            * Create a Lakehouse with a dbo.fact_sale table containing columns: 
-              CustomerKey, SaleKey, SalesPersonKey, StockItemKey, Description, Quantity, TotalIncludingTax
+            * Create a Lakehouse and start with sample data "Sales Data"
             * Add connections to both the Event Schema Set item and the Lakehouse in your User Data Function
     
     Args:
@@ -62,7 +62,7 @@ def publish_sale_summary_event(businessEventsClient: fn.FabricBusinessEventsClie
         FROM dbo.fact_sale 
         WHERE CustomerKey = {customerKey}
           AND SaleKey = {saleKey}
-          AND SalesPersonKey = {salesPersonKey}
+          AND SalespersonKey = {salesPersonKey}
         GROUP BY StockItemKey, Description
     """
     cursor.execute(query)
@@ -90,7 +90,7 @@ def publish_sale_summary_event(businessEventsClient: fn.FabricBusinessEventsClie
         "saleKey": saleKey,
         "customerKey": customerKey,
         "salesPersonKey": salesPersonKey,
-        "lineItems": line_items,
+        "lineItems": json.dumps(line_items),
         "lineItemCount": len(line_items),
         "grandTotal": grand_total,
         "eventTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
