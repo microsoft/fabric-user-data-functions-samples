@@ -206,13 +206,13 @@
             "data":"BusinessEvents/publish_event.py"
          },
          {
-            "name":"Batch publish low stock inventory alerts",
-            "description":"This sample queries inventory data from a lakehouse and publishes multiple business events in a single batch call for low stock items.",
+            "name":"Query SQL Database and batch publish inventory alerts",
+            "description":"This sample queries inventory data from a SQL Database and publishes multiple business events in a single batch call for low stock items.",
             "dateAdded":"2026-01-28T00:00:00Z",
-            "data":"BusinessEvents/query_lakehouse_and_publish_event.py"
+            "data":"BusinessEvents/query_sql_and_publish_event.py"
          },
          {
-            "name":"Query and publish aggregated sale summary",
+            "name":"Query Lakehouse and publish aggregated sale summary",
             "description":"This sample queries sale data from a lakehouse, aggregates by stock item, and publishes a business event with the sale summary.",
             "dateAdded":"2026-01-30T00:00:00Z",
             "data":"BusinessEvents/publish_sale_summary_event.py"
