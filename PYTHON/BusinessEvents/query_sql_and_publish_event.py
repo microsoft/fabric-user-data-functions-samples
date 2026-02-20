@@ -1,28 +1,28 @@
 import datetime
-# Select 'Manage connections' and add connections to an Event Schema Set item and a Lakehouse
+# Select 'Manage connections' and add connections to an Event Schema Set item and a SQL Database
 # Replace the alias "<My Event Schema Set Alias>" with your Event Schema Set connection alias.
-# Replace the alias "<My Lakehouse Alias>" with your Lakehouse connection alias.
+# Replace the alias "<My SQL Database Alias>" with your SQL Database connection alias.
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
-@udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
+@udf.connection(argName="sqlDB", alias="<My SQL Database Alias>")
 @udf.function()
-def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEventsClient, myLakehouse: fn.FabricLakehouseClient, threshold: int = 10) -> str:
+def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEventsClient, sqlDB: fn.FabricSqlConnection, threshold: int = 10) -> str:
     '''
-    Description: Query inventory data from a lakehouse and publish business events for low stock items.
+    Description: Query inventory data from a SQL Database and publish business events for low stock items.
     
-        This sample demonstrates how to combine a Lakehouse connection with Business Events
+        This sample demonstrates how to combine a SQL Database connection with Business Events
         to query data and publish multiple events in a single batch. This pattern is useful for
         data-driven event publishing scenarios like inventory alerts, threshold notifications,
         or data change events where you need to efficiently publish many events at once.
         
         Pre-requisites:
             * Create a Business Events in Microsoft Fabric with an event type (e.g., "inventory.low_stock")
-            * Create a Lakehouse with an inventory table containing columns: ProductId, ProductName, StockLevel
-            * Add connections to both the Schema Set item and the Lakehouse in your User Data Function
+            * Create a SQL Database with an Inventory table containing columns: ProductId, ProductName, StockLevel
+            * Add connections to both the Schema Set item and the SQL Database in your User Data Function
     
     Args:
         businessEventsClient (fn.FabricBusinessEventsClient): Fabric Business Events connection client
             used to publish events to the Business Events item.
-        myLakehouse (fn.FabricLakehouseClient): Fabric Lakehouse connection client
+        sqlDB (fn.FabricSqlConnection): Fabric SQL Database connection
             used to query inventory data.
         threshold (int): Stock level threshold. Products with stock below this value will trigger an event.
             Defaults to 10.
@@ -31,19 +31,19 @@ def query_and_publish_inventory_event(businessEventsClient: fn.FabricBusinessEve
         str: Summary message indicating how many low stock events were published.
 
     Workflow:
-        1. Connect to the Lakehouse SQL endpoint.
-        2. Query the inventory table for products with stock below the threshold.
+        1. Connect to the SQL Database.
+        2. Query the Inventory table for products with stock below the threshold.
         3. Build a list of event data for all low stock products.
         4. Publish all events in a single batch call.
         5. Return a summary of events published.
         
     Example:
-        query_and_publish_inventory_event(businessEventsClient, myLakehouse, threshold=5) 
+        query_and_publish_inventory_event(businessEventsClient, sqlDB, threshold=5) 
         returns "Published 3 low stock events for products below threshold of 5"
     '''
     
-    # Connect to the Lakehouse SQL Endpoint
-    connection = myLakehouse.connectToSql()
+    # Connect to the SQL Database
+    connection = sqlDB.connect()
     cursor = connection.cursor()
     
     # Query for products with low stock
