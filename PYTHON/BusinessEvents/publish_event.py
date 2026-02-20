@@ -6,49 +6,57 @@ udf = fn.UserDataFunctions()
 
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.function()
-def publish_order_shipped_event(businessEventsClient: fn.FabricBusinessEventsClient, orderId: str, deliverAddress: str) -> str:
+def publish_custom_event(
+    businessEventsClient: fn.FabricBusinessEventsClient,
+    # Add your custom parameters below - these are examples you can replace:
+    param1: str,
+    param2: int
+) -> str:
     '''
-    Description: Publish a business event to notify downstream systems when an order has shipped.
+    Description: Publish a custom business event with your own event type and properties.
     
-        This sample demonstrates how to use the FabricBusinessEventsClient to publish 
-        business events that can be consumed by other applications and services.
+        This sample provides a template for publishing business events using the 
+        FabricBusinessEventsClient. Customize the event type, properties, and parameters
+        to match your specific business scenario.
         
         Pre-requisites:
-            * Create a Business Events in Microsoft Fabric
-            * Add a connection to the Schema Set where the Business Events item is defined in your User Data Function
-            * Define the event schema/type in your Business Events item (e.g., "order.shipped")
+            * Create a Business Events item in Microsoft Fabric
+            * Add a connection to the Schema Set where the Business Events item is defined
+            * Define your event schema/type in your Business Events item
     
     Args:
         businessEventsClient (fn.FabricBusinessEventsClient): Fabric Business Events connection client
             used to publish events to the Business Events item.
-        orderId (str): The unique identifier for the order that has shipped.
-        deliverAddress (str): The delivery address for the shipped order.
+        param1 (str): Replace with your first custom parameter.
+        param2 (int): Replace with your second custom parameter.
 
     Returns:
         str: Confirmation message indicating the event was published successfully.
 
     Workflow:
-        1. Prepare the event data payload with the provided order information.
+        1. Prepare the event data payload with your custom properties.
         2. Use the PublishEvent method to publish the event.
         3. Return a confirmation message.
         
     Example:
-        publish_order_shipped_event(businessEventsClient, orderId="12345", deliverAddress="123 Main St") 
-        returns "Event 'order.shipped' published successfully for order 12345"
+        publish_custom_event(businessEventsClient, param1="value1", param2=123) 
+        returns "Event '<your.event.type>' published successfully"
     '''
     
     # Prepare the event data payload
+    # Replace these properties with your own event schema properties
     event_data = {
-        "orderId": orderId,
-        "status": "shipped",
-        "orderDeliverAddress": deliverAddress
+        "property1": param1,       # Replace with your property name
+        "property2": param2,       # Replace with your property name
+        "property3": "value3"      # Add more properties as needed
     }
     
     # Publish the business event
+    # Replace "<your.event.type>" with your actual event type (e.g., "order.shipped", "inventory.updated")
     businessEventsClient.PublishEvent(
-        type="order.shipped", 
+        type="<your.event.type>", 
         event_data=event_data, 
         data_version="V1"
     )
     
-    return f"Event 'order.shipped' published successfully for order {orderId}"
+    return "Event '<your.event.type>' published successfully"
