@@ -200,19 +200,19 @@
       "description":"Sample functions to publish business events using Fabric Business Events.",
       "data":[
          {
-            "name":"Publish a business event",
-            "description":"This sample demonstrates how to publish a business event to notify downstream systems when an order has shipped.",
+            "name":"Publish custom business event",
+            "description":"This sample provides a template for publishing custom business events with your own event type and properties.",
             "dateAdded":"2026-01-28T00:00:00Z",
             "data":"BusinessEvents/publish_event.py"
          },
          {
-            "name":"Query lakehouse and publish events",
+            "name":"Batch publish low stock inventory alerts",
             "description":"This sample queries inventory data from a lakehouse and publishes multiple business events in a single batch call for low stock items.",
             "dateAdded":"2026-01-28T00:00:00Z",
             "data":"BusinessEvents/query_lakehouse_and_publish_event.py"
          },
          {
-            "name":"Publish sale summary event",
+            "name":"Query and publish aggregated sale summary",
             "description":"This sample queries sale data from a lakehouse, aggregates by stock item, and publishes a business event with the sale summary.",
             "dateAdded":"2026-01-30T00:00:00Z",
             "data":"BusinessEvents/publish_sale_summary_event.py"
