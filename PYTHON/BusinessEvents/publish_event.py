@@ -1,6 +1,5 @@
 # Select 'Manage connections' and add a connection to an Event Schema Set item
 # Replace the alias "<My Event Schema Set Alias>" with your connection alias.
-
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.function()
 def publish_custom_event(

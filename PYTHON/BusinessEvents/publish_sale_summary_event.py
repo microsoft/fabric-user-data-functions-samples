@@ -1,9 +1,8 @@
+import datetime
+import json
 # Select 'Manage connections' and add connections to an Event Schema Set item and a Lakehouse
 # Replace the alias "<My Event Schema Set Alias>" with your Event Schema Set connection alias.
 # Replace the alias "<My Lakehouse Alias>" with your Lakehouse connection alias.
-import datetime
-import json
-
 @udf.connection(argName="businessEventsClient", alias="<My Event Schema Set Alias>")
 @udf.connection(argName="myLakehouse", alias="<My Lakehouse Alias>")
 @udf.function()
