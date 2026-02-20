@@ -1,12 +1,16 @@
 import logging
 from typing import Any
-from fabric.functions.cosmosdb import get_cosmos_client
+from azure.cosmos import CosmosClient
 from azure.cosmos import exceptions
 from openai import AzureOpenAI
 
-@udf.generic_connection(argName="cosmosDb", audienceType="CosmosDB")
+COSMOS_URI = "{my-cosmos-artifact-uri}"
+DB_NAME = "{my-cosmos-artifact-name}" 
+CONTAINER_NAME = "SampleVectorData"
+
+@udf.connection(argName="cosmosClient", audienceType="CosmosDB", cosmos_endpoint=COSMOS_URI)
 @udf.function()
-def product_vector_search(cosmosDb: fn.FabricItem, searchtext: str, similarity: float, limit: int) -> list[dict[str, Any]]:
+def product_vector_search(cosmosClient: CosmosClient, searchtext: str, similarity: float, limit: int) -> list[dict[str, Any]]:
 
     '''
     Description: 
@@ -26,21 +30,21 @@ def product_vector_search(cosmosDb: fn.FabricItem, searchtext: str, similarity: 
         # searchText = "gaming pc"
         # similarity = 0.824
         # limit = 5
-        
-        To run this sample, create a new Cosmos artifact, then click on SampleVectorData in Cosmos Home screen.
-        This will create a container with vectorized data, generated with the text-embedding-ada-002 model.
-        Next go to settings (gear icon), then Connection tab, and copy the URI to COSMOS_DB_URI variable below.
-        Copy the artifact name to DB_NAME variable below. The Sample Data will create a SampleData container.
 
-        Next, create an Azure OpenAI account and deploy the text-embedding-ada-002 model, and copy the endpoint 
-        and key to the variables below in the generate_embeddings function. Be sure to validate the API version in the
-        AI Foundry portal when deploying the model.
+        To run this sample...
+        1. Create a new Cosmos artifact, copy its name to DB_NAME variable above.
+        2. Click on SampleVectorData in Cosmos Home screen to create a container called, SampleVectorData
+           with vectorized data, generated with the text-embedding-ada-002 model.
+        3. Go to settings (gear icon), then Connection tab, copy the URI to COSMOS_URI variable above.
+        4. Create an Azure OpenAI account and deploy the text-embedding-ada-002 model.
+        5. Copy the endpoint and key to the variables below in the generate_embeddings function. 
+        6. Validate the API version in the AI Foundry portal when deploying the model.
 
         Before running this function, go Library Management and add the azure-cosmos package, version 4.14.0 or later.
         and openai package, version 2.3.0 or later.
 
     Args:
-    - cosmosDb (fn.FabricItem): The Cosmos DB connection information.
+    - cosmosClient (CosmosClient): The Cosmos DB client object.
     - searchtext (str): The text to generate embeddings for vector search.
     - similarity (float): The minimum similarity score for results.
     - limit (int): The maximum number of results to return.
@@ -49,12 +53,8 @@ def product_vector_search(cosmosDb: fn.FabricItem, searchtext: str, similarity: 
     - list[dict[str, Any]]: JSON object. List of dictionaries with string keys and values of Any type.
     '''
 
-    COSMOS_DB_URI = "{my-cosmos-artifact-uri}"
-    DB_NAME = "{my-cosmos-artifact-name}" 
-    CONTAINER_NAME = "SampleVectorData"
-
     try:
-        cosmosClient = get_cosmos_client(cosmosDb, COSMOS_DB_URI)
+        # Get the database and container clients
         database = cosmosClient.get_database_client(DB_NAME)
         container = database.get_container_client(CONTAINER_NAME)
 
