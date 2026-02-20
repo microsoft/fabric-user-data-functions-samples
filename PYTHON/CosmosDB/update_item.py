@@ -1,12 +1,16 @@
 import logging
+from datetime import datetime
 from typing import Any
-from datetime import datetime, timezone
-from fabric.functions.cosmosdb import get_cosmos_client
+from azure.cosmos import CosmosClient
 from azure.cosmos import exceptions
 
-@udf.generic_connection(argName="cosmosDb", audienceType="CosmosDB")
+COSMOS_URI = "{my-cosmos-artifact-uri}"
+DB_NAME = "{my-cosmos-artifact-name}" 
+CONTAINER_NAME = "SampleData"
+
+@udf.connection(argName="cosmosClient", audienceType="CosmosDB", cosmos_endpoint=COSMOS_URI)
 @udf.function()
-def update_product(cosmosDb: fn.FabricItem, categoryName: str, productId: str, newPrice: float) -> list[dict[str, Any]]:
+def update_product(cosmosClient: CosmosClient, categoryName: str, productId: str, newPrice: float) -> list[dict[str, Any]]:
 
     '''
     Description: 
@@ -21,9 +25,10 @@ def update_product(cosmosDb: fn.FabricItem, categoryName: str, productId: str, n
         
         The update operation, takes the modified document as the body parameter and the id of the item to replace.
         
-        To run this sample, create a new Cosmos artifact, then click on SampleData in Cosmos Home screen.
-        Next go to settings (gear icon), then Connection tab, and copy the URI to COSMOS_DB_URI variable below.
-        Copy the artifact name to DB_NAME variable below. The Sample Data will create a SampleData container.
+        To run this sample...
+        1. Create a new Cosmos artifact, copy its name to DB_NAME variable above.
+        2. Click on SampleData in Cosmos Home screen to create a container called, SampleData.
+        3. Go to settings (gear icon), then Connection tab, copy the URI to COSMOS_URI variable above.
 
         Before running this function, go Library Management and add the azure-cosmos package, version 4.14.0 or later.
         
@@ -33,7 +38,7 @@ def update_product(cosmosDb: fn.FabricItem, categoryName: str, productId: str, n
         # newPrice = 2899.99
 
     Args:
-    - cosmosDb (fn.FabricItem): The Cosmos DB connection information.
+    - cosmosClient (CosmosClient): The Cosmos DB client object.
     - categoryName: The partition key property for this container.
     - productId: The productId and id are the same value for products.
     - newPrice: The new current price to set for the product.
@@ -42,12 +47,8 @@ def update_product(cosmosDb: fn.FabricItem, categoryName: str, productId: str, n
     - list[dict[str, Any]]: JSON Object. List of dictionaries with string keys and values of Any type.
     '''
 
-    COSMOS_DB_URI = "{my-cosmos-artifact-uri}"
-    DB_NAME = "{my-cosmos-artifact-name}" 
-    CONTAINER_NAME = "SampleData"
-
     try:
-        cosmosClient = get_cosmos_client(cosmosDb, COSMOS_DB_URI)
+        # Get the database and container clients
         database = cosmosClient.get_database_client(DB_NAME)
         container = database.get_container_client(CONTAINER_NAME)
 
