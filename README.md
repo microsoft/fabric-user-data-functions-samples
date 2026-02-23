@@ -49,6 +49,7 @@ Before submitting your sample function, ensure you complete all the following st
 ### 2. File Organization
 - Create your sample file as `<sample_name>.py` in the `PYTHON` folder
 - Choose an appropriate subfolder or create a new one if existing subfolders don't match your content:
+  - `Agent/` - Functions working with Fabric Data Agents
   - `Warehouse/` - Functions working with Fabric warehouses
   - `Lakehouse/` - Functions working with Fabric lakehouses  
   - `SQLDB/` - Functions working with SQL databases

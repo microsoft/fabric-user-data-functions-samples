@@ -1,366 +1,511 @@
 import datetime
-import fabric.functions as fn
-import logging
-from typing import Optional
+import json
+import re
+import uuid
 
 '''
-Fabric User Data Function - Data Agent Integration (SDK Version)
-================================================================
-This User Data Function uses the official fabric-data-agent-client SDK
-to connect to a published Microsoft Fabric Data Agent.
+Fabric User Data Function - Data Agent Integration SDK
+======================================================
 
-Note: This version requires the fabric-data-agent-client package.
-Install it using: pip install fabric-data-agent-client
+Connects to a published Microsoft Fabric Data Agent using the
+OpenAI Assistants API pattern with token passthrough authentication.
+
+Architecture:
+  Notebook (has notebookutils) --> mints bearer token --> passes to UDF --> UDF calls Fabric API
+
+The UDF sandbox CANNOT mint its own tokens because:
+  - notebookutils is not available in UDF runtime
+  - azure-identity cannot be pip installed (proxy blocks PyPI)
+  - IMDS managed identity endpoint is not reachable
+  - No identity environment variables are set
+
+Therefore ALL public functions accept a "bearertoken" parameter that the
+notebook caller must provide via:
+    token = notebookutils.credentials.getToken("https://api.fabric.microsoft.com")
+
+API Pattern (from official MS docs):
+  1. POST /assistants             --> create assistant (model="not used")
+  2. POST /threads                --> create thread
+  3. POST /threads/{id}/messages  --> add user message
+  4. POST /threads/{id}/runs      --> create run (with assistant_id)
+  5. GET  /threads/{id}/runs/{id} --> poll until terminal state
+  6. GET  /threads/{id}/messages  --> read response
+  7. DELETE /threads/{id}         --> cleanup
+
+CRITICAL: All API calls require ?api-version=2024-05-01-preview
 
 Prerequisites:
-- fabric-data-agent-client package installed
-- A published Fabric Data Agent with a valid endpoint URL
-- User Data Functions tenant setting enabled
-- The invoking user must have access to the underlying data sources
+  - A published Fabric Data Agent with a valid endpoint URL
+  - User Data Functions tenant setting enabled
+  - The invoking user must have access to the underlying data sources
 
+UDF Runtime Constraints (verified via diagnostic probe):
+  - Python 3.12.7 (conda-forge)
+  - Available: requests, azure.core, urllib.request, fabric.functions
+  - NOT available: azure.identity, msal, notebookutils
+  - Network: Fabric API reachable (HTTPS), PyPI blocked, IMDS refused
+  - No underscore characters allowed in UDF parameter names
+  - @udf.function() must be the decorator directly above def
+  - Other decorators (@udf.context, @udf.connection) go above @udf.function()
 '''
 
-# Initialize the User Data Functions execution context
-udf = fn.UserDataFunctions()
-
-
 # =============================================================================
-# SDK-Based Functions
+# Configuration
 # =============================================================================
 
-@udf.function()
-def ask_agent_sdk(dataAgentUrl: str, tenantId: str, prompt: str) -> dict:
+API_VERSION = "2024-05-01-preview"
+DEFAULT_TIMEOUT = 120
+POLL_INTERVAL = 3
+
+# =============================================================================
+# Helpers (not decorated -- safe to call from decorated functions)
+# =============================================================================
+
+def get_access_token(bearertoken: str = "") -> str:
     '''
-    Sends a prompt to a Fabric Data Agent using the official SDK.
-    
-    This function uses the fabric-data-agent-client SDK which provides
-    a simplified interface for interacting with Fabric Data Agents.
-    
-    IMPORTANT: This function requires the fabric-data-agent-client package.
-    Add it to your User Data Functions library management:
-        pip install fabric-data-agent-client
-    
-    Args:
-        dataAgentUrl: The published endpoint URL of the Fabric Data Agent.
-        tenantId: Your Azure Active Directory tenant ID.
-        prompt: The natural language question to ask the Data Agent.
-        
-    Returns:
-        dict: Response containing:
-            - success (bool): Whether the request completed successfully
-            - answer (str): The Data Agent's natural language response
-            - timestamp (str): ISO timestamp of the response
-            - error (str|None): Error message if the request failed
-            
-    Example:
-        >>> result = ask_agent_sdk(
-        ...     dataAgentUrl="https://app.fabric.microsoft.com/groups/xxx/aiskills/yyy",
-        ...     tenantId="your-tenant-id",
-        ...     prompt="What were the total sales last quarter?"
-        ... )
-        >>> print(result["answer"])
-   '''
-    logging.info(f"Processing SDK-based Data Agent request - Prompt: {prompt[:100]}...")
-    
+    Returns a valid access token for the Fabric API.
+
+    Primary path: use the caller-provided bearertoken (from notebook).
+    Fallback: attempt auto-detection (best-effort, usually fails in UDF sandbox).
+    '''
+    if bearertoken and bearertoken.strip():
+        logging.info("Using caller-provided bearer token")
+        return bearertoken.strip()
+
+    # Auto-detection fallback (best-effort)
+    errors = []
+
     try:
-        # Import the SDK (must be installed via Library Management)
-        from fabric_data_agent_client import FabricDataAgentClient
-        from azure.identity import DefaultAzureCredential
-        
-        # Use DefaultAzureCredential which works in Fabric runtime
-        # This will use the managed identity or user credentials
-        credential = DefaultAzureCredential()
-        
-        # Create the client
-        client = FabricDataAgentClient(
-            credential=credential,
-            tenant_id=tenantId,
-            data_agent_url=dataAgentUrl
-        )
-        
-        logging.info("Sending prompt to Data Agent via SDK...")
-        
-        # Ask the Data Agent
-        response = client.ask(prompt)
-        
-        logging.info("Data Agent request completed successfully")
-        
-        return {
-            "success": True,
-            "answer": str(response),
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": None
-        }
-        
-    except ImportError as ie:
-        error_msg = (
-            "fabric-data-agent-client package not installed. "
-            "Please add it via Library Management: pip install fabric-data-agent-client"
-        )
-        logging.error(error_msg)
-        return {
-            "success": False,
-            "answer": None,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": error_msg
-        }
+        from notebookutils import mssparkutils
+        return mssparkutils.credentials.getToken("https://api.fabric.microsoft.com")
     except Exception as e:
-        logging.error(f"SDK Data Agent request failed: {e}")
-        return {
-            "success": False,
-            "answer": None,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": str(e)
-        }
+        errors.append(f"notebookutils: {e}")
 
-
-@udf.function()
-def ask_agent_sdk_with_details(
-    dataAgentUrl: str, 
-    tenantId: str, 
-    prompt: str
-) -> dict:
-    '''
-    Sends a prompt to a Fabric Data Agent and returns detailed run information.
-    
-    This function provides additional transparency by including the steps
-    the Data Agent took to arrive at the answer, including any generated queries.
-    
-    Args:
-        dataAgentUrl: The published endpoint URL of the Fabric Data Agent.
-        tenantId: Your Azure Active Directory tenant ID.
-        prompt: The natural language question to ask the Data Agent.
-        
-    Returns:
-        dict: Response containing:
-            - success (bool): Whether the request completed successfully
-            - answer (str): The Data Agent's natural language response
-            - steps (list): List of steps the agent took
-            - generatedQueries (list): Any SQL/DAX/KQL queries generated
-            - timestamp (str): ISO timestamp of the response
-            - error (str|None): Error message if the request failed
-    '''
-    logging.info(f"Processing SDK-based Data Agent request with details...")
-    
     try:
-        from fabric_data_agent_client import FabricDataAgentClient
         from azure.identity import DefaultAzureCredential
-        
-        credential = DefaultAzureCredential()
-        
-        client = FabricDataAgentClient(
-            credential=credential,
-            tenant_id=tenantId,
-            data_agent_url=dataAgentUrl
-        )
-        
-        # Get the response
-        response = client.ask(prompt)
-        
-        # Get detailed run information
-        run_details = client.get_run_details(prompt)
-        
-        # Extract messages
-        messages = run_details.get('messages', {}).get('data', [])
-        assistant_messages = [msg for msg in messages if msg.get('role') == 'assistant']
-        
-        # Extract the answer from the last assistant message
-        answer = ""
-        if assistant_messages:
-            last_msg = assistant_messages[-1]
-            content = last_msg.get('content', [])
-            if isinstance(content, list) and len(content) > 0:
-                answer = content[0].get('text', {}).get('value', str(response))
-            else:
-                answer = str(response)
-        else:
-            answer = str(response)
-        
-        # Extract steps and queries
-        steps = []
-        generated_queries = []
-        
-        run_steps = run_details.get('run_steps', {}).get('data', [])
-        for step in run_steps:
-            tool_name = "N/A"
-            step_details = step.get('step_details', {})
-            tool_calls = step_details.get('tool_calls', [])
-            
-            for tool_call in tool_calls:
-                if 'function' in tool_call:
-                    tool_name = tool_call['function'].get('name', 'N/A')
-                    
-                    # Extract any generated queries
-                    try:
-                        import json
-                        args = json.loads(tool_call['function'].get('arguments', '{}'))
-                        if 'query' in args:
-                            generated_queries.append({
-                                "tool": tool_name,
-                                "query": args['query']
-                            })
-                    except:
-                        pass
-            
-            steps.append({
-                "stepId": step.get('id'),
-                "type": step.get('type'),
-                "status": step.get('status'),
-                "toolName": tool_name,
-                "error": step.get('error')
-            })
-        
-        logging.info("Data Agent request with details completed successfully")
-        
-        return {
-            "success": True,
-            "answer": answer,
-            "steps": steps,
-            "generatedQueries": generated_queries,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": None
-        }
-        
-    except ImportError:
-        return {
-            "success": False,
-            "answer": None,
-            "steps": [],
-            "generatedQueries": [],
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": "fabric-data-agent-client package not installed"
-        }
+        token = DefaultAzureCredential().get_token("https://api.fabric.microsoft.com/.default")
+        return token.token
     except Exception as e:
-        logging.error(f"SDK Data Agent request failed: {e}")
-        return {
-            "success": False,
-            "answer": None,
-            "steps": [],
-            "generatedQueries": [],
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "error": str(e)
-        }
+        errors.append(f"DefaultAzureCredential: {e}")
+
+    try:
+        import urllib.request
+        url = ("http://169.254.169.254/metadata/identity/oauth2/token"
+               "?api-version=2018-02-01&resource=https://api.fabric.microsoft.com")
+        req = urllib.request.Request(url, headers={"Metadata": "true"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(resp.read().decode("utf-8"))
+        if data.get("access_token"):
+            return data["access_token"]
+    except Exception as e:
+        errors.append(f"IMDS: {e}")
+
+    raise RuntimeError(
+        f"No bearer token provided and auto-detection failed.\n"
+        f"Details: {'; '.join(errors)}\n\n"
+        f"Pass a token from the notebook caller:\n"
+        f"  token = notebookutils.credentials.getToken('https://api.fabric.microsoft.com')\n"
+        f"  notebookutils.udf.run('MyUDF', 'ask_agent', ..., bearertoken=token)"
+    )
 
 
-# =============================================================================
-# OpenAI API Pattern (Alternative Approach)
-# =============================================================================
+def parse_agent_url(dataAgentUrl: str) -> dict:
+    '''
+    Parses a Fabric Data Agent URL and returns workspace ID, artifact ID, and base URL.
 
-@udf.function()
-def ask_agent_openai_pattern(
+    Supports two URL formats:
+      Format 1 (REST API): https://api.fabric.microsoft.com/v1/workspaces/{ws}/dataagents/{art}/aiassistant/openai
+      Format 2 (Portal):   https://<env>.fabric.microsoft.com/groups/{ws}/aiskills/{art}
+    '''
+    # Format 1: REST API endpoint
+    m = re.search(
+        r"https://api\.fabric\.microsoft\.com/v1/workspaces/([^/]+)/data[aA]gents?/([^/]+)",
+        dataAgentUrl
+    )
+    if m:
+        ws, art = m.group(1), m.group(2)
+        base = f"https://api.fabric.microsoft.com/v1/workspaces/{ws}/dataagents/{art}/aiassistant/openai"
+        return {"workspaceId": ws, "artifactId": art, "baseUrl": base}
+
+    # Format 2: Portal URL
+    m = re.search(
+        r"https://([^/]+)/groups/([^/]+)/aiskills/([^/\?]+)",
+        dataAgentUrl
+    )
+    if m:
+        ws, art = m.group(2), m.group(3)
+        base = f"https://api.fabric.microsoft.com/v1/workspaces/{ws}/dataagents/{art}/aiassistant/openai"
+        return {"workspaceId": ws, "artifactId": art, "baseUrl": base}
+
+    raise ValueError(
+        f"Invalid Data Agent URL format.\n"
+        f"Expected one of:\n"
+        f"  https://api.fabric.microsoft.com/v1/workspaces/<id>/dataagents/<id>/aiassistant/openai\n"
+        f"  https://<env>.fabric.microsoft.com/groups/<id>/aiskills/<id>\n"
+        f"Got: {dataAgentUrl}"
+    )
+
+
+def build_url(base: str, path: str) -> str:
+    '''Appends path and api-version query parameter to the base URL.'''
+    full = f"{base}{path}"
+    sep = "&" if "?" in full else "?"
+    return f"{full}{sep}api-version={API_VERSION}"
+
+
+def make_headers(token: str) -> dict:
+    '''Builds standard headers for Fabric Data Agent API calls.'''
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "ActivityId": str(uuid.uuid4())
+    }
+
+
+def utcnow() -> str:
+    '''Returns current UTC timestamp in ISO format (timezone-aware).'''
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def call_agent(
     dataAgentUrl: str,
     prompt: str,
-    timeoutSeconds: int = 120
+    bearertoken: str = "",
+    history: list = None,
+    includeDetails: bool = False,
+    timeoutSeconds: int = DEFAULT_TIMEOUT
 ) -> dict:
     '''
-    Sends a prompt to a Fabric Data Agent using the OpenAI Assistants API pattern.
-    
-    This function implements the same pattern used by the Azure OpenAI Assistant API,
-    which is the underlying technology for Fabric Data Agents. It creates a thread,
-    adds a message, runs the assistant, and retrieves the response.
-    
-    Args:
-        dataAgentUrl: The published endpoint URL of the Fabric Data Agent.
-        prompt: The natural language question to ask the Data Agent.
-        timeoutSeconds: Maximum time to wait for a response (default: 120 seconds).
-        
-    Returns:
-        dict: Response containing the answer and metadata.
-        
-    Example:
-        >>> result = ask_agent_openai_pattern(
-        ...     dataAgentUrl="https://app.fabric.microsoft.com/groups/xxx/aiskills/yyy",
-        ...     prompt="Show me the top 10 products by revenue"
-        ... )
+    Core implementation -- sends a prompt to a Fabric Data Agent.
+
+    NOT decorated with @udf.function() so it can be safely called from
+    multiple decorated entry points without coroutine wrapper issues.
+
+    Follows the official MS OpenAI Assistants API pattern exactly.
     '''
-    logging.info(f"Processing Data Agent request using OpenAI pattern...")
-    
+    import requests
+
+    logging.info(f"Processing Data Agent request - Prompt: {prompt[:100]}...")
+
+    thread_id = None
+    headers = None
+    base = None
+
     try:
-        import requests
-        import time
-        import re
-        
-        # Parse the Data Agent URL
-        pattern = r"https://([^/]+)/groups/([^/]+)/aiskills/([^/\?]+)"
-        match = re.search(pattern, dataAgentUrl)
-        
-        if not match:
-            raise ValueError("Invalid Data Agent URL format")
-        
-        environment = match.group(1)
-        workspace_id = match.group(2)
-        artifact_id = match.group(3)
-        
-        # Get access token using notebookutils
-        from notebookutils import mssparkutils
-        access_token = mssparkutils.credentials.getToken("https://analysis.windows.net/powerbi/api")
-        
-        # Construct base URL - using the Fabric REST API pattern
-        base_url = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/dataAgents/{artifact_id}"
-        
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-        
-        # Step 1: Create thread
-        thread_resp = requests.post(f"{base_url}/threads", headers=headers, timeout=30)
-        thread_resp.raise_for_status()
-        thread_id = thread_resp.json()["id"]
-        
-        # Step 2: Add message
-        msg_payload = {"role": "user", "content": prompt}
-        requests.post(f"{base_url}/threads/{thread_id}/messages", headers=headers, json=msg_payload, timeout=30)
-        
-        # Step 3: Create run
-        run_resp = requests.post(f"{base_url}/threads/{thread_id}/runs", headers=headers, json={}, timeout=30)
-        run_resp.raise_for_status()
-        run_id = run_resp.json()["id"]
-        
-        # Step 4: Poll for completion
+        url_parts = parse_agent_url(dataAgentUrl)
+        base = url_parts["baseUrl"]
+        access_token = get_access_token(bearertoken=bearertoken)
+        headers = make_headers(access_token)
+
+        logging.info(f"API base URL: {base}")
+
+        # Step 1: Create assistant
+        r = requests.post(build_url(base, "/assistants"), headers=headers,
+                          json={"model": "not used"}, timeout=30)
+        r.raise_for_status()
+        assistant_id = r.json().get("id")
+        logging.info(f"Assistant: {assistant_id}")
+
+        # Step 2: Create thread
+        r = requests.post(build_url(base, "/threads"), headers=headers, timeout=30)
+        r.raise_for_status()
+        thread_id = r.json().get("id")
+        logging.info(f"Thread: {thread_id}")
+
+        # Step 3a: Add conversation history (if provided)
+        if history:
+            for msg in history:
+                requests.post(build_url(base, f"/threads/{thread_id}/messages"),
+                              headers=headers, json=msg, timeout=30)
+
+        # Step 3b: Add the current user message
+        r = requests.post(build_url(base, f"/threads/{thread_id}/messages"),
+                          headers=headers,
+                          json={"role": "user", "content": prompt}, timeout=30)
+        r.raise_for_status()
+
+        # Step 4: Create run (with assistant_id)
+        r = requests.post(build_url(base, f"/threads/{thread_id}/runs"),
+                          headers=headers,
+                          json={"assistant_id": assistant_id}, timeout=30)
+        r.raise_for_status()
+        run_id = r.json().get("id")
+        logging.info(f"Run: {run_id}")
+
+        # Step 5: Poll for completion
+        terminal = {"completed", "failed", "cancelled", "requires_action", "expired"}
         start = time.time()
-        while True:
+        status = "queued"
+        run_data = {}
+
+        while status not in terminal:
             if time.time() - start > timeoutSeconds:
-                raise TimeoutError(f"Request timed out after {timeoutSeconds} seconds")
-            
-            time.sleep(3)
-            status_resp = requests.get(f"{base_url}/threads/{thread_id}/runs/{run_id}", headers=headers, timeout=30)
-            status = status_resp.json().get("status")
-            
-            if status == "completed":
-                break
-            elif status in ["failed", "cancelled", "expired"]:
-                raise RuntimeError(f"Run failed with status: {status}")
-        
-        # Step 5: Get messages
-        msgs_resp = requests.get(f"{base_url}/threads/{thread_id}/messages", headers=headers, timeout=30)
-        messages = msgs_resp.json().get("data", [])
-        
-        # Find the assistant's response
+                raise TimeoutError(f"Timed out after {timeoutSeconds}s (last status: {status})")
+            time.sleep(POLL_INTERVAL)
+            r = requests.get(build_url(base, f"/threads/{thread_id}/runs/{run_id}"),
+                             headers=headers, timeout=30)
+            r.raise_for_status()
+            run_data = r.json()
+            status = run_data.get("status", "unknown")
+            logging.info(f"Status: {status}")
+
+        if status != "completed":
+            err = run_data.get("last_error", {}).get("message", f"Run finished: {status}")
+            raise RuntimeError(err)
+
+        # Step 6: Retrieve messages (ascending order)
+        r = requests.get(build_url(base, f"/threads/{thread_id}/messages?order=asc"),
+                         headers=headers, timeout=30)
+        r.raise_for_status()
+        messages = r.json().get("data", [])
+
+        # Extract the last assistant message
         answer = ""
-        for msg in messages:
+        for msg in reversed(messages):
             if msg.get("role") == "assistant":
                 content = msg.get("content", [])
                 if isinstance(content, list) and content:
                     answer = content[0].get("text", {}).get("value", "")
                 break
-        
-        return {
+
+        # Build result
+        result = {
             "success": True,
             "answer": answer,
-            "threadId": thread_id,
-            "runId": run_id,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": utcnow(),
             "error": None
         }
-        
+
+        # Step 7 (optional): Get run steps for details
+        if includeDetails:
+            steps_r = requests.get(
+                build_url(base, f"/threads/{thread_id}/runs/{run_id}/steps"),
+                headers=headers, timeout=30
+            )
+            if steps_r.status_code == 200:
+                run_steps = steps_r.json().get("data", [])
+                steps = []
+                queries = []
+                for step in run_steps:
+                    tool_name = "N/A"
+                    step_details = step.get("step_details", {})
+                    for tc in step_details.get("tool_calls", []):
+                        if "function" in tc:
+                            tool_name = tc["function"].get("name", "N/A")
+                            try:
+                                args = json.loads(tc["function"].get("arguments", "{}"))
+                                if "query" in args:
+                                    queries.append({"tool": tool_name, "query": args["query"]})
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                    steps.append({
+                        "stepId": step.get("id"),
+                        "type": step.get("type"),
+                        "status": step.get("status"),
+                        "toolName": tool_name
+                    })
+                result["steps"] = steps
+                result["generatedQueries"] = queries
+
+        # Add conversation history to result if this was a contextual call
+        if history is not None:
+            updated = (history or []).copy()
+            updated.append({"role": "user", "content": prompt})
+            updated.append({"role": "assistant", "content": answer})
+            result["conversationHistory"] = updated
+
+        logging.info("Data Agent request completed successfully")
+        return result
+
     except Exception as e:
-        logging.error(f"OpenAI pattern request failed: {e}")
+        logging.error(f"Data Agent request failed: {e}")
         return {
             "success": False,
             "answer": None,
-            "threadId": None,
-            "runId": None,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": utcnow(),
             "error": str(e)
         }
+    finally:
+        # Cleanup: delete thread to avoid resource leaks
+        if thread_id and headers and base:
+            try:
+                requests.delete(build_url(base, f"/threads/{thread_id}"),
+                                headers=headers, timeout=10)
+                logging.info(f"Thread {thread_id} cleaned up")
+            except Exception:
+                logging.warning(f"Failed to clean up thread {thread_id}")
+
+
+# =============================================================================
+# Public UDF Entry Points
+# =============================================================================
+# RULES (learned the hard way):
+#   1. @udf.function() must be the decorator DIRECTLY above def
+#   2. Other decorators go ABOVE @udf.function()
+#   3. Parameter names CANNOT contain underscores
+#   4. Never call a @udf.function() decorated function from another one
+#      (returns coroutine proxy, not the value) -- use call_agent() helper
+# =============================================================================
+
+@udf.function()
+def ask_agent(
+    dataAgentUrl: str,
+    prompt: str,
+    bearertoken: str = "",
+    includeDetails: bool = False,
+    timeoutSeconds: int = DEFAULT_TIMEOUT
+) -> dict:
+    '''
+    Sends a natural language prompt to a published Fabric Data Agent.
+
+    Args:
+        dataAgentUrl: The published endpoint URL of the Fabric Data Agent.
+        prompt: The natural language question to ask.
+        bearertoken: Bearer token from notebook caller (REQUIRED in UDF runtime).
+                     Get via: notebookutils.credentials.getToken("https://api.fabric.microsoft.com")
+        includeDetails: If True, includes step info and generated queries.
+        timeoutSeconds: Maximum wait time (default: 120).
+
+    Returns:
+        dict with: success, answer, timestamp, error, and optionally steps/generatedQueries.
+
+    Notebook usage:
+        token = notebookutils.credentials.getToken("https://api.fabric.microsoft.com")
+        result = notebookutils.udf.run("MyUDF", "ask_agent",
+            dataAgentUrl="https://api.fabric.microsoft.com/v1/workspaces/.../dataagents/.../aiassistant/openai",
+            prompt="What were total sales last quarter?",
+            bearertoken=token)
+    '''
+    return call_agent(
+        dataAgentUrl=dataAgentUrl,
+        prompt=prompt,
+        bearertoken=bearertoken,
+        includeDetails=includeDetails,
+        timeoutSeconds=timeoutSeconds
+    )
+
+
+@udf.function()
+def ask_agent_simple(
+    dataAgentUrl: str,
+    prompt: str,
+    bearertoken: str = ""
+) -> str:
+    '''
+    Simplified version -- returns just the answer text.
+
+    Args:
+        dataAgentUrl: The published endpoint URL.
+        prompt: The natural language question.
+        bearertoken: Bearer token from notebook caller (REQUIRED in UDF runtime).
+
+    Returns:
+        str: The answer text, or an error message.
+
+    Notebook usage:
+        token = notebookutils.credentials.getToken("https://api.fabric.microsoft.com")
+        answer = notebookutils.udf.run("MyUDF", "ask_agent_simple",
+            dataAgentUrl="...", prompt="How many customers?", bearertoken=token)
+    '''
+    result = call_agent(
+        dataAgentUrl=dataAgentUrl,
+        prompt=prompt,
+        bearertoken=bearertoken
+    )
+    if result.get("success"):
+        return result.get("answer", "No answer received")
+    return f"Error: {result.get('error', 'Unknown error')}"
+
+
+@udf.function()
+def ask_agent_with_history(
+    dataAgentUrl: str,
+    prompt: str,
+    conversationHistory: list,
+    bearertoken: str = ""
+) -> dict:
+    '''
+    Sends a prompt with conversation history for multi-turn conversations.
+
+    Args:
+        dataAgentUrl: The published endpoint URL.
+        prompt: The current question.
+        conversationHistory: Previous messages as [{"role":"user","content":"..."},...]
+        bearertoken: Bearer token from notebook caller (REQUIRED in UDF runtime).
+
+    Returns:
+        dict with: success, answer, conversationHistory (updated), timestamp, error.
+
+    Notebook usage:
+        token = notebookutils.credentials.getToken("https://api.fabric.microsoft.com")
+        history = []
+        result = notebookutils.udf.run("MyUDF", "ask_agent_with_history",
+            dataAgentUrl="...", prompt="Total sales?",
+            conversationHistory=history, bearertoken=token)
+        history = result["conversationHistory"]
+    '''
+    return call_agent(
+        dataAgentUrl=dataAgentUrl,
+        prompt=prompt,
+        bearertoken=bearertoken,
+        history=conversationHistory
+    )
+
+
+@udf.function()
+def validate_agent(
+    dataAgentUrl: str,
+    bearertoken: str = ""
+) -> dict:
+    '''
+    Validates connectivity to a Fabric Data Agent without sending a query.
+
+    Args:
+        dataAgentUrl: The published endpoint URL.
+        bearertoken: Bearer token from notebook caller (REQUIRED in UDF runtime).
+
+    Returns:
+        dict with: isValid, workspaceId, artifactId, message, error.
+    '''
+    import requests
+
+    logging.info("Validating Data Agent connection...")
+
+    try:
+        url_parts = parse_agent_url(dataAgentUrl)
+        base = url_parts["baseUrl"]
+        access_token = get_access_token(bearertoken=bearertoken)
+        headers = make_headers(access_token)
+
+        # Test by creating and immediately deleting a thread
+        r = requests.post(build_url(base, "/threads"), headers=headers, timeout=30)
+
+        if r.status_code == 200:
+            thread_id = r.json().get("id")
+            try:
+                requests.delete(build_url(base, f"/threads/{thread_id}"),
+                                headers=headers, timeout=10)
+            except Exception:
+                pass
+            return {
+                "isValid": True,
+                "workspaceId": url_parts["workspaceId"],
+                "artifactId": url_parts["artifactId"],
+                "message": "Connection validated successfully",
+                "error": None
+            }
+        else:
+            return {
+                "isValid": False,
+                "workspaceId": url_parts["workspaceId"],
+                "artifactId": url_parts["artifactId"],
+                "message": f"Connection failed: HTTP {r.status_code}",
+                "error": r.text
+            }
+    except ValueError as ve:
+        return {"isValid": False, "workspaceId": None, "artifactId": None,
+                "message": "Invalid URL format", "error": str(ve)}
+    except Exception as e:
+        return {"isValid": False, "workspaceId": None, "artifactId": None,
+                "message": "Validation failed", "error": str(e)}

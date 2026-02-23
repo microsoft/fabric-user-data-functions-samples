@@ -203,13 +203,13 @@
             "name":"Send prompt to Data Agent",
             "description":"This sample connects to a published Fabric Data Agent and sends natural language prompts to retrieve data-driven insights.",
             "dateAdded":"2026-02-02T00:00:00Z",
-            "data":"Agents/data_agent.py"
+            "data":"Agent/data_agent.py"
          },
          {
             "name":"Send prompt to Data Agent SDK",
             "description":"This sample connects to a published Fabric Data Agent using the Fabric Data Agent SDK and sends natural language prompts to retrieve data-driven insights.",
             "dateAdded":"2026-02-02T00:00:00Z",
-            "data":"Agents/data_agent_sdk.py"
+            "data":"Agent/data_agent_sdk.py"
          }
       ]
    }
