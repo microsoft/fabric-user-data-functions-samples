@@ -1,11 +1,15 @@
 import logging
 from typing import Any
-from fabric.functions.cosmosdb import get_cosmos_client
+from azure.cosmos import CosmosClient
 from azure.cosmos import exceptions
 
-@udf.generic_connection(argName="cosmosDb", audienceType="CosmosDB")
+COSMOS_URI = "{my-cosmos-artifact-uri}"
+DB_NAME = "{my-cosmos-artifact-name}" 
+CONTAINER_NAME = "SampleData"
+
+@udf.connection(argName="cosmosClient", audienceType="CosmosDB", cosmos_endpoint=COSMOS_URI)
 @udf.function()
-def query_products(cosmosDb: fn.FabricItem, categoryName: str) -> list[dict[str, Any]]:
+def query_products(cosmosClient: CosmosClient, categoryName: str) -> list[dict[str, Any]]:
 
     '''
     Description: 
@@ -21,26 +25,23 @@ def query_products(cosmosDb: fn.FabricItem, categoryName: str) -> list[dict[str,
         # Example values to use when calling this function
         # categoryName = "Computers, Laptops"
         
-        To run this sample, create a new Cosmos artifact, then click on SampleData in Cosmos Home screen.
-        Next go to settings (gear icon), then Connection tab, and copy the URI to COSMOS_DB_URI variable below.
-        Copy the artifact name to DB_NAME variable below. The Sample Data will create a SampleData container.
+        To run this sample...
+        1. Create a new Cosmos artifact, copy its name to DB_NAME variable above.
+        2. Click on SampleData in Cosmos Home screen to create a container called, SampleData.
+        3. Go to settings (gear icon), then Connection tab, copy the URI to COSMOS_URI variable above.
 
         Before running this function, go Library Management and add the azure-cosmos package, version 4.14.0 or later.
 
     Args:
-    - cosmosDb (fn.FabricItem): The Cosmos DB connection information.
+    - cosmosClient (CosmosClient): The Cosmos DB client object.
     - categoryName: The filter predicate for our query and the partition key property for this container.
 
     Returns: 
     - list[dict[str, Any]]: JSON Object. List of dictionaries with string keys and values of Any type.
     '''
 
-    COSMOS_DB_URI = "{my-cosmos-artifact-uri}"
-    DB_NAME = "{my-cosmos-artifact-name}" 
-    CONTAINER_NAME = "SampleData"
-
     try:
-        cosmosClient = get_cosmos_client(cosmosDb, COSMOS_DB_URI)
+        # Get the database and container clients
         database = cosmosClient.get_database_client(DB_NAME)
         container = database.get_container_client(CONTAINER_NAME)
 
