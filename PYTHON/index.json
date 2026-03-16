@@ -194,5 +194,29 @@
             "data":"CosmosDB/vector_query_items.py"
          }
       ]
+   },
+   {
+      "name":"Business Events",
+      "description":"Sample functions to publish business events using Fabric Business Events.",
+      "data":[
+         {
+            "name":"Publish custom business event",
+            "description":"This sample provides a template for publishing custom business events with your own event type and properties.",
+            "dateAdded":"2026-01-28T00:00:00Z",
+            "data":"BusinessEvents/publish_event.py"
+         },
+         {
+            "name":"Query SQL Database and batch publish inventory alerts",
+            "description":"This sample queries inventory data from a SQL Database and publishes multiple business events in a single batch call for low stock items.",
+            "dateAdded":"2026-01-28T00:00:00Z",
+            "data":"BusinessEvents/query_sql_and_publish_event.py"
+         },
+         {
+            "name":"Query Lakehouse and publish aggregated sale summary",
+            "description":"This sample queries sale data from a lakehouse, aggregates by stock item, and publishes a business event with the sale summary.",
+            "dateAdded":"2026-01-30T00:00:00Z",
+            "data":"BusinessEvents/publish_sale_summary_event.py"
+         }
+      ]
    }
 ]
