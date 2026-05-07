@@ -27,7 +27,7 @@
         "name": "Authorizer UDF",
         "description": "Use this user data function to enforce custom authorization mechanisms ",
         "detail": "Use this user data function to enforce custom authorization mechanisms, such as token validation before the request is fulfilled by the API and sent to the data source.",
-        "dateAdded": "2026-02-05T00:00:00Z",
+        "dateAdded": "2026-05-05T00:00:00Z",
         "data": "GraphQL/authorizer_function.py"
       }
     ]
