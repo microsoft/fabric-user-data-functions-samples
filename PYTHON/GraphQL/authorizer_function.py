@@ -21,22 +21,15 @@ def invokeauthudf(request: dict) -> dict:
     logging.info(f"UPN: {upn_claim}")
     logging.info(f"SPN: {appid_claim}")
 
-    # Authorization logic
-    roles = []
-
     if upn_claim is not None:
         is_authorized = domain in upn_claim
-        roles = ["Default"]
     else:
         is_authorized = spn in appid_claim
-        roles = ["SPN"]
 
     logging.info(f"Authorized: {is_authorized}")
-    logging.info(f"Roles: {roles}")
     logging.info(f"SPN: {spn}")
     logging.info(f"App ID: {appid_claim}")
 
     return {
-        "isAuthorized": is_authorized,
-        "roles": roles
+        "isAuthorized": is_authorized
     }
