@@ -22,6 +22,7 @@ You are tasked with creating a comprehensive samples-llms.txt file for the Micro
 
 ## Content Requirements
 1. **Read and analyze ALL Python sample files** in the repository structure:
+   - Agent/*.py
    - DataManipulation/*.py
    - Lakehouse/*.py  
    - SQLDB/*.py
