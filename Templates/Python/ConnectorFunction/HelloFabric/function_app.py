@@ -6,7 +6,7 @@ import requests
 udf = fn.UserDataFunctions()
 
 @udf.function()
-def invoke_rayfin_action(payload: dict, accesstoken: str) -> dict:
+def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> dict:
     """
     Power BI Connector UDF
     Operation: executeQuery
