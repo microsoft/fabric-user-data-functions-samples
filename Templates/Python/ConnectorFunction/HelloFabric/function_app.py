@@ -25,7 +25,7 @@ def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> dict:
 
     # ---- Power BI ExecuteQueries API ----
     url = (
-        f"https://powerbiapi.analysis-df.windows.net/v1.0/myorg/"
+        f"https://dailyapi.powerbi.com/v1.0/myorg/"
         f"datasets/{dataset_id}/executeQueries"
     )
 
