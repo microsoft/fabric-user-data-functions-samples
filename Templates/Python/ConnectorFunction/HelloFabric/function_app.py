@@ -1,7 +1,6 @@
-from typing import Any
 import fabric.functions as fn
-import logging
 import requests
+import json
 
 udf = fn.UserDataFunctions()
 
@@ -17,22 +16,23 @@ def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> dict:
     if operation != "executeQuery":
         raise ValueError(f"Unsupported operation: {operation}")
 
-    dataset_id = input_data.get("datasetId")
+    dataset_id = input_data.get("itemId")
     workspace_id = input_data.get("workspaceId")
     dax_query = input_data.get("query")
 
-    if not dataset_id or not dax_query:
-        raise ValueError("datasetId and query are required")
+    if not workspace_id or not dataset_id or not dax_query:
+        raise ValueError("workspaceId, datasetId and query are required")
 
     # ---- Power BI ExecuteQueries API ----
     url = (
-        f"https://powerbiapi.analysis-df.windows.net/v1.0/myorg/groups/{workspace_id}/"
+        f"https://powerbiapi.analysis-df.windows.net/v1.0/myorg/"
         f"datasets/{dataset_id}/executeQueries"
     )
 
     headers = {
         "Authorization": f"Bearer {accesstoken}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "rayfin-fabric-semanticmodel/1.0"
     }
 
     body = {
@@ -47,15 +47,28 @@ def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> dict:
     }
 
     response = requests.post(url, headers=headers, json=body)
+    request_id = response.headers.get("RequestId")
 
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Power BI query failed ({response.status_code}): {response.text}"
-        )
+        try:
+            err = (response.json() or {}).get("error") or {}
+        except Exception:
+            err = {}
+        raise RuntimeError(json.dumps({
+            "httpStatus": response.status_code,
+            "code": err.get("code"),
+            "message": err.get("message") or response.text,
+            "requestId": request_id,
+        }))
 
-    result = response.json()
+    result = response.json() or {}
+    results = result.get("results") or []
+    first = results[0] if results else {}
 
-    # ---- Normalize output for SDK ----
     return {
-        "tables": result["results"][0]["tables"]
+        "tables": first.get("tables", []),
+        "requestId": request_id,
+        "queryError": first.get("error"),
+        "responseError": result.get("error"),
+        "informationProtectionLabel": result.get("informationProtectionLabel"),
     }
