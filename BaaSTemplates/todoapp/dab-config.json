@@ -1,0 +1,59 @@
+{
+  "$schema": "https://github.com/Azure/data-api-builder/releases/download/v1.5.56/dab.draft.schema.json",
+  "entities": {
+    "Todo": {
+      "source": "Todos",
+      "permissions": [
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "*",
+              "policy": {
+                "database": "@claims.sub eq @item.user_id"
+              }
+            }
+          ]
+        }
+      ],
+      "x-schema": {
+        "fields": {
+          "id": {
+            "dbType": "UNIQUEIDENTIFIER",
+            "nullable": false
+          },
+          "title": {
+            "dbType": "NVARCHAR(100)",
+            "nullable": false
+          },
+          "isCompleted": {
+            "dbType": "BIT",
+            "nullable": false
+          },
+          "createdAt": {
+            "dbType": "DATETIME2",
+            "nullable": false
+          },
+          "user_id": {
+            "dbType": "NVARCHAR(MAX)",
+            "nullable": false
+          }
+        },
+        "constraints": {
+          "primaryKey": {
+            "name": "PK_Todos",
+            "columns": [
+              "id"
+            ]
+          },
+          "checkConstraints": [
+            {
+              "name": "CK_Todos_title_minlen",
+              "expression": "LEN([title]) >= 1"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
