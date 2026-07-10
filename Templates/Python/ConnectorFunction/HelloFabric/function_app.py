@@ -1,11 +1,12 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import os
 from typing import Optional
 
 udf = fn.UserDataFunctions()
 
-_POWERBI_BASE = "https://api.powerbi.com/v1.0/myorg"
+_POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://api.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 
 # Shared, lazily-created session reused across invocations for connection pooling
