@@ -11,6 +11,9 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+# Kusto generic-connection audience. CustomTokenCredential.get_token() returns the
+# pre-minted token and ignores the scope, so this only satisfies the credential API.
+_KUSTO_DEFAULT_SCOPE = "https://kusto.kusto.windows.net/.default"
 
 # Shared, lazily-created session reused across invocations for connection pooling
 # (keep-alive to Power BI, no per-call TLS handshake). Created inside the event
@@ -140,8 +143,9 @@ def _transform_v1(doc):
     return out_tables, errors
 
 
+@udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
-async def rayfin_kusto_v1(payload: dict, accesstoken: str) -> fn.StreamResponse:
+async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
     input_data = payload.get("input", {})
 
     # queryServiceUri + databaseName are resolved and injected by the Fabric app
@@ -156,9 +160,15 @@ async def rayfin_kusto_v1(payload: dict, accesstoken: str) -> fn.StreamResponse:
 
     client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
 
+    # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
+    # connection (audienceType="Kusto") and injects a FabricItem carrying a pre-minted
+    # Kusto-audience token; get_access_token() returns a TokenCredential whose
+    # .get_token(...).token is the bearer JWT (scope is fixed by the connection).
+    access_token = kustoClient.get_access_token().get_token(_KUSTO_DEFAULT_SCOPE).token
+
     url = f"{query_service_uri.rstrip('/')}/v1/rest/query"
     headers = {
-        "Authorization": f"Bearer {accesstoken}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "x-ms-client-request-id": client_request_id,
