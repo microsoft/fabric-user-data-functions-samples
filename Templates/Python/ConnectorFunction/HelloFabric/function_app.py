@@ -163,9 +163,8 @@ def _transform_v1(doc):
 async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
     input_data = payload.get("input", {})
 
-    # queryServiceUri + databaseName are resolved and injected by the Fabric app
-    # backend (ConnectorFunctionInvocationWorkflow.ResolveKustoQueryEndpointAsync);
-    # the caller only supplies `query`.
+    # queryServiceUri + databaseName are resolved at `rayfin connector add` time by
+    # the Rayfin CLI and flow in via connector config; the caller only supplies `query`.
     query_service_uri = input_data.get("queryServiceUri")
     database_name = input_data.get("databaseName")
     kql_query = input_data.get("query")
@@ -177,8 +176,9 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
 
     # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
     # connection (audienceType="Kusto") and injects a FabricItem whose
-    # get_access_token() returns the pre-minted Kusto-audience bearer token.
-    access_token = kustoClient.get_access_token()
+    # get_access_token() returns a token-credential object; get_token().token is the
+    # pre-minted Kusto-audience bearer string.
+    access_token = kustoClient.get_access_token().get_token().token
 
     url = f"{query_service_uri.rstrip('/')}/v1/rest/query"
     headers = {
