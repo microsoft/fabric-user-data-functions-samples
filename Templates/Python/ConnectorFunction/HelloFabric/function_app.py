@@ -12,9 +12,6 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-# Kusto generic-connection audience. CustomTokenCredential.get_token() returns the
-# pre-minted token and ignores the scope, so this only satisfies the credential API.
-_KUSTO_DEFAULT_SCOPE = "https://kusto.kusto.windows.net/.default"
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -179,10 +176,9 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
 
     # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
-    # connection (audienceType="Kusto") and injects a FabricItem carrying a pre-minted
-    # Kusto-audience token; get_access_token() returns a TokenCredential whose
-    # .get_token(...).token is the bearer JWT (scope is fixed by the connection).
-    access_token = kustoClient.get_access_token().get_token(_KUSTO_DEFAULT_SCOPE).token
+    # connection (audienceType="Kusto") and injects a FabricItem whose
+    # get_access_token() returns the pre-minted Kusto-audience bearer token.
+    access_token = kustoClient.get_access_token()
 
     url = f"{query_service_uri.rstrip('/')}/v1/rest/query"
     headers = {
