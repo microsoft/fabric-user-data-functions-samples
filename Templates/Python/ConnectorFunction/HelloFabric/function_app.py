@@ -161,16 +161,30 @@ def _transform_v1(doc):
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
 async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
+    # The SDK carries the operation name alongside the input. `executeQuery` runs a
+    # KQL query against /v1/rest/query; `executeCommand` runs a Kusto management
+    # (control) command — text starting with a leading dot, e.g. `.show databases` —
+    # against /v1/rest/mgmt. Both share the same cluster, database context, token and
+    # v1 {Tables} response shape; only the caller's input field and the REST verb
+    # differ. Default to executeQuery so callers that omit the operation still work.
+    operation = (payload.get("operation") or "executeQuery").strip()
     input_data = payload.get("input", {})
 
     # queryServiceUri + databaseName are resolved at `rayfin connector add` time by
-    # the Rayfin CLI and flow in via connector config; the caller only supplies `query`.
+    # the Rayfin CLI and flow in via connector config. executeQuery callers supply
+    # `query`; executeCommand callers supply `command`.
     query_service_uri = input_data.get("queryServiceUri")
     database_name = input_data.get("databaseName")
-    kql_query = input_data.get("query")
+    is_command = operation == "executeCommand"
+    # Prefer the field that matches the operation; fall back to the other so a caller
+    # that set only one of query/command still works.
+    if is_command:
+        csl = input_data.get("command") or input_data.get("query")
+    else:
+        csl = input_data.get("query") or input_data.get("command")
 
-    if not query_service_uri or not database_name or not kql_query:
-        raise ValueError("queryServiceUri, databaseName and query are required")
+    if not query_service_uri or not database_name or not csl:
+        raise ValueError("queryServiceUri, databaseName and query/command are required")
 
     client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
 
@@ -180,14 +194,17 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     # pre-minted Kusto-audience bearer string.
     access_token = kustoClient.get_access_token().get_token().token
 
-    url = f"{query_service_uri.rstrip('/')}/v1/rest/query"
+    # executeCommand -> /v1/rest/mgmt ; executeQuery -> /v1/rest/query. Kusto keeps
+    # the endpoints apart at the protocol level; the caller's role decides authZ.
+    rest_verb = "mgmt" if is_command else "query"
+    url = f"{query_service_uri.rstrip('/')}/v1/rest/{rest_verb}"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "x-ms-client-request-id": client_request_id,
     }
-    body = {"db": database_name, "csl": kql_query, "properties": {}}
+    body = {"db": database_name, "csl": csl, "properties": {}}
 
     session = await _get_session()
 
