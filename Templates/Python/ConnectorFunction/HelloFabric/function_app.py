@@ -1,7 +1,6 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
-import json
 import os
 import uuid
 from typing import Optional
@@ -106,58 +105,6 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
 
 
-def _split_v1_rows(rows):
-    # A v1 QueryResult table may append a trailing error object (not an array).
-    # Strip it and surface its exceptions, mirroring KWE splitV1Rows.
-    if rows and not isinstance(rows[-1], list):
-        last = rows[-1]
-        errors = None
-        if isinstance(last, dict):
-            errors = last.get("Exceptions") or last.get("OneApiErrors")
-        return rows[:-1], errors
-    return rows, None
-
-
-def _map_table(table):
-    data_rows, row_errors = _split_v1_rows(table.get("Rows", []) or [])
-    columns = [
-        {"name": c.get("ColumnName"), "type": c.get("ColumnType") or c.get("DataType")}
-        for c in (table.get("Columns", []) or [])
-    ]
-    return {"name": table.get("TableName"), "columns": columns, "rows": data_rows}, row_errors
-
-
-def _transform_v1(doc):
-    # Kusto native v1 -> Rayfin connector output shape. Mirrors
-    # packages/client/src/clients/kusto/kustoRequest.ts::normalizeResultV1.
-    tables = doc.get("Tables", []) or []
-    out_tables = []
-    errors = []
-    if len(tables) == 1:
-        tbl, row_errors = _map_table(tables[0])
-        out_tables.append(tbl)
-        if row_errors:
-            errors.extend(row_errors)
-        return out_tables, errors
-    toc = tables[-1]
-    toc_cols = toc.get("Columns", []) or []
-    kind_idx = next((i for i, c in enumerate(toc_cols) if c.get("ColumnName") == "Kind"), -1)
-    pretty_idx = next((i for i, c in enumerate(toc_cols) if c.get("ColumnName") == "PrettyName"), -1)
-    for i, row in enumerate(toc.get("Rows", []) or []):
-        if not isinstance(row, list):
-            continue
-        kind = row[kind_idx] if 0 <= kind_idx < len(row) else None
-        if kind == "QueryResult" and i < len(tables):
-            tbl, row_errors = _map_table(tables[i])
-            pretty = row[pretty_idx] if 0 <= pretty_idx < len(row) else None
-            if pretty:
-                tbl["name"] = pretty
-            out_tables.append(tbl)
-            if row_errors:
-                errors.extend(row_errors)
-    return out_tables, errors
-
-
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
 async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
@@ -186,7 +133,10 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     if not query_service_uri or not database_name or not csl:
         raise ValueError("queryServiceUri, databaseName and query/command are required")
 
-    client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+    client_request_id = (
+        input_data.get("clientRequestId")
+        or f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+    )
 
     # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
     # connection (audienceType="Kusto") and injects a FabricItem whose
@@ -220,28 +170,24 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
             status_code=resp.status,
         )
 
-    activity_id = resp.headers.get("x-ms-activity-id")
-    raw = await resp.text()
-    await resp.release()
+    # True streaming: relay the Kusto v1 response body chunk-by-chunk without
+    # buffering, parsing, or re-serializing it — a pure byte pump, mirroring
+    # rayfin_semantic_model_v1. The v1 {Tables} document is transformed to the
+    # Rayfin connector output shape client-side in the SDK
+    # (packages/typescript-sdk/connector-kusto/src), so the UDF keeps constant
+    # memory and TTFB stays ~= Kusto's TTFB. The `x-ms-client-request-id` header
+    # was set from the SDK-supplied clientRequestId above, so the SDK can
+    # correlate without reading the body; `x-ms-activity-id` is not relayed
+    # (accepted loss, same as the semantic-model path).
+    async def relay():
+        try:
+            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        finally:
+            # Release the response so its connection returns to the pool (or is
+            # closed if the client disconnected mid-stream). Do NOT close the
+            # shared session here.
+            await resp.release()
 
-    doc = json.loads(raw)
-    tables, errors = _transform_v1(doc)
-
-    # Only surface errors when there is no data (avoid the SDK discarding a
-    # successful result over a soft/partial warning row).
-    errors_out = [] if tables else [{"message": str(e)} for e in errors]
-
-    envelope = {
-        "status": "Failed" if errors_out else "Succeeded",
-        "output": {
-            "tables": tables,
-            "clientRequestId": client_request_id,
-            "activityId": activity_id,
-        },
-        "errors": errors_out,
-    }
-
-    return fn.StreamResponse(
-        iter([json.dumps(envelope).encode("utf-8")]),
-        media_type=_JSON_MEDIA_TYPE,
-    )
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
