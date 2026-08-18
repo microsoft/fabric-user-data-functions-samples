@@ -123,6 +123,18 @@ def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
     }
 
 
+def _command_payload(client_request_id="KPC.rayfin_kusto_v1;cmd-id"):
+    return {
+        "operation": "executeCommand",
+        "input": {
+            "queryServiceUri": "https://cluster.kusto.fabric.microsoft.com",
+            "databaseName": "db",
+            "command": ".show tables",
+            "clientRequestId": client_request_id,
+        },
+    }
+
+
 async def _invoke(chunks, payload):
     mod = _load_function_app()
     response = _FakeResponse(chunks)
@@ -169,6 +181,24 @@ async def _check_forwards_client_request_id_header():
     assert session.captured_url.endswith("/v1/rest/query")
 
 
+async def _check_execute_command_routes_to_mgmt_and_streams():
+    # executeCommand must route to /v1/rest/mgmt (not /query) and still stream
+    # the v1 {Tables} body as a pure byte pump, exactly like executeQuery.
+    chunks = [b'{"Tables":[', b'{"TableName":"T","Rows":[["x"]]}', b"]}"]
+    _mod, _result, body, response, session = await _invoke(
+        chunks, _command_payload("KPC.rayfin_kusto_v1;cmd-1")
+    )
+    assert session.captured_url.endswith(
+        "/v1/rest/mgmt"
+    ), f"executeCommand must route to /v1/rest/mgmt, got {session.captured_url}"
+    assert len(body) == 3, "executeCommand 200 path must stream, not buffer"
+    assert response.text_called is False, "executeCommand must not call resp.text()"
+    assert (
+        session.captured_headers.get("x-ms-client-request-id")
+        == "KPC.rayfin_kusto_v1;cmd-1"
+    ), "clientRequestId is forwarded for executeCommand too"
+
+
 def test_streams_multiple_chunks_without_buffering():
     asyncio.run(_check_streams_multiple_chunks_without_buffering())
 
@@ -177,9 +207,15 @@ def test_forwards_client_request_id_header():
     asyncio.run(_check_forwards_client_request_id_header())
 
 
+def test_execute_command_routes_to_mgmt_and_streams():
+    asyncio.run(_check_execute_command_routes_to_mgmt_and_streams())
+
+
 if __name__ == "__main__":
     test_streams_multiple_chunks_without_buffering()
     print("  ok: streams multiple chunks without buffering")
     test_forwards_client_request_id_header()
     print("  ok: forwards clientRequestId as x-ms-client-request-id header")
+    test_execute_command_routes_to_mgmt_and_streams()
+    print("  ok: executeCommand routes to /v1/rest/mgmt and streams")
     print("ALL UDF STREAMING TESTS PASSED")
