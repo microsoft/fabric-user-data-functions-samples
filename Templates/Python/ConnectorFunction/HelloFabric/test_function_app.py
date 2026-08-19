@@ -235,6 +235,10 @@ class _AihubContent:
         for chunk in self._chunks:
             yield chunk
 
+    async def iter_chunked(self, _size):
+        for chunk in self._chunks:
+            yield chunk
+
 
 class _AihubResponse:
     def __init__(self, status=200, headers=None, body="", content_type=None):
@@ -243,7 +247,7 @@ class _AihubResponse:
         if content_type is not None:
             self.headers["Content-Type"] = content_type
         self._body = body
-        self.content = _AihubContent([])
+        self.content = _AihubContent([body.encode("utf-8")])
         self.text_called = False
         self.released = False
 
@@ -251,7 +255,7 @@ class _AihubResponse:
         self.text_called = True
         return self._body
 
-    async def release(self):
+    def release(self):
         self.released = True
 
 
@@ -286,7 +290,7 @@ class _AihubFabricClient:
         return _AihubCred()
 
 
-async def _invoke_aihub(payload, responses):
+async def _invoke_aihub(payload, responses, fabric_client=None):
     mod = _load_function_app()
     session = _AihubSession(responses)
 
@@ -294,7 +298,15 @@ async def _invoke_aihub(payload, responses):
         return session
 
     mod._get_session = _fake_get_session  # type: ignore[attr-defined]
-    result = await mod.rayfin_fabric_aihub_v1(payload, _AihubFabricClient())
+    request_ids = iter(["invocation-id", "1", "2", "3", "4"])
+    original_uuid4 = mod.uuid.uuid4
+    mod.uuid.uuid4 = lambda: next(request_ids)
+    try:
+        result = await mod.rayfin_fabric_aihub_v1(
+            payload, fabric_client or _AihubFabricClient()
+        )
+    finally:
+        mod.uuid.uuid4 = original_uuid4
     return mod, result, session
 
 
@@ -393,19 +405,19 @@ async def _check_sse_response_parsed():
     sse = (
         ": ping\n"
         "event: message\n"
-        "data: {\"jsonrpc\": \"2.0\", \"id\": \"1\", \"result\": {\"status\": \"working\"}}\n"
+        "data: {\"jsonrpc\": \"2.0\", \"id\": \"other\", \"result\": {\"status\": \"working\"}}\n"
         "\n"
         "event: ping\n"
         ": keep-alive\n"
         "\n"
         "event: message\n"
-        "data: {\"jsonrpc\": \"2.0\", \"id\": \"2\", \"result\":\n"
+        "data: {\"jsonrpc\": \"2.0\", \"id\": \"1\", \"result\":\n"
         "data: {\"taskId\": \"T-9\", \"status\": \"completed\"}}\n"
         "\n"
     )
     payload = {"operation": "getTask", "input": {"taskId": "T-9"}}
     mod, result, session = await _invoke_aihub(payload, [_resp(body=sse, content_type="text/event-stream")])
-    assert result["taskId"] == "T-9", "last SSE result must win"
+    assert result["taskId"] == "T-9", "the correlated SSE result must win"
     assert result["status"] == "completed"
 
 async def _check_202_ack_and_json_task():
@@ -564,7 +576,7 @@ class _RaisingTextResponse:
         self.headers = dict(headers) if headers else {}
         if content_type is not None:
             self.headers["Content-Type"] = content_type
-        self.content = _AihubContent([])
+        self.content = _AihubContent([b"\xff"])
         self.released = False
         self.text_called = False
 
@@ -572,7 +584,7 @@ class _RaisingTextResponse:
         self.text_called = True
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
-    async def release(self):
+    def release(self):
         self.released = True
 
 
@@ -638,7 +650,7 @@ async def _check_decode_failure_returns_envelope_and_releases():
     assert err["message"] == "Unparseable upstream response"
     assert err["retryable"] is True
     assert err["source"] == "upstream"
-    assert raising.text_called is True, "text() must have been attempted"
+    assert raising.text_called is False, "bounded byte streaming must avoid unbounded text()"
     assert raising.released is True, "response must still be released exactly once on the decode-failure path"
 
 
@@ -695,19 +707,148 @@ async def _check_operation_log_injection_sanitized():
     root.addHandler(handler)
     root.setLevel(logging.DEBUG)
     try:
-        # CR/LF embedded in the caller-controlled operation must not forge a log
-        # line. The op is unsupported, so it reaches both the start and the
-        # unsupported log calls.
+        # Unsupported caller-controlled operation text may contain PII or
+        # secrets, so logs must use only the fixed allowlist fallback.
         mod, result, session = await _invoke_aihub(
-            {"operation": "getInfo\r\ninjected-forged-line"}, [_resp(body="{}")])
+            {"operation": "SECRET-PII\r\ninjected-forged-line"}, [_resp(body="{}")])
     finally:
         root.removeHandler(handler)
         root.setLevel(old_level)
     logs = stream.getvalue()
     assert result["error"]["code"] == "UnsupportedOperation"
-    assert "getInfo\r\ninjected-forged-line" not in logs, "raw CR/LF must not survive into the log"
+    assert "SECRET-PII" not in logs, "unsupported operation text must never be logged"
     assert "\ninjected-forged-line" not in logs, "no forged standalone log line may appear"
-    assert "getInfo??injected-forged-line" in logs, "control chars must be replaced, keeping the value on one line"
+    assert "op=unsupported" in logs, "logs must use the fixed unsupported-operation label"
+
+
+async def _check_response_id_correlation():
+    mismatched = json.dumps({
+        "jsonrpc": "2.0", "id": "another-request",
+        "result": {"taskId": "WRONG", "status": "completed"},
+    })
+    payload = {"operation": "getTask", "input": {"taskId": "T-1"}}
+    mod, result, session = await _invoke_aihub(payload, [_resp(body=mismatched)])
+    err = result["error"]
+    assert err["code"] == "UpstreamError"
+    assert err["causeCode"] == "ResponseIdMismatch"
+    assert err["taskId"] == "T-1"
+    assert result.get("taskId") != "WRONG", "an unrelated JSON-RPC response must never be returned"
+
+
+async def _check_success_correlation_headers_preserved():
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": "1",
+        "result": {"taskId": "T-1", "status": "working"},
+    })
+    headers = {
+        "x-ms-request-id": "request-success",
+        "x-ms-root-activity-id": "root-success",
+    }
+    payload = {"operation": "getTask", "input": {"taskId": "T-1"}}
+    mod, result, session = await _invoke_aihub(
+        payload, [_resp(body=body, headers=headers)]
+    )
+    assert result["requestId"] == "request-success"
+    assert result["rootActivityId"] == "root-success"
+
+
+async def _check_authentication_and_session_setup_errors():
+    class _FailingFabricClient:
+        def __init__(self, error):
+            self._error = error
+
+        def get_access_token(self):
+            raise self._error
+
+    mod = _load_function_app()
+    auth_errors = (
+        RuntimeError("SECRET-CREDENTIAL-DIAGNOSTIC"),
+        KeyError("AccessToken"),
+        StopIteration(),
+        mod.InvalidTokenError("SECRET-JWT-DIAGNOSTIC"),
+    )
+    for auth_error in auth_errors:
+        mod, auth_result, session = await _invoke_aihub(
+            {"operation": "getInfo"}, [_resp(body="{}")],
+            fabric_client=_FailingFabricClient(auth_error),
+        )
+        envelope = json.dumps(auth_result)
+        auth_err = auth_result["error"]
+        assert auth_err["code"] == "AuthenticationFailed"
+        assert auth_err["source"] == "connector"
+        assert auth_err["httpStatus"] == 500
+        assert len(session.posts) == 0
+        assert "SECRET-CREDENTIAL-DIAGNOSTIC" not in envelope
+        assert "SECRET-JWT-DIAGNOSTIC" not in envelope
+
+    mod = _load_function_app()
+
+    async def _failing_get_session():
+        raise RuntimeError("SECRET-SESSION-DIAGNOSTIC")
+
+    mod._get_session = _failing_get_session  # type: ignore[attr-defined]
+    setup_result = await mod.rayfin_fabric_aihub_v1(
+        {"operation": "getInfo"}, _AihubFabricClient()
+    )
+    setup_err = setup_result["error"]
+    assert setup_err["code"] == "ConnectorUnavailable"
+    assert setup_err["source"] == "connector"
+    assert setup_err["retryable"] is True
+    assert setup_err["httpStatus"] == 503
+    assert "SECRET-SESSION-DIAGNOSTIC" not in json.dumps(setup_result)
+
+
+async def _check_initialized_notification_error():
+    init_body = json.dumps({
+        "jsonrpc": "2.0", "id": "1", "result": {"capabilities": {}}
+    })
+    mod, result, session = await _invoke_aihub(
+        {"operation": "getInfo"},
+        [_resp(body=init_body), _resp(status=500, body="failed", content_type="text/plain")],
+    )
+    assert result["error"]["code"] == "UpstreamError"
+    assert result["error"]["httpStatus"] == 500
+    assert len(session.posts) == 2, "tools/list must not run after a failed notification"
+
+
+async def _check_get_info_success_correlations_preserved():
+    init_body = json.dumps({
+        "jsonrpc": "2.0", "id": "1", "result": {"capabilities": {}}
+    })
+    tools_body = json.dumps({
+        "jsonrpc": "2.0", "id": "2", "result": {"tools": []}
+    })
+    tools_headers = {
+        "x-ms-request-id": "get-info-request",
+        "x-ms-root-activity-id": "get-info-root",
+    }
+    mod, result, session = await _invoke_aihub(
+        {"operation": "getInfo"},
+        [
+            _resp(body=init_body),
+            _resp(status=202, body=""),
+            _resp(body=tools_body, headers=tools_headers),
+        ],
+    )
+    assert result["requestId"] == "get-info-request"
+    assert result["rootActivityId"] == "get-info-root"
+
+
+async def _check_oversized_response_rejected():
+    mod = _load_function_app()
+    original_limit = mod._AIHUB_MAX_RESPONSE_BYTES
+    mod._AIHUB_MAX_RESPONSE_BYTES = 5
+    try:
+        payload = {"operation": "getTask", "input": {"taskId": "T-1"}}
+        mod, result, session = await _invoke_aihub(
+            payload, [_resp(body="123456", content_type="text/plain")]
+        )
+    finally:
+        mod._AIHUB_MAX_RESPONSE_BYTES = original_limit
+    err = result["error"]
+    assert err["code"] == "UpstreamError"
+    assert err["causeCode"] == "ResponseTooLarge"
+    assert session._responses[0].released is True
 
 
 def test_aihub_get_info_initialize_and_tools_list():
@@ -790,6 +931,30 @@ def test_aihub_operation_log_injection_sanitized():
     asyncio.run(_check_operation_log_injection_sanitized())
 
 
+def test_aihub_response_id_correlation():
+    asyncio.run(_check_response_id_correlation())
+
+
+def test_aihub_success_correlation_headers_preserved():
+    asyncio.run(_check_success_correlation_headers_preserved())
+
+
+def test_aihub_authentication_and_session_setup_errors():
+    asyncio.run(_check_authentication_and_session_setup_errors())
+
+
+def test_aihub_initialized_notification_error():
+    asyncio.run(_check_initialized_notification_error())
+
+
+def test_aihub_get_info_success_correlations_preserved():
+    asyncio.run(_check_get_info_success_correlations_preserved())
+
+
+def test_aihub_oversized_response_rejected():
+    asyncio.run(_check_oversized_response_rejected())
+
+
 if __name__ == "__main__":
     test_streams_multiple_chunks_without_buffering()
     print("  ok: streams multiple chunks without buffering")
@@ -836,5 +1001,17 @@ if __name__ == "__main__":
     test_aihub_collision_lossless()
     print("  ok: colliding outer/inner fields are lossless (recoverable)")
     test_aihub_operation_log_injection_sanitized()
-    print("  ok: CR/LF in operation is sanitized in log output")
+    print("  ok: unsupported operation text is excluded from logs")
+    test_aihub_response_id_correlation()
+    print("  ok: unrelated JSON-RPC response ids are rejected")
+    test_aihub_success_correlation_headers_preserved()
+    print("  ok: successful responses preserve request/root activity ids")
+    test_aihub_authentication_and_session_setup_errors()
+    print("  ok: authentication and HTTP client setup failures are structured")
+    test_aihub_initialized_notification_error()
+    print("  ok: failed initialized notification returns a structured error")
+    test_aihub_get_info_success_correlations_preserved()
+    print("  ok: getInfo success preserves request/root activity ids")
+    test_aihub_oversized_response_rejected()
+    print("  ok: oversized responses are rejected before unbounded buffering")
     print("ALL UDF STREAMING TESTS PASSED")

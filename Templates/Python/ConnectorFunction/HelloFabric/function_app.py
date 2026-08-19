@@ -7,6 +7,7 @@ import json
 import logging
 import datetime
 import email.utils
+from jwt.exceptions import InvalidTokenError
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -214,12 +215,16 @@ _FABRIC_AIHUB_CONNECTOR_NAME = "fabric-aihub"
 _MCP_PROTOCOL_VERSION = "2025-06-18"
 _MCP_CLIENT_NAME = "rayfin-fabric-aihub"
 _MCP_CLIENT_VERSION = "1"
+_SUPPORTED_AIHUB_OPERATIONS = frozenset(
+    {"getInfo", "startTask", "getTask", "getTaskResult", "cancelTask"}
+)
 
 # AI Hub adapter operations are SHORT request/reply round trips (NOT streamed),
 # so they must not inherit the shared session's unbounded read timeout (which
 # exists so long-draining DAX streams are not cut off). Bind every AI Hub call
 # with a finite per-request timeout to avoid hanging forever on `resp.text()`.
 _AIHUB_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=100, sock_connect=30, sock_read=100)
+_AIHUB_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 # Caller-supplied keys that would (or could) redirect the request away from the
 # fixed AI Hub endpoint. Any of these in payload["input"] is rejected outright.
@@ -362,11 +367,10 @@ def _try_json(text):
         return None
 
 
-def _parse_sse(text):
-    # Parse an SSE stream and return the LAST event whose data is a JSON-RPC
-    # message containing `result` or `error`. Lines starting with ':' are
-    # comments (e.g. keep-alive/ping) and ignored; a blank line terminates an
-    # event; multiple `data:` lines within one event are joined with newlines.
+def _parse_sse(text, expected_request_id):
+    # Parse an SSE stream and return the LAST result/error event correlated to
+    # this request. Other in-flight JSON-RPC messages may share the stream and
+    # must never be mistaken for this invocation's response.
     if not text:
         return None
     last = None
@@ -376,7 +380,11 @@ def _parse_sse(text):
         if not collected:
             return None
         msg = _try_json("\n".join(collected))
-        if isinstance(msg, dict) and ("result" in msg or "error" in msg):
+        if (
+            isinstance(msg, dict)
+            and msg.get("id") == expected_request_id
+            and ("result" in msg or "error" in msg)
+        ):
             return msg
         return None
 
@@ -406,6 +414,28 @@ _HTTP_ERROR_MAP = {
     408: ("Timeout", True, False),
     429: ("Throttled", True, False),
 }
+
+
+class _ResponseTooLarge(Exception):
+    pass
+
+
+async def _read_bounded_response_text(resp):
+    content_length = getattr(resp, "content_length", None)
+    if (
+        isinstance(content_length, int)
+        and content_length > _AIHUB_MAX_RESPONSE_BYTES
+    ):
+        raise _ResponseTooLarge()
+
+    chunks = []
+    size = 0
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        size += len(chunk)
+        if size > _AIHUB_MAX_RESPONSE_BYTES:
+            raise _ResponseTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8")
 
 
 def _sanitize_for_log(value, max_len=120):
@@ -455,7 +485,9 @@ def _shape_result(result):
         return dict(result)
     return result
 
-async def _read_mcp_response(resp, operation, invocation_id, known_task_id):
+async def _read_mcp_response(
+    resp, operation, invocation_id, known_task_id, expected_request_id
+):
     # ONE shared response handler used by every operation. Handles JSON, SSE,
     # 202 acks, JSON-RPC errors on HTTP 200, and HTTP error statuses; preserves
     # upstream correlation ids and returns a normalized envelope.
@@ -488,21 +520,28 @@ async def _read_mcp_response(resp, operation, invocation_id, known_task_id):
     # returns to the shared pool. NEVER close the shared session here.
     try:
         try:
-            body_text = await resp.text()
-        except (UnicodeDecodeError, LookupError):
+            body_text = await _read_bounded_response_text(resp)
+        except (UnicodeDecodeError, LookupError, _ResponseTooLarge) as exc:
             # A body that cannot be decoded (bad charset / invalid bytes) must
             # not escape as an unhandled error; surface the structured envelope.
             # `resp.release()` in the enclosing finally still runs exactly once.
+            cause_code = (
+                "ResponseTooLarge"
+                if isinstance(exc, _ResponseTooLarge)
+                else "ResponseDecodeFailed"
+            )
             env = _error_envelope(
                 "UpstreamError", "Unparseable upstream response", source="upstream",
                 retryable=True, userError=False, httpStatus=status,
                 taskId=known_task_id, invocationId=invocation_id,
                 requestId=request_id, rootActivityId=root_activity_id,
-                diagnostics=diagnostics,
+                causeCode=cause_code, diagnostics=diagnostics,
             )
             return {"kind": "error", "envelope": env}
     finally:
-        await resp.release()
+        # aiohttp.ClientResponse.release() is synchronous; it returns the
+        # connection to the pool immediately and must not be awaited.
+        resp.release()
 
     if status >= 400:
         if status in _HTTP_ERROR_MAP:
@@ -520,7 +559,7 @@ async def _read_mcp_response(resp, operation, invocation_id, known_task_id):
         )
         return {"kind": "error", "envelope": env}
 
-    if status == 202:
+    if status in (202, 204):
         # Bare ACK when the body is empty/non-JSON; a JSON body is a real task
         # response and is parsed like the JSON case below. Never invent a taskId.
         parsed = _try_json(body_text) if (body_text and body_text.strip()) else None
@@ -531,8 +570,16 @@ async def _read_mcp_response(resp, operation, invocation_id, known_task_id):
             return {"kind": "ack", "ack": ack, "requestId": request_id,
                     "rootActivityId": root_activity_id, "sessionId": session_id}
         msg = parsed
+    elif (
+        expected_request_id is None
+        and status == 200
+        and not (body_text and body_text.strip())
+    ):
+        return {"kind": "ack", "ack": {"status": "accepted"},
+                "requestId": request_id, "rootActivityId": root_activity_id,
+                "sessionId": session_id}
     elif "text/event-stream" in content_type:
-        msg = _parse_sse(body_text)
+        msg = _parse_sse(body_text, expected_request_id)
     else:
         msg = _try_json(body_text)
 
@@ -543,6 +590,16 @@ async def _read_mcp_response(resp, operation, invocation_id, known_task_id):
             taskId=known_task_id, invocationId=invocation_id,
             requestId=request_id, rootActivityId=root_activity_id,
             diagnostics=diagnostics,
+        )
+        return {"kind": "error", "envelope": env}
+
+    if expected_request_id is not None and msg.get("id") != expected_request_id:
+        env = _error_envelope(
+            "UpstreamError", "Upstream response did not match the request",
+            source="upstream", retryable=True, userError=False,
+            httpStatus=status, taskId=known_task_id, invocationId=invocation_id,
+            requestId=request_id, rootActivityId=root_activity_id,
+            causeCode="ResponseIdMismatch", diagnostics=diagnostics,
         )
         return {"kind": "error", "envelope": env}
 
@@ -571,9 +628,18 @@ def _finish(handled, invocation_id, known_task_id):
         env = handled["envelope"]
         env["error"].setdefault("invocationId", invocation_id)
         return env
+    transport = {}
+    if handled.get("requestId"):
+        transport["requestId"] = handled["requestId"]
+    if handled.get("rootActivityId"):
+        transport["rootActivityId"] = handled["rootActivityId"]
     if kind == "ack":
-        return handled["ack"]
-    return _shape_result(handled.get("result"))
+        ack = dict(handled["ack"])
+        return _merge_preserving(ack, transport, "transport")
+    result = _shape_result(handled.get("result"))
+    if not isinstance(result, dict):
+        result = {"result": result}
+    return _merge_preserving(result, transport, "transport")
 
 
 async def _op_get_info(session, url, headers, invocation_id):
@@ -586,9 +652,12 @@ async def _op_get_info(session, url, headers, invocation_id):
         "clientInfo": {"name": _MCP_CLIENT_NAME, "version": _MCP_CLIENT_VERSION},
         "capabilities": {},
     }
-    resp1 = await session.post(url, json=_jsonrpc_body("initialize", init_params),
+    init_request = _jsonrpc_body("initialize", init_params)
+    resp1 = await session.post(url, json=init_request,
                                headers=headers, timeout=_AIHUB_REQUEST_TIMEOUT)
-    handled1 = await _read_mcp_response(resp1, "getInfo", invocation_id, None)
+    handled1 = await _read_mcp_response(
+        resp1, "getInfo", invocation_id, None, init_request["id"]
+    )
     if handled1.get("kind") != "result":
         return _finish(handled1, invocation_id, None)
     init_result = handled1.get("result") or {}
@@ -599,21 +668,24 @@ async def _op_get_info(session, url, headers, invocation_id):
     if session_id:
         call_headers["Mcp-Session-Id"] = session_id
 
-    # Signal readiness with the initialized NOTIFICATION (no id, no response).
-    # Best-effort: a failure here must not fail getInfo.
-    try:
-        notif_resp = await session.post(
-            url, json=_jsonrpc_body("notifications/initialized", None, notification=True),
-            headers=call_headers, timeout=_AIHUB_REQUEST_TIMEOUT)
-        release = getattr(notif_resp, "release", None)
-        if release is not None:
-            await release()
-    except (asyncio.TimeoutError, aiohttp.ClientError):
-        pass
+    # Signal readiness with the initialized NOTIFICATION (no JSON-RPC id).
+    # The HTTP acknowledgement still participates in the structured-error
+    # contract even though a successful notification has no JSON-RPC response.
+    notif_resp = await session.post(
+        url, json=_jsonrpc_body("notifications/initialized", None, notification=True),
+        headers=call_headers, timeout=_AIHUB_REQUEST_TIMEOUT)
+    handled_notification = await _read_mcp_response(
+        notif_resp, "getInfo", invocation_id, None, None
+    )
+    if handled_notification.get("kind") == "error":
+        return _finish(handled_notification, invocation_id, None)
 
-    resp2 = await session.post(url, json=_jsonrpc_body("tools/list", {}),
+    tools_request = _jsonrpc_body("tools/list", {})
+    resp2 = await session.post(url, json=tools_request,
                                headers=call_headers, timeout=_AIHUB_REQUEST_TIMEOUT)
-    handled2 = await _read_mcp_response(resp2, "getInfo", invocation_id, None)
+    handled2 = await _read_mcp_response(
+        resp2, "getInfo", invocation_id, None, tools_request["id"]
+    )
     if handled2.get("kind") != "result":
         return _finish(handled2, invocation_id, None)
     tools_result = handled2.get("result") or {}
@@ -632,6 +704,12 @@ async def _op_get_info(session, url, headers, invocation_id):
         out["tools"] = tools_list
     else:
         out.setdefault("tools", [])
+    transport = {}
+    if handled2.get("requestId"):
+        transport["requestId"] = handled2["requestId"]
+    if handled2.get("rootActivityId"):
+        transport["rootActivityId"] = handled2["rootActivityId"]
+    _merge_preserving(out, transport, "transport")
     logging.info("rayfin_fabric_aihub_v1 end op=getInfo invocationId=%s httpStatus=200", invocation_id)
     return out
 
@@ -651,9 +729,12 @@ async def _op_start_task(session, url, headers, invocation_id, input_data):
     params = {"name": tool_name, "arguments": arguments, "task": {}}
     if ttl is not None:
         params["task"]["ttl"] = ttl
-    resp = await session.post(url, json=_jsonrpc_body("tools/call", params),
+    request = _jsonrpc_body("tools/call", params)
+    resp = await session.post(url, json=request,
                               headers=headers, timeout=_AIHUB_REQUEST_TIMEOUT)
-    handled = await _read_mcp_response(resp, "startTask", invocation_id, None)
+    handled = await _read_mcp_response(
+        resp, "startTask", invocation_id, None, request["id"]
+    )
     logging.info("rayfin_fabric_aihub_v1 end op=startTask invocationId=%s", invocation_id)
     # _finish returns task metadata when a task was created, or the immediate
     # tool result (content/isError/structuredContent) when the server answered
@@ -667,9 +748,12 @@ async def _op_task_by_id(session, url, headers, invocation_id, input_data, metho
         logging.warning("rayfin_fabric_aihub_v1 missing taskId method=%s invocationId=%s httpStatus=400 retryable=False", method, invocation_id)
         return _error_envelope("MissingInput", "taskId is required", source="connector",
                                retryable=False, userError=True, httpStatus=400, invocationId=invocation_id)
-    resp = await session.post(url, json=_jsonrpc_body(method, {"taskId": task_id}),
+    request = _jsonrpc_body(method, {"taskId": task_id})
+    resp = await session.post(url, json=request,
                               headers=headers, timeout=_AIHUB_REQUEST_TIMEOUT)
-    handled = await _read_mcp_response(resp, method, invocation_id, task_id)
+    handled = await _read_mcp_response(
+        resp, method, invocation_id, task_id, request["id"]
+    )
     logging.info("rayfin_fabric_aihub_v1 end method=%s invocationId=%s", method, invocation_id)
     return _finish(handled, invocation_id, task_id)
 
@@ -704,16 +788,16 @@ async def rayfin_fabric_aihub_v1(payload: dict, fabricClient: fn.FabricItem) -> 
     if not isinstance(input_data, dict):
         input_data = {}
 
-    # Sanitize the caller-controlled operation once; use it for every log line
-    # and user-facing message so embedded CR/LF cannot forge log entries.
-    safe_operation = _sanitize_for_log(operation)
-    logging.info("rayfin_fabric_aihub_v1 start op=%s invocationId=%s", safe_operation, invocation_id)
+    # Only allowlisted operation names may reach logs. An unsupported operation
+    # can contain secrets or PII even after control-character sanitization.
+    log_operation = operation if operation in _SUPPORTED_AIHUB_OPERATIONS else "unsupported"
+    logging.info("rayfin_fabric_aihub_v1 start op=%s invocationId=%s", log_operation, invocation_id)
 
     # Fixed-target enforcement (security-critical): caller input must NEVER
     # influence the URL. Reject any target-like override before doing anything.
     override_key = _detect_target_override(input_data)
     if override_key is not None:
-        logging.warning("rayfin_fabric_aihub_v1 rejected target override op=%s invocationId=%s httpStatus=400 retryable=False", safe_operation, invocation_id)
+        logging.warning("rayfin_fabric_aihub_v1 rejected target override op=%s invocationId=%s httpStatus=400 retryable=False", log_operation, invocation_id)
         return _error_envelope(
             "InvalidTargetOverride",
             f"Caller may not override the target endpoint (key '{_sanitize_for_log(override_key)}')",
@@ -721,12 +805,46 @@ async def rayfin_fabric_aihub_v1(payload: dict, fabricClient: fn.FabricItem) -> 
             invocationId=invocation_id,
         )
 
+    if operation not in _SUPPORTED_AIHUB_OPERATIONS:
+        logging.warning("rayfin_fabric_aihub_v1 unsupported op=unsupported invocationId=%s httpStatus=400 retryable=False", invocation_id)
+        return _error_envelope("UnsupportedOperation", "Unsupported operation",
+                               source="connector", retryable=False, userError=True,
+                               httpStatus=400, invocationId=invocation_id)
+
     url = _FABRIC_AIHUB_MCP_URL
-    # Delegated Fabric OBO seam: the generic connection yields a pre-minted
-    # Fabric-audience bearer. Never returned, logged, or echoed.
-    token = fabricClient.get_access_token().get_token().token
+    try:
+        # Delegated Fabric OBO seam: the generic connection yields a pre-minted
+        # Fabric-audience bearer. Never returned, logged, or echoed.
+        token = fabricClient.get_access_token().get_token().token
+        if not isinstance(token, str) or not token:
+            raise ValueError("empty delegated token")
+    except (
+        AttributeError,
+        IndexError,
+        InvalidTokenError,
+        KeyError,
+        RuntimeError,
+        StopIteration,
+        TypeError,
+        ValueError,
+    ):
+        logging.error("rayfin_fabric_aihub_v1 authentication failed op=%s invocationId=%s retryable=False", log_operation, invocation_id)
+        return _error_envelope(
+            "AuthenticationFailed", "Fabric delegated authentication failed",
+            source="connector", retryable=False, userError=False, httpStatus=500,
+            invocationId=invocation_id,
+        )
+
     headers = _mcp_headers(url, invocation_id, token)
-    session = await _get_session()
+    try:
+        session = await _get_session()
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError):
+        logging.error("rayfin_fabric_aihub_v1 session setup failed op=%s invocationId=%s retryable=True", log_operation, invocation_id)
+        return _error_envelope(
+            "ConnectorUnavailable", "HTTP client initialization failed",
+            source="connector", retryable=True, userError=False, httpStatus=503,
+            invocationId=invocation_id,
+        )
 
     try:
         if operation == "getInfo":
@@ -739,15 +857,11 @@ async def rayfin_fabric_aihub_v1(payload: dict, fabricClient: fn.FabricItem) -> 
             return await _op_task_by_id(session, url, headers, invocation_id, input_data, "tasks/result")
         if operation == "cancelTask":
             return await _op_task_by_id(session, url, headers, invocation_id, input_data, "tasks/cancel")
-        logging.warning("rayfin_fabric_aihub_v1 unsupported op=%s invocationId=%s httpStatus=400 retryable=False", safe_operation, invocation_id)
-        return _error_envelope("UnsupportedOperation", f"Unsupported operation '{safe_operation}'",
-                               source="connector", retryable=False, userError=True,
-                               httpStatus=400, invocationId=invocation_id)
     except asyncio.TimeoutError:
-        logging.error("rayfin_fabric_aihub_v1 timeout op=%s invocationId=%s retryable=True", safe_operation, invocation_id)
+        logging.error("rayfin_fabric_aihub_v1 timeout op=%s invocationId=%s retryable=True", log_operation, invocation_id)
         return _error_envelope("Timeout", "Upstream request timed out", source="upstream",
                                retryable=True, userError=False, httpStatus=408, invocationId=invocation_id)
     except aiohttp.ClientError:
-        logging.error("rayfin_fabric_aihub_v1 network error op=%s invocationId=%s retryable=True", safe_operation, invocation_id)
+        logging.error("rayfin_fabric_aihub_v1 network error op=%s invocationId=%s retryable=True", log_operation, invocation_id)
         return _error_envelope("UpstreamError", "Upstream request failed", source="upstream",
                                retryable=True, userError=False, invocationId=invocation_id)
