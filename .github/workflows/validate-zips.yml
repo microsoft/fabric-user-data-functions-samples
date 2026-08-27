@@ -1,4 +1,4 @@
-name: Validate zip permissions
+name: Validate zip archives
 
 on:
   pull_request:
@@ -6,6 +6,8 @@ on:
       - '**/*.zip'
       - '.github/scripts/check_zip_permissions.py'
       - '.github/workflows/validate-zips.yml'
+      - 'Templates/Python/ConnectorFunction/HelloFabric/function_app.py'
+      - 'Templates/Python/ConnectorFunction/HelloFabric/functions.metadata'
 
 permissions:
   contents: read
@@ -18,5 +20,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check zip member permissions
+      - name: Check zip permissions, contents, and parity
         run: python .github/scripts/check_zip_permissions.py
