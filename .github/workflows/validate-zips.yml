@@ -1,0 +1,22 @@
+name: Validate zip permissions
+
+on:
+  pull_request:
+    paths:
+      - '**/*.zip'
+      - '.github/scripts/check_zip_permissions.py'
+      - '.github/workflows/validate-zips.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-zips:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check zip member permissions
+        run: python .github/scripts/check_zip_permissions.py
