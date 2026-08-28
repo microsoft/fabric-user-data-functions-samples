@@ -777,6 +777,60 @@ def test_stream_aclose_after_pre_start_cancellation_releases_response_once():
     asyncio.run(check())
 
 
+def test_release_failure_retains_ownership_until_retry_reuses_pool_slot():
+    async def check():
+        mod = _load_function_app()
+        release_error = RuntimeError("release failed")
+        first_response = _FakeResponse([b"never-read"], release_error=release_error)
+        first_iterator = _FakeBodyIterator([b"never-read"])
+        first_response.content = _FakeIteratorContent(first_iterator)
+        second_response = _FakeResponse([b"next"])
+        session = _SingleSlotFakeSession((first_response, second_response))
+        original_get_session = mod._get_session
+
+        async def _fake_get_session():
+            return session
+
+        mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+        try:
+            first_result = await mod.rayfin_kusto_v1(_payload(), _FakeKustoClient())
+            first_body = first_result.body
+            try:
+                await first_body.aclose()
+            except RuntimeError as error:
+                assert error is release_error
+            else:
+                raise AssertionError("response release failure must propagate")
+
+            assert first_body._response is first_response
+            assert first_body._released is False
+            assert first_response.release_count == 1
+            assert first_iterator.next_count == 0
+            assert first_iterator.close_count == 0
+            assert session.slot_acquired is True
+
+            first_response._release_error = None
+            await first_body.aclose()
+            await first_body.aclose()
+            assert first_body._response is None
+            assert first_body._released is True
+            assert first_response.release_count == 2
+            assert first_iterator.close_count == 1
+            assert session.slot_acquired is False
+
+            second_result = await asyncio.wait_for(
+                mod.rayfin_kusto_v1(_payload(), _FakeKustoClient()),
+                timeout=2,
+            )
+            await second_result.body.aclose()
+            assert second_response.release_count == 1
+            assert session.slot_acquired is False
+        finally:
+            mod._get_session = original_get_session
+
+    asyncio.run(check())
+
+
 def test_response_body_iterator_preserves_chunks_and_releases_on_exhaustion():
     async def check():
         mod = _load_function_app()
@@ -906,8 +960,15 @@ def test_response_body_iterator_release_primitive_is_idempotent_and_surfaces_err
         assert error is release_error
     else:
         raise AssertionError("response release failure must propagate")
+
+    assert failing_body._response is failing_response
+    assert failing_body._released is False
+    failing_response._release_error = None
     assert failing_body._release_response() is None
-    assert failing_response.release_count == 1
+    assert failing_body._release_response() is None
+    assert failing_body._response is None
+    assert failing_body._released is True
+    assert failing_response.release_count == 2
 
 
 def test_response_body_iterator_partial_construction_releases_response():

@@ -507,9 +507,9 @@ class _ResponseBodyIterator:
         response = self._response
         if response is None:
             return
+        response.release()
         self._response = None
         self._released = True
-        response.release()
 
     def __del__(self):
         self._release_response()
