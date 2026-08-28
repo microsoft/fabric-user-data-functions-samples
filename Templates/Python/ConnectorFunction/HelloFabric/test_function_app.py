@@ -25,6 +25,7 @@ import io
 import logging
 import os
 import sys
+import threading
 import tracemalloc
 import types
 import zipfile
@@ -383,6 +384,16 @@ def _valid_mcp_envelope(headers=None, body='{"jsonrpc":"2.0"}', server_policy=No
     }
 
 
+def _valid_mcp_server_policy():
+    return {
+        "id": "fabriciq",
+        "url": "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        "protectedHeaders": {
+            "X-Variant": "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+        },
+    }
+
+
 def _assert_fixed_error(exception_type, message, action):
     try:
         action()
@@ -460,6 +471,14 @@ class _ExplodingPolicy:
 
     def __repr__(self):
         raise RuntimeError("customer-secret-policy")
+
+
+class _SpoofedProtectedHeaders:
+    def __eq__(self, _other):
+        return True
+
+    def __iter__(self):
+        return iter(())
 
 
 async def _check_streams_multiple_chunks_without_buffering():
@@ -1289,7 +1308,7 @@ def test_mcp_extractor_rejects_connection_and_nominated_supplied_headers():
         )
 
 
-def test_mcp_server_policy_is_never_inspected_or_retained():
+def test_mcp_extractor_never_inspects_or_retains_server_policy():
     mod = _load_function_app()
     for policy in (False, 0, {}, [], _ExplodingPolicy()):
         _assert_fixed_error(
@@ -1306,8 +1325,327 @@ def test_mcp_server_policy_is_never_inspected_or_retained():
     assert not hasattr(pending, "credential")
     assert not hasattr(pending, "send")
 
+    mixed_invalid = _valid_mcp_envelope(server_policy=_ExplodingPolicy())
+    mixed_invalid["version"] = 2
+    _assert_fixed_error(
+        mod._McpServerPolicyUnresolved,
+        "MCP server policy is unresolved.",
+        lambda: mod._extract_pending_mcp_t1_transport(mixed_invalid),
+    )
 
-def test_mcp_prepare_is_synchronous_and_always_fails_closed():
+
+def test_mcp_candidate_contract_constants_match_authoritative_t2_handoff():
+    mod = _load_function_app()
+    assert mod._MCP_T2_CANDIDATE_EVIDENCE == (
+        "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
+    )
+    assert mod._MCP_T2_CANDIDATE_CONTRACT == mod._McpT2CandidateContract(
+        "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
+        "fabriciq",
+        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        (
+            (
+                "X-Variant",
+                "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
+            ),
+        ),
+    )
+
+
+def test_mcp_prepare_accepts_exact_t2_policy_and_snapshots_immutable_transport():
+    mod = _load_function_app()
+    policy = _valid_mcp_server_policy()
+    policy["protectedHeaders"]["X-Variant"] = (
+        "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+    )
+    body = (
+        '{"jsonrpc":"2.0","serverPolicy":{"url":"https://evil.invalid"},'
+        '"destination":"https://evil.invalid"}'
+    )
+    envelope = _valid_mcp_envelope(
+        headers={"accept": ["application/json"], "x-empty": []},
+        body=body,
+        server_policy=dict(reversed(tuple(policy.items()))),
+    )
+
+    prepared = mod._prepare_mcp_transport(envelope)
+
+    assert prepared == mod._PreparedMcpTransport(
+        "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
+        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        (
+            ("accept", ("application/json",)),
+            ("x-empty", ()),
+            (
+                "X-Variant",
+                ("Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",),
+            ),
+        ),
+        body.encode("utf-8"),
+    )
+    policy["url"] = "https://evil.invalid"
+    policy["protectedHeaders"]["X-Variant"] = "evil"
+    envelope["headers"]["accept"].append("text/event-stream")
+    envelope["body"] = "mutated"
+    assert prepared.endpoint == "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+    assert prepared.headers[0][1] == ("application/json",)
+    assert prepared.body_bytes == body.encode("utf-8")
+    envelope["serverPolicy"]["id"] = "mutated"
+    envelope["serverPolicy"]["url"] = "https://evil.invalid"
+    envelope["serverPolicy"]["protectedHeaders"]["X-Variant"] = "mutated"
+    assert prepared.endpoint == "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+    assert prepared.headers[-1] == (
+        "X-Variant",
+        ("Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",),
+    )
+    assert not hasattr(prepared, "credential")
+    assert not hasattr(prepared, "send")
+    assert not hasattr(prepared, "session")
+
+
+def test_mcp_policy_shape_and_literals_fail_closed():
+    mod = _load_function_app()
+
+    class DictSubclass(dict):
+        pass
+
+    valid = _valid_mcp_server_policy()
+    cases = [
+        False,
+        0,
+        [],
+        {},
+        DictSubclass(valid),
+        *[
+            {key: value for key, value in valid.items() if key != missing}
+            for missing in ("id", "url", "protectedHeaders")
+        ],
+        {**valid, "extra": "value"},
+        {
+            "Id": valid["id"],
+            "url": valid["url"],
+            "protectedHeaders": valid["protectedHeaders"],
+        },
+        {**valid, "id": ""},
+        {**valid, "id": _ExplodingStr("fabriciq")},
+        {**valid, "id": "fabric-iq"},
+        {**valid, "url": ""},
+        {**valid, "url": _ExplodingStr(valid["url"])},
+        {**valid, "url": "https://FABRICIQ.svc.cloud.microsoft/v1/mcp/fabriciq"},
+        {**valid, "url": valid["url"] + "/"},
+        {**valid, "url": valid["url"] + "?query=1"},
+        {**valid, "url": valid["url"] + "#fragment"},
+        {**valid, "protectedHeaders": []},
+        {**valid, "protectedHeaders": {}},
+        {**valid, "protectedHeaders": DictSubclass(valid["protectedHeaders"])},
+        {
+            **valid,
+            "protectedHeaders": {
+                _ExplodingStr("X-Variant"): valid["protectedHeaders"]["X-Variant"]
+            },
+        },
+        {**valid, "protectedHeaders": {"x-variant": valid["protectedHeaders"]["X-Variant"]}},
+        {
+            **valid,
+            "protectedHeaders": {
+                **valid["protectedHeaders"],
+                "X-Other": "value",
+            },
+        },
+        {**valid, "protectedHeaders": {"X-Variant": ""}},
+        {
+            **valid,
+            "protectedHeaders": {
+                "X-Variant": _ExplodingStr(
+                    "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+                )
+            },
+        },
+        {**valid, "protectedHeaders": {"X-Variant": "different"}},
+    ]
+    for policy in cases:
+        _assert_fixed_error(
+            mod._McpServerPolicyInvalid,
+            "Invalid MCP server policy.",
+            lambda policy=policy: mod._prepare_mcp_transport(
+                _valid_mcp_envelope(server_policy=policy)
+            ),
+        )
+
+
+def test_mcp_candidate_source_version_mismatch_fails_closed():
+    mod = _load_function_app()
+    original_contract = mod._MCP_T2_CANDIDATE_CONTRACT
+    mod._MCP_T2_CANDIDATE_CONTRACT = original_contract._replace(
+        source_version="project-rayfin:unpublished"
+    )
+    try:
+        _assert_fixed_error(
+            mod._McpServerPolicyInvalid,
+            "Invalid MCP server policy.",
+            lambda: mod._prepare_mcp_transport(
+                _valid_mcp_envelope(server_policy=_valid_mcp_server_policy())
+            ),
+        )
+    finally:
+        mod._MCP_T2_CANDIDATE_CONTRACT = original_contract
+
+
+def test_mcp_candidate_contract_fields_cannot_spoof_equality_or_iteration():
+    mod = _load_function_app()
+    original_contract = mod._MCP_T2_CANDIDATE_CONTRACT
+    spoofed_contracts = (
+        original_contract._replace(
+            source_version=_ExplodingStr(original_contract.source_version)
+        ),
+        original_contract._replace(
+            profile_id=_ExplodingStr(original_contract.profile_id)
+        ),
+        original_contract._replace(endpoint=_ExplodingStr(original_contract.endpoint)),
+        original_contract._replace(protected_headers=_SpoofedProtectedHeaders()),
+        original_contract._replace(
+            protected_headers=(
+                [
+                    "X-Variant",
+                    "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
+                ],
+            )
+        ),
+    )
+    try:
+        for spoofed_contract in spoofed_contracts:
+            mod._MCP_T2_CANDIDATE_CONTRACT = spoofed_contract
+            _assert_fixed_error(
+                mod._McpServerPolicyInvalid,
+                "Invalid MCP server policy.",
+                lambda: mod._prepare_mcp_transport(
+                    _valid_mcp_envelope(server_policy=_valid_mcp_server_policy())
+                ),
+            )
+    finally:
+        mod._MCP_T2_CANDIDATE_CONTRACT = original_contract
+
+
+def test_mcp_policy_resolution_never_rereads_live_outer_policy():
+    mod = _load_function_app()
+    source_tree = ast.parse(inspect.getsource(mod._resolve_mcp_t2_candidate_policy))
+    live_subscripts = [
+        node
+        for node in ast.walk(source_tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "server_policy"
+    ]
+    item_snapshots = [
+        node
+        for node in ast.walk(source_tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "server_policy"
+        and node.attr == "items"
+    ]
+    assert live_subscripts == []
+    assert len(item_snapshots) == 1
+
+
+def test_mcp_concurrent_policy_mutation_has_only_fixed_failure_or_snapshot():
+    mod = _load_function_app()
+    policy = _valid_mcp_server_policy()
+    stop = threading.Event()
+
+    def mutate():
+        while not stop.is_set():
+            policy.pop("id", None)
+            policy["id"] = "fabriciq"
+
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.000001)
+    mutator = threading.Thread(target=mutate)
+    mutator.start()
+    try:
+        for _attempt in range(2_000):
+            try:
+                prepared = mod._prepare_mcp_transport(
+                    _valid_mcp_envelope(server_policy=policy)
+                )
+            except mod._McpServerPolicyInvalid as error:
+                assert str(error) == "Invalid MCP server policy."
+            else:
+                assert prepared.endpoint == (
+                    "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+                )
+    finally:
+        stop.set()
+        mutator.join()
+        sys.setswitchinterval(previous_interval)
+
+
+def test_mcp_protected_header_collision_is_rejected_not_overwritten():
+    mod = _load_function_app()
+    _assert_fixed_error(
+        mod._McpServerPolicyInvalid,
+        "Invalid MCP server policy.",
+        lambda: mod._prepare_mcp_transport(
+            _valid_mcp_envelope(
+                headers={"x-variant": ["caller-value"]},
+                server_policy=_valid_mcp_server_policy(),
+            )
+        ),
+    )
+
+
+def test_mcp_policy_resolution_and_preparation_perform_no_io_or_logging():
+    mod = _load_function_app()
+    records = []
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("provisional MCP preparation must not perform I/O")
+
+    root_logger = logging.getLogger()
+    previous_level = root_logger.level
+    handler = CaptureHandler()
+    original_get_session = mod._get_session
+    original_client_session = mod.aiohttp.ClientSession
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(handler)
+    mod._get_session = fail_if_called
+    mod.aiohttp.ClientSession = fail_if_called
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            prepared = mod._prepare_mcp_transport(
+                _valid_mcp_envelope(server_policy=_valid_mcp_server_policy())
+            )
+            assert prepared.endpoint.endswith("/v1/mcp/fabriciq")
+            _assert_fixed_error(
+                mod._McpServerPolicyInvalid,
+                "Invalid MCP server policy.",
+                lambda: mod._prepare_mcp_transport(
+                    _valid_mcp_envelope(
+                        server_policy={
+                            **_valid_mcp_server_policy(),
+                            "url": "https://customer-secret.invalid",
+                        }
+                    )
+                ),
+            )
+    finally:
+        mod._get_session = original_get_session
+        mod.aiohttp.ClientSession = original_client_session
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(previous_level)
+    assert records == []
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+    assert not hasattr(mod, "_send_mcp_transport")
+
+
+def test_mcp_prepare_remains_synchronous_and_null_policy_fails_closed():
     mod = _load_function_app()
     assert inspect.iscoroutinefunction(mod._extract_pending_mcp_t1_transport) is False
     assert inspect.iscoroutinefunction(mod._prepare_mcp_transport) is False
@@ -1394,6 +1732,7 @@ def test_connector_archives_match_source_metadata_and_each_other():
         archive_bytes.append(archive_path.read_bytes())
         with zipfile.ZipFile(archive_path) as archive:
             assert archive.testzip() is None
+            assert archive.comment == b""
             member_names.append(tuple(info.filename for info in archive.infolist()))
             non_target_names = tuple(
                 info.filename
@@ -1404,8 +1743,6 @@ def test_connector_archives_match_source_metadata_and_each_other():
             for info in archive.infolist():
                 assert info.create_system == 0
                 assert info.external_attr == 0
-                if info.filename == "function_app.py":
-                    continue
                 common_info = (
                     info.date_time,
                     info.compress_type,
@@ -1421,6 +1758,8 @@ def test_connector_archives_match_source_metadata_and_each_other():
                     info.external_attr,
                 )
                 assert common_info == _ARCHIVE_COMMON_ZIP_INFO
+                if info.filename == "function_app.py":
+                    continue
                 content = archive.read(info.filename)
                 assert (
                     sha256(content).hexdigest(),

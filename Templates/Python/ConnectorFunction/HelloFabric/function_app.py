@@ -59,6 +59,23 @@ _MCP_ASCII_TOKEN_CHARACTERS = frozenset(
 _MCP_T1_MAX_BODY_SIZE_BYTES = 5 * 1024 * 1024
 _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE = "Invalid MCP transport envelope."
 _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE = "MCP server policy is unresolved."
+_MCP_SERVER_POLICY_INVALID_MESSAGE = "Invalid MCP server policy."
+_MCP_T2_CANDIDATE_EVIDENCE = (
+    "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
+)
+_MCP_T2_CANDIDATE_SOURCE_VERSION = (
+    "ananke:454357b4696d5a8669596209ed88bf10daeb0844"
+)
+_MCP_T2_CANDIDATE_PROFILE_ID = "fabriciq"
+_MCP_T2_CANDIDATE_ENDPOINT = (
+    "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+)
+_MCP_T2_CANDIDATE_PROTECTED_HEADERS = (
+    (
+        "X-Variant",
+        "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
+    ),
+)
 
 
 class _McpTransportContractError(ValueError):
@@ -69,11 +86,42 @@ class _McpServerPolicyUnresolved(_McpTransportContractError):
     """Fixed error used while no trusted MCP server policy is defined."""
 
 
+class _McpServerPolicyInvalid(_McpTransportContractError):
+    """Fixed, customer-data-free error for an untrusted MCP server policy."""
+
+
 class _PendingMcpT1Transport(NamedTuple):
     transport: str
     version: int
     method: str
     protocol_version: str
+    headers: Tuple[Tuple[str, Tuple[str, ...]], ...]
+    body_bytes: bytes
+
+
+class _McpT2CandidateContract(NamedTuple):
+    source_version: str
+    profile_id: str
+    endpoint: str
+    protected_headers: Tuple[Tuple[str, str], ...]
+
+
+_MCP_T2_CANDIDATE_CONTRACT = _McpT2CandidateContract(
+    _MCP_T2_CANDIDATE_SOURCE_VERSION,
+    _MCP_T2_CANDIDATE_PROFILE_ID,
+    _MCP_T2_CANDIDATE_ENDPOINT,
+    _MCP_T2_CANDIDATE_PROTECTED_HEADERS,
+)
+
+
+class _ParsedMcpT1Envelope(NamedTuple):
+    pending: _PendingMcpT1Transport
+    server_policy: object
+
+
+class _PreparedMcpTransport(NamedTuple):
+    policy_source_version: str
+    endpoint: str
     headers: Tuple[Tuple[str, Tuple[str, ...]], ...]
     body_bytes: bytes
 
@@ -139,9 +187,9 @@ def _has_mcp_connection_nominated_header(
     )
 
 
-def _extract_pending_mcp_t1_transport(
+def _parse_mcp_t1_envelope(
     envelope: object,
-) -> _PendingMcpT1Transport:
+) -> _ParsedMcpT1Envelope:
     if type(envelope) is not dict:
         raise _McpTransportContractError(
             _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
@@ -171,10 +219,6 @@ def _extract_pending_mcp_t1_transport(
         body,
         server_policy,
     ) = tuple(value for _key, value in envelope_items)
-    if server_policy is not None:
-        raise _McpServerPolicyUnresolved(
-            _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
-        ) from None
     if (
         type(transport) is not str
         or type(version) is not int
@@ -254,21 +298,164 @@ def _extract_pending_mcp_t1_transport(
             _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
         ) from None
 
-    return _PendingMcpT1Transport(
-        transport,
-        version,
-        method,
-        protocol_version,
-        immutable_headers,
-        body_bytes,
+    return _ParsedMcpT1Envelope(
+        _PendingMcpT1Transport(
+            transport,
+            version,
+            method,
+            protocol_version,
+            immutable_headers,
+            body_bytes,
+        ),
+        server_policy,
     )
 
 
-def _prepare_mcp_transport(envelope: object) -> NoReturn:
-    _extract_pending_mcp_t1_transport(envelope)
-    raise _McpServerPolicyUnresolved(
-        _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
-    ) from None
+def _extract_pending_mcp_t1_transport(
+    envelope: object,
+) -> _PendingMcpT1Transport:
+    if type(envelope) is dict:
+        envelope_items = tuple(envelope.items())
+        envelope_keys = tuple(key for key, _value in envelope_items)
+        if (
+            len(envelope_items) == len(_MCP_T1_FIELD_ORDER)
+            and all(type(key) is str for key in envelope_keys)
+            and envelope_keys == _MCP_T1_FIELD_ORDER
+            and envelope_items[-1][1] is not None
+        ):
+            raise _McpServerPolicyUnresolved(
+                _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
+            ) from None
+
+    parsed = _parse_mcp_t1_envelope(envelope)
+    return parsed.pending
+
+
+def _raise_invalid_mcp_server_policy() -> NoReturn:
+    raise _McpServerPolicyInvalid(_MCP_SERVER_POLICY_INVALID_MESSAGE) from None
+
+
+def _resolve_mcp_t2_candidate_policy(
+    server_policy: object,
+) -> _McpT2CandidateContract:
+    expected_contract = _McpT2CandidateContract(
+        "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
+        "fabriciq",
+        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        (
+            (
+                "X-Variant",
+                "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
+            ),
+        ),
+    )
+    contract = _MCP_T2_CANDIDATE_CONTRACT
+    if (
+        type(contract) is not _McpT2CandidateContract
+        or type(contract.source_version) is not str
+        or type(contract.profile_id) is not str
+        or type(contract.endpoint) is not str
+        or type(contract.protected_headers) is not tuple
+        or len(contract.protected_headers) != 1
+    ):
+        _raise_invalid_mcp_server_policy()
+    for protected_header in contract.protected_headers:
+        if (
+            type(protected_header) is not tuple
+            or len(protected_header) != 2
+            or type(protected_header[0]) is not str
+            or type(protected_header[1]) is not str
+        ):
+            _raise_invalid_mcp_server_policy()
+    if contract != expected_contract:
+        _raise_invalid_mcp_server_policy()
+
+    if server_policy is None:
+        raise _McpServerPolicyUnresolved(
+            _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
+        ) from None
+    if type(server_policy) is not dict:
+        _raise_invalid_mcp_server_policy()
+
+    try:
+        policy_items = tuple(server_policy.items())
+    except RuntimeError:
+        _raise_invalid_mcp_server_policy()
+    policy_keys = tuple(key for key, _value in policy_items)
+    if (
+        len(policy_items) != 3
+        or any(type(key) is not str for key in policy_keys)
+        or frozenset(policy_keys) != frozenset(("id", "url", "protectedHeaders"))
+    ):
+        _raise_invalid_mcp_server_policy()
+
+    profile_id = None
+    endpoint = None
+    protected_headers = None
+    for key, value in policy_items:
+        if key == "id":
+            profile_id = value
+        elif key == "url":
+            endpoint = value
+        else:
+            protected_headers = value
+    if (
+        type(profile_id) is not str
+        or type(endpoint) is not str
+        or type(protected_headers) is not dict
+        or profile_id != contract.profile_id
+        or endpoint != contract.endpoint
+    ):
+        _raise_invalid_mcp_server_policy()
+
+    try:
+        protected_header_items = tuple(protected_headers.items())
+    except RuntimeError:
+        _raise_invalid_mcp_server_policy()
+    if (
+        any(
+            type(name) is not str or type(value) is not str
+            for name, value in protected_header_items
+        )
+        or protected_header_items != contract.protected_headers
+    ):
+        _raise_invalid_mcp_server_policy()
+    return expected_contract
+
+
+def _merge_mcp_candidate_headers(
+    caller_headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
+    protected_headers: Tuple[Tuple[str, str], ...],
+) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    protected_names = frozenset(name.lower() for name, _value in protected_headers)
+    if any(name.lower() in protected_names for name, _values in caller_headers):
+        _raise_invalid_mcp_server_policy()
+
+    merged = list(caller_headers)
+    for name, value in protected_headers:
+        lower_name = name.lower()
+        insertion_index = len(merged)
+        for index, (existing_name, _existing_values) in enumerate(merged):
+            if lower_name < existing_name.lower():
+                insertion_index = index
+                break
+        merged.insert(insertion_index, (name, (value,)))
+    return tuple(merged)
+
+
+def _prepare_mcp_transport(envelope: object) -> _PreparedMcpTransport:
+    parsed = _parse_mcp_t1_envelope(envelope)
+    policy = _resolve_mcp_t2_candidate_policy(parsed.server_policy)
+    headers = _merge_mcp_candidate_headers(
+        parsed.pending.headers,
+        policy.protected_headers,
+    )
+    return _PreparedMcpTransport(
+        policy.source_version,
+        policy.endpoint,
+        headers,
+        parsed.pending.body_bytes,
+    )
 
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
