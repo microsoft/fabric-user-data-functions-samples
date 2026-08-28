@@ -15,11 +15,105 @@ Run directly (`python3 test_function_app.py`) or under pytest. Only requires
 aiohttp to be importable (function_app imports it at module load).
 """
 
+import ast
 import asyncio
+import contextlib
+import gc
 import importlib
+import inspect
+import io
+import logging
 import os
 import sys
+import tracemalloc
 import types
+import zipfile
+from hashlib import sha256
+from pathlib import Path
+
+
+_ARCHIVE_COMMON_ZIP_INFO = (
+    (2026, 8, 21, 0, 0, 0),
+    8,
+    b"",
+    b"",
+    0,
+    0,
+    20,
+    0,
+    0,
+    0,
+    0,
+    0,
+)
+_ARCHIVE_NON_TARGET_GOLDEN = {
+    ".vscode/extensions.json": (
+        "03165c83567b5c86e1567a2b7dc08bc351232b4dafd040572c9040672e90f05c",
+        1878686440,
+        77,
+        101,
+    ),
+    ".vscode/launch.json": (
+        "3e36a191fed0837bcda80609f1cad5d31ba4a95a5efc02bd84c6bb6a356162ad",
+        2818476601,
+        153,
+        275,
+    ),
+    ".vscode/settings.json": (
+        "7a1b67e18a29a03d4b16d09aaf0d9fe6c5a11956326254689697798cb59c357d",
+        3649402893,
+        225,
+        474,
+    ),
+    ".vscode/tasks.json": (
+        "19b73845462d72166ff57157a9fa618c673b874dafec5a6eb426159d58a2f901",
+        30700519,
+        293,
+        855,
+    ),
+    ".funcignore": (
+        "f2cb4ac301787f8ef64476a8cf57fa77c3db8ee19ac52cd919bc7764fbfeab1c",
+        3243196604,
+        82,
+        105,
+    ),
+    ".gitignore": (
+        "4f85711be6b32d8d197b9fb557c900c6979b4eb6603a896e9e3324285a48b9fe",
+        2156272879,
+        1010,
+        1995,
+    ),
+    "host.json": (
+        "ce57f4350cf7948e92d99518e80833f0122d461f95eb79a690804fa59d6a08fe",
+        2189393286,
+        191,
+        308,
+    ),
+    "local.settings.json": (
+        "59b4b43d6f3bd668a41ba4699884e4cef4e36c7ae3a8d48fa06ff80e56b18243",
+        2366048237,
+        270,
+        450,
+    ),
+    "readme.md": (
+        "19818250f0549897b1b1e8950491e1d3dd27723165e2f4afa9086e42fe358bf8",
+        1630295394,
+        664,
+        1252,
+    ),
+    "requirements.txt": (
+        "697d7901805e94305b7b84ba7d23541e7a7fda630d77a135b921917bea399915",
+        1772997688,
+        203,
+        284,
+    ),
+    "fabric_lib/functions.metadata": (
+        "71f9e2ba09b945a7f3016ddfde2d6e6a4ffad98c42e70f51ba20319d8ab4b600",
+        3995063648,
+        278,
+        852,
+    ),
+}
 
 
 def _install_fabric_stub():
@@ -45,8 +139,8 @@ def _install_fabric_stub():
             self.media_type = media_type
             self.status_code = status_code
 
-    class FabricItem:  # placeholder type hint target
-        pass
+    class FabricItem:
+        """Minimal type-hint target for standalone tests."""
 
     functions.UserDataFunctions = UserDataFunctions
     functions.StreamResponse = StreamResponse
@@ -65,26 +159,88 @@ def _load_function_app():
 class _FakeContent:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.iterations_started = 0
 
     async def iter_any(self):
+        self.iterations_started += 1
         for chunk in self._chunks:
             yield chunk
 
 
+class _FakeBodyIterator:
+    def __init__(self, chunks=(), read_error=None, close_error=None, block=False):
+        self._chunks = iter(chunks)
+        self._read_error = read_error
+        self._close_error = close_error
+        self._block = block
+        self.read_started = asyncio.Event()
+        self.next_count = 0
+        self.close_count = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        self.next_count += 1
+        self.read_started.set()
+        if self._block:
+            await asyncio.Future()
+        if self._read_error is not None:
+            raise self._read_error
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def aclose(self):
+        self.close_count += 1
+        if self._close_error is not None:
+            raise self._close_error
+
+
+class _FakeIteratorContent:
+    def __init__(self, iterator):
+        self._iterator = iterator
+
+    def iter_any(self):
+        return self._iterator
+
+
+class _FakeBodyIteratorWithoutClose:
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
 class _FakeResponse:
-    def __init__(self, chunks, status=200):
+    def __init__(self, chunks, status=200, on_release=None, release_error=None):
         self.status = status
         self.headers = {}
         self.content = _FakeContent(chunks)
         self.text_called = False
+        self.release_count = 0
+        self._on_release = on_release
+        self._release_error = release_error
 
     async def text(self):
-        # The 200 path must never buffer/parse the body.
+        # The 200 path must never call this; failures surface the upstream text.
         self.text_called = True
-        return ""
+        return b"".join(self.content._chunks).decode("utf-8")
 
-    async def release(self):
-        self.released = True
+    def release(self):
+        self.release_count += 1
+        if self._release_error is not None:
+            raise self._release_error
+        if self._on_release is not None:
+            self._on_release()
 
 
 class _FakeSession:
@@ -92,11 +248,38 @@ class _FakeSession:
         self._response = response
         self.captured_headers = None
         self.captured_url = None
+        self.close_count = 0
 
     async def post(self, url, json=None, headers=None):
         self.captured_url = url
         self.captured_headers = headers
         return self._response
+
+    async def close(self):
+        self.close_count += 1
+
+
+class _SingleSlotFakeSession:
+    def __init__(self, responses):
+        self._responses = iter(responses)
+        self.slot_acquired = False
+        self.close_count = 0
+
+    async def post(self, _url, json=None, headers=None):
+        if self.slot_acquired:
+            raise RuntimeError("the only fake pool slot is retained")
+        response = next(self._responses)
+        self.slot_acquired = True
+        response._on_release = self._release_slot
+        return response
+
+    def _release_slot(self):
+        if not self.slot_acquired:
+            raise RuntimeError("the fake pool slot was released twice")
+        self.slot_acquired = False
+
+    async def close(self):
+        self.close_count += 1
 
 
 class _FakeCredential:
@@ -153,6 +336,132 @@ async def _invoke(chunks, payload):
     return mod, result, body, response, session
 
 
+async def _invoke_non_200(payload):
+    mod = _load_function_app()
+    response = _FakeResponse([b'{"error":"upstream"}'], status=503)
+    response.headers["Content-Type"] = "application/problem+json"
+    session = _FakeSession(response)
+
+    async def _fake_get_session():
+        return session
+
+    mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+    result = await mod.rayfin_kusto_v1(payload, _FakeKustoClient())
+    return result, response
+
+
+async def _invoke_semantic_model(chunks, status=200):
+    mod = _load_function_app()
+    response = _FakeResponse(chunks, status=status)
+    response.headers["Content-Type"] = "application/problem+json"
+    session = _FakeSession(response)
+
+    async def _fake_get_session():
+        return session
+
+    mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+    payload = {
+        "input": {
+            "itemId": "model-id",
+            "workspaceId": "workspace-id",
+            "query": "EVALUATE ROW(\"value\", 1)",
+        }
+    }
+    result = await mod.rayfin_semantic_model_v1(payload, "fake-token")
+    return result, response
+
+
+def _valid_mcp_envelope(headers=None, body='{"jsonrpc":"2.0"}', server_policy=None):
+    return {
+        "transport": "mcp-streamable-http",
+        "version": 1,
+        "method": "POST",
+        "protocolVersion": "2025-11-25",
+        "headers": {} if headers is None else headers,
+        "body": body,
+        "serverPolicy": server_policy,
+    }
+
+
+def _assert_fixed_error(exception_type, message, action):
+    try:
+        action()
+    except exception_type as error:
+        assert type(error) is exception_type
+        assert str(error) == message
+        return error
+    raise AssertionError(f"expected {exception_type.__name__}")
+
+
+def _fabric_1_0_142_to_async_byte_iterator(content):
+    """Mirror fabric-user-data-functions 1.0.142's stream body adapter."""
+
+    def _ensure_bytes(chunk):
+        if isinstance(chunk, bytes):
+            return chunk
+        if isinstance(chunk, str):
+            return chunk.encode("utf-8")
+        if isinstance(chunk, (bytearray, memoryview)):
+            return bytes(chunk)
+        raise TypeError(
+            f"Stream chunks must be bytes or str, got {type(chunk).__name__!r}."
+        )
+
+    if hasattr(content, "__aiter__"):
+
+        async def _from_async():
+            async for chunk in content:
+                yield _ensure_bytes(chunk)
+
+        return _from_async()
+
+    async def _from_sync():
+        for chunk in content:
+            yield _ensure_bytes(chunk)
+
+    return _from_sync()
+
+
+async def _collect_dropped_stream_owners():
+    gc.collect()
+    for _attempt in range(3):
+        await asyncio.sleep(0)
+
+
+class _ExplodingDict(dict):
+    def keys(self):
+        raise RuntimeError("customer-secret-dict")
+
+
+class _ExplodingList(list):
+    def __iter__(self):
+        raise RuntimeError("customer-secret-list")
+
+
+class _ExplodingStr(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, _other):
+        raise RuntimeError("customer-secret-string")
+
+    def encode(self, *_args, **_kwargs):
+        raise RuntimeError("customer-secret-string")
+
+    def lower(self):
+        raise RuntimeError("customer-secret-string")
+
+
+class _ExplodingPolicy:
+    def __bool__(self):
+        raise RuntimeError("customer-secret-policy")
+
+    def __eq__(self, _other):
+        raise RuntimeError("customer-secret-policy")
+
+    def __repr__(self):
+        raise RuntimeError("customer-secret-policy")
+
+
 async def _check_streams_multiple_chunks_without_buffering():
     chunks = [b'{"Tables":[', b'{"TableName":"T","Rows":[[1]]}', b"]}"]
     mod, result, body, response, _session = await _invoke(chunks, _payload())
@@ -165,6 +474,7 @@ async def _check_streams_multiple_chunks_without_buffering():
     assert response.text_called is False, "200 path must not call resp.text()"
     # It is streamed as JSON, not the Arrow media type.
     assert result.media_type == mod._JSON_MEDIA_TYPE, "media_type must be JSON"
+    assert response.release_count == 1, "successful relay must release exactly once"
 
 
 async def _check_forwards_client_request_id_header():
@@ -211,11 +521,934 @@ def test_execute_command_routes_to_mgmt_and_streams():
     asyncio.run(_check_execute_command_routes_to_mgmt_and_streams())
 
 
+def test_non_200_releases_response_synchronously():
+    result, response = asyncio.run(_invoke_non_200(_payload()))
+    assert result.status_code == 503
+    assert result.media_type == "application/problem+json"
+    assert list(result.body) == [b'{"error":"upstream"}']
+    assert response.text_called is True
+    assert response.release_count == 1
+
+
+def test_semantic_model_success_and_non_200_release_synchronously():
+    async def check():
+        success, success_response = await _invoke_semantic_model([b"one", b"two"])
+        relayed = []
+        async for chunk in success.body:
+            relayed.append(chunk)
+        assert relayed == [b"one", b"two"]
+        assert success_response.release_count == 1
+
+        failure, failure_response = await _invoke_semantic_model(
+            [b'{"error":"upstream"}'], status=429
+        )
+        assert failure.status_code == 429
+        assert failure.media_type == "application/problem+json"
+        assert list(failure.body) == [b'{"error":"upstream"}']
+        assert failure_response.text_called is True
+        assert failure_response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_fabric_runtime_wrapper_drop_releases_pre_start_response_and_pool_slot():
+    async def check():
+        mod = _load_function_app()
+        first_response = _FakeResponse([b"never-read"])
+        second_response = _FakeResponse([b"next"])
+        session = _SingleSlotFakeSession((first_response, second_response))
+        original_get_session = mod._get_session
+
+        async def _fake_get_session():
+            return session
+
+        async def invoke():
+            return await mod.rayfin_kusto_v1(_payload(), _FakeKustoClient())
+
+        mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+        try:
+            result = await invoke()
+            body = result.body
+            wrapper = _fabric_1_0_142_to_async_byte_iterator(body)
+            first_read = asyncio.create_task(anext(wrapper))
+            first_read.cancel()
+            try:
+                await first_read
+            except asyncio.CancelledError:
+                assert first_read.cancelled()
+            else:
+                raise AssertionError("outer first read must be cancelled")
+
+            await wrapper.aclose()
+            assert first_response.content.iterations_started == 0
+            assert first_response.release_count == 0
+            del first_read, wrapper, body, result
+            await _collect_dropped_stream_owners()
+
+            assert first_response.release_count == 1
+            assert session.slot_acquired is False
+            next_result = await invoke()
+            await next_result.body.aclose()
+            assert second_response.release_count == 1
+            assert session.slot_acquired is False
+            assert session.close_count == 0
+        finally:
+            mod._get_session = original_get_session
+
+    asyncio.run(check())
+
+
+def test_fabric_runtime_wrapper_drop_releases_partially_yielded_response():
+    async def check():
+        mod = _load_function_app()
+        first_response = _FakeResponse([b"first", b"unread"])
+        second_response = _FakeResponse([b"next"])
+        session = _SingleSlotFakeSession((first_response, second_response))
+        original_get_session = mod._get_session
+
+        async def _fake_get_session():
+            return session
+
+        async def invoke():
+            return await mod.rayfin_kusto_v1(_payload(), _FakeKustoClient())
+
+        mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+        try:
+            result = await invoke()
+            body = result.body
+            wrapper = _fabric_1_0_142_to_async_byte_iterator(body)
+            assert await anext(wrapper) == b"first"
+            await wrapper.aclose()
+            assert first_response.release_count == 0
+            del wrapper, body, result
+            await _collect_dropped_stream_owners()
+
+            assert first_response.release_count == 1
+            assert session.slot_acquired is False
+            next_result = await invoke()
+            await next_result.body.aclose()
+            assert second_response.release_count == 1
+            assert session.slot_acquired is False
+        finally:
+            mod._get_session = original_get_session
+
+    asyncio.run(check())
+
+
+def test_real_aiohttp_runtime_wrapper_drop_releases_response_and_pool_slot():
+    async def check():
+        from aiohttp import web
+
+        mod = _load_function_app()
+        stop = asyncio.Event()
+        requests_started = 0
+
+        async def endpoint(request):
+            nonlocal requests_started
+            requests_started += 1
+            response = web.StreamResponse()
+            await response.prepare(request)
+            await response.write(b"x")
+            await stop.wait()
+            return response
+
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", endpoint)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        connector = mod.aiohttp.TCPConnector(limit=1)
+        session = mod.aiohttp.ClientSession(connector=connector)
+        original_get_session = mod._get_session
+
+        async def _real_get_session():
+            return session
+
+        async def invoke():
+            payload = _payload()
+            payload["input"]["queryServiceUri"] = f"http://127.0.0.1:{port}"
+            return await mod.rayfin_kusto_v1(payload, _FakeKustoClient())
+
+        mod._get_session = _real_get_session  # type: ignore[attr-defined]
+        try:
+            result = await invoke()
+            body = result.body
+            response = body._response
+            original_release = response.release
+            release_count = 0
+
+            def counted_release():
+                nonlocal release_count
+                release_count += 1
+                return original_release()
+
+            response.release = counted_release
+            wrapper = _fabric_1_0_142_to_async_byte_iterator(body)
+            first_read = asyncio.create_task(anext(wrapper))
+            first_read.cancel()
+            try:
+                await first_read
+            except asyncio.CancelledError:
+                assert first_read.cancelled()
+            else:
+                raise AssertionError("outer first read must be cancelled")
+            await wrapper.aclose()
+            del first_read, wrapper, body, result, response
+            await _collect_dropped_stream_owners()
+
+            assert release_count == 1
+            assert len(connector._acquired) == 0
+            next_result = await asyncio.wait_for(invoke(), timeout=2)
+            assert requests_started == 2
+            await next_result.body.aclose()
+            assert len(connector._acquired) == 0
+            assert session.closed is False
+        finally:
+            mod._get_session = original_get_session
+            stop.set()
+            await session.close()
+            await runner.cleanup()
+
+    asyncio.run(check())
+
+
+def test_stream_aclose_after_pre_start_cancellation_releases_response_once():
+    async def check():
+        mod = _load_function_app()
+        kusto_response = _FakeResponse([b"never-read"])
+        kusto_session = _FakeSession(kusto_response)
+
+        async def _fake_get_session():
+            return kusto_session
+
+        mod._get_session = _fake_get_session  # type: ignore[attr-defined]
+        kusto_result = await mod.rayfin_kusto_v1(_payload(), _FakeKustoClient())
+        semantic_result, semantic_response = await _invoke_semantic_model(
+            [b"never-read"]
+        )
+
+        for result, response in (
+            (kusto_result, kusto_response),
+            (semantic_result, semantic_response),
+        ):
+            first_read = asyncio.create_task(anext(result.body))
+            first_read.cancel()
+            try:
+                await first_read
+            except asyncio.CancelledError:
+                assert first_read.cancelled()
+            else:
+                raise AssertionError("first body read must be cancelled")
+
+            assert response.content.iterations_started == 0
+            await result.body.aclose()
+            await result.body.aclose()
+            assert response.release_count == 1
+            try:
+                await anext(result.body)
+            except StopAsyncIteration:
+                assert result.body._released
+            else:
+                raise AssertionError("closed body must remain exhausted")
+
+        assert kusto_session.close_count == 0
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_preserves_chunks_and_releases_on_exhaustion():
+    async def check():
+        mod = _load_function_app()
+        chunks = [b"first", b"", b"third"]
+        iterator = _FakeBodyIterator(chunks)
+        response = _FakeResponse([])
+        response.content = _FakeIteratorContent(iterator)
+        body = mod._ResponseBodyIterator(response)
+
+        received = []
+        async for chunk in body:
+            received.append(chunk)
+
+        assert received == chunks
+        assert iterator.next_count == len(chunks) + 1
+        assert iterator.close_count == 1
+        assert response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_supports_iterator_without_aclose():
+    async def check():
+        mod = _load_function_app()
+        iterator = _FakeBodyIteratorWithoutClose([b"one", b"two"])
+        response = _FakeResponse([])
+        response.content = _FakeIteratorContent(iterator)
+        body = mod._ResponseBodyIterator(response)
+
+        received = [chunk async for chunk in body]
+
+        assert received == [b"one", b"two"]
+        assert response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_releases_and_delegates_on_read_failure():
+    async def check():
+        mod = _load_function_app()
+        read_error = RuntimeError("read failed")
+        iterator = _FakeBodyIterator(read_error=read_error)
+        response = _FakeResponse([])
+        response.content = _FakeIteratorContent(iterator)
+        body = mod._ResponseBodyIterator(response)
+
+        try:
+            await anext(body)
+        except RuntimeError as error:
+            assert error is read_error
+        else:
+            raise AssertionError("body read must propagate its failure")
+
+        await body.aclose()
+        assert iterator.close_count == 1
+        assert response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_releases_and_delegates_on_active_cancellation():
+    async def check():
+        mod = _load_function_app()
+        iterator = _FakeBodyIterator(block=True)
+        response = _FakeResponse([])
+        response.content = _FakeIteratorContent(iterator)
+        body = mod._ResponseBodyIterator(response)
+
+        read = asyncio.create_task(anext(body))
+        await iterator.read_started.wait()
+        read.cancel()
+        try:
+            await read
+        except asyncio.CancelledError:
+            assert read.cancelled()
+        else:
+            raise AssertionError("active body read must be cancelled")
+
+        assert iterator.close_count == 1
+        assert response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_does_not_mask_read_failure_when_close_fails():
+    async def check():
+        mod = _load_function_app()
+        read_error = RuntimeError("read failed")
+        close_error = RuntimeError("close failed")
+        iterator = _FakeBodyIterator(
+            read_error=read_error,
+            close_error=close_error,
+        )
+        response = _FakeResponse([])
+        response.content = _FakeIteratorContent(iterator)
+        body = mod._ResponseBodyIterator(response)
+
+        try:
+            await anext(body)
+        except RuntimeError as error:
+            assert error is read_error
+            assert error.__cause__ is close_error
+        else:
+            raise AssertionError("body read must remain the primary failure")
+
+        assert iterator.close_count == 1
+        assert response.release_count == 1
+
+    asyncio.run(check())
+
+
+def test_response_body_iterator_release_primitive_is_idempotent_and_surfaces_errors():
+    mod = _load_function_app()
+    response = _FakeResponse([])
+    body = mod._ResponseBodyIterator(response)
+
+    assert body._release_response() is None
+    assert body._release_response() is None
+    assert response.release_count == 1
+
+    release_error = RuntimeError("release failed")
+    failing_response = _FakeResponse([], release_error=release_error)
+    failing_body = mod._ResponseBodyIterator(failing_response)
+    try:
+        failing_body._release_response()
+    except RuntimeError as error:
+        assert error is release_error
+    else:
+        raise AssertionError("response release failure must propagate")
+    assert failing_body._release_response() is None
+    assert failing_response.release_count == 1
+
+
+def test_response_body_iterator_partial_construction_releases_response():
+    mod = _load_function_app()
+    response = _FakeResponse([])
+    construction_error = RuntimeError("iterator construction failed")
+
+    class ExplodingContent:
+        def iter_any(self):
+            raise construction_error
+
+    response.content = ExplodingContent()
+    try:
+        mod._ResponseBodyIterator(response)
+    except RuntimeError as error:
+        assert error is construction_error
+    else:
+        raise AssertionError("iterator construction must fail")
+    del construction_error
+    gc.collect()
+    assert response.release_count == 1
+
+
+def test_mcp_contract_constants_match_authoritative_t1():
+    mod = _load_function_app()
+    assert mod._MCP_T1_FIELD_ORDER == (
+        "transport",
+        "version",
+        "method",
+        "protocolVersion",
+        "headers",
+        "body",
+        "serverPolicy",
+    )
+    assert mod._MCP_T1_FIXED_VALUES == (
+        "mcp-streamable-http",
+        1,
+        "POST",
+        "2025-11-25",
+    )
+    assert mod._MCP_DENIED_HEADER_NAMES == frozenset(
+        {
+            "authorization",
+            "baggage",
+            "connection",
+            "content-length",
+            "cookie",
+            "forwarded",
+            "host",
+            "keep-alive",
+            "mcp-session-id",
+            "origin",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "traceparent",
+            "tracestate",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        }
+    )
+    assert mod._MCP_DENIED_HEADER_PREFIXES == (
+        "x-forwarded-",
+        "x-ms-",
+        "x-rayfin-",
+    )
+
+
+def test_mcp_valid_envelope_preserves_bytes_and_is_deeply_immutable():
+    mod = _load_function_app()
+    values = [" first ", "a,b", "Duplicate", "Duplicate"]
+    headers = {"accept": values, "x-empty": []}
+    body = '{\n  "escaped": "\\u0061", "text": "café"\n}'
+
+    pending = mod._extract_pending_mcp_t1_transport(
+        _valid_mcp_envelope(headers=headers, body=body)
+    )
+
+    assert type(pending) is mod._PendingMcpT1Transport
+    assert pending == mod._PendingMcpT1Transport(
+        "mcp-streamable-http",
+        1,
+        "POST",
+        "2025-11-25",
+        (
+            ("accept", (" first ", "a,b", "Duplicate", "Duplicate")),
+            ("x-empty", ()),
+        ),
+        body.encode("utf-8"),
+    )
+    values[0] = "mutated"
+    values.append("later")
+    headers["after"] = ["mutation"]
+    assert pending.headers == (
+        ("accept", (" first ", "a,b", "Duplicate", "Duplicate")),
+        ("x-empty", ()),
+    )
+    mutation_was_rejected = False
+    try:
+        pending.headers[0][1][0] = "nope"
+    except TypeError:
+        mutation_was_rejected = True
+    assert mutation_was_rejected, "nested header values must be immutable tuples"
+
+
+def test_mcp_body_is_not_parsed_or_normalized():
+    mod = _load_function_app()
+    for body in ("", "{not-json", ' { "n": 1e+00, "s": "\\u0061" } '):
+        pending = mod._extract_pending_mcp_t1_transport(
+            _valid_mcp_envelope(body=body)
+        )
+        assert pending.body_bytes == body.encode("utf-8")
+
+
+def test_mcp_body_limit_is_inclusive_and_uses_encoded_bytes():
+    mod = _load_function_app()
+    maximum = 5 * 1024 * 1024
+    at_limit = "é" * (maximum // 2)
+    pending = mod._extract_pending_mcp_t1_transport(
+        _valid_mcp_envelope(body=at_limit)
+    )
+    assert len(pending.body_bytes) == maximum
+
+    _assert_fixed_error(
+        mod._McpTransportContractError,
+        "Invalid MCP transport envelope.",
+        lambda: mod._extract_pending_mcp_t1_transport(
+            _valid_mcp_envelope(body=at_limit + "a")
+        ),
+    )
+
+
+def test_mcp_oversized_ascii_body_is_rejected_before_encoding_allocation():
+    mod = _load_function_app()
+    body = "a" * (64 * 1024 * 1024)
+    envelope = _valid_mcp_envelope(body=body)
+
+    tracemalloc.start()
+    try:
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda: mod._extract_pending_mcp_t1_transport(envelope),
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024, "oversized ASCII must be rejected before UTF-8 copy"
+
+
+def test_mcp_invalid_body_type_and_surrogate_raise_fixed_contract_error():
+    mod = _load_function_app()
+    for body in (b"{}", _ExplodingStr("customer-secret"), "\ud800"):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda body=body: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(body=body)
+            ),
+        )
+
+
+def test_mcp_envelope_requires_exact_dict_and_ordered_builtin_string_keys():
+    mod = _load_function_app()
+    valid = _valid_mcp_envelope()
+    cases = [
+        None,
+        [],
+        _ExplodingDict(valid),
+        {key: value for key, value in list(valid.items())[1:]},
+        {**valid, "extra": None},
+        dict(reversed(list(valid.items()))),
+    ]
+    hostile_key = {
+        _ExplodingStr("TRANSPORT"): "mcp-streamable-http",
+        **dict(list(valid.items())[1:]),
+    }
+    cases.append(hostile_key)
+
+    for envelope in cases:
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda envelope=envelope: mod._extract_pending_mcp_t1_transport(envelope),
+        )
+
+
+def test_mcp_fixed_fields_require_exact_types_and_values():
+    mod = _load_function_app()
+    invalid_values = {
+        "transport": ("MCP-streamable-http", _ExplodingStr("mcp-streamable-http")),
+        "version": (True, 1.0, 2),
+        "method": ("post", _ExplodingStr("POST")),
+        "protocolVersion": ("2025-03-26", _ExplodingStr("2025-11-25")),
+    }
+    for field, values in invalid_values.items():
+        for value in values:
+            envelope = _valid_mcp_envelope()
+            envelope[field] = value
+            _assert_fixed_error(
+                mod._McpTransportContractError,
+                "Invalid MCP transport envelope.",
+                lambda envelope=envelope: mod._extract_pending_mcp_t1_transport(
+                    envelope
+                ),
+            )
+
+
+def test_mcp_header_names_require_sorted_lowercase_ascii_tokens():
+    mod = _load_function_app()
+    pending = mod._extract_pending_mcp_t1_transport(
+        _valid_mcp_envelope(headers={"---": [], "123": [], "a": []})
+    )
+    assert tuple(name for name, _values in pending.headers) == ("---", "123", "a")
+
+    invalid_headers = (
+        [],
+        _ExplodingDict(),
+        {"z": [], "a": []},
+        {"Upper": []},
+        {"": []},
+        {"é": []},
+        {"has space": []},
+        {_ExplodingStr("safe"): []},
+    )
+    for headers in invalid_headers:
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda headers=headers: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers=headers)
+            ),
+        )
+
+
+def test_mcp_header_order_validation_is_linear_without_sorting():
+    mod = _load_function_app()
+    source_tree = ast.parse(inspect.getsource(mod._extract_pending_mcp_t1_transport))
+    sorting_calls = [
+        node
+        for node in ast.walk(source_tree)
+        if isinstance(node, ast.Call)
+        and (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "sorted"
+            or isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("sort", "sorted")
+        )
+    ]
+    assert sorting_calls == [], "header order validation must not sort or copy-sort"
+
+    header_count = 50_000
+    names = [f"h{index:07x}" for index in range(header_count)]
+    names[0], names[1] = names[1], names[0]
+    headers = {name: [] for name in names}
+    original_is_token = mod._is_ascii_http_token
+    names_validated = 0
+
+    def counting_is_token(value):
+        nonlocal names_validated
+        names_validated += 1
+        return original_is_token(value)
+
+    mod._is_ascii_http_token = counting_is_token
+    try:
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers=headers)
+            ),
+        )
+    finally:
+        mod._is_ascii_http_token = original_is_token
+
+    assert names_validated == header_count
+
+
+def test_mcp_header_values_require_exact_lists_of_exact_strings():
+    mod = _load_function_app()
+    for headers in (
+        {"safe": ()},
+        {"safe": _ExplodingList(["value"])},
+        {"safe": [1]},
+        {"safe": [_ExplodingStr("value")]},
+    ):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda headers=headers: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers=headers)
+            ),
+        )
+
+
+def test_mcp_static_denials_are_case_insensitive_and_all_enforced():
+    mod = _load_function_app()
+    assert mod._is_mcp_denied_header_name(1) is False
+    assert len(mod._MCP_DENIED_HEADER_NAMES) == 19
+    for name in mod._MCP_DENIED_HEADER_NAMES:
+        mixed_case = "".join(
+            character.upper() if index % 2 else character
+            for index, character in enumerate(name)
+        )
+        assert mod._is_mcp_denied_header_name(mixed_case) is True
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda name=name: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers={name: []})
+            ),
+        )
+    assert mod._is_mcp_denied_header_name("x-safe") is False
+
+
+def test_mcp_prefix_denials_are_case_insensitive_and_all_enforced():
+    mod = _load_function_app()
+    for prefix in mod._MCP_DENIED_HEADER_PREFIXES:
+        mixed_case = prefix.upper() + "customer"
+        assert mod._is_mcp_denied_header_name(mixed_case) is True
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda prefix=prefix: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers={prefix + "customer": []})
+            ),
+        )
+
+
+def test_mcp_protocol_version_header_must_exactly_match_envelope_version():
+    mod = _load_function_app()
+    pending = mod._extract_pending_mcp_t1_transport(
+        _valid_mcp_envelope(
+            headers={"mcp-protocol-version": ["2025-11-25"]}
+        )
+    )
+    assert pending.headers == (
+        ("mcp-protocol-version", ("2025-11-25",)),
+    )
+    for values in ([], ["2025-03-26"], ["2025-11-25", "2025-11-25"]):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda values=values: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers={"mcp-protocol-version": values})
+            ),
+        )
+
+
+def test_mcp_connection_nomination_helpers_are_independently_enforced():
+    mod = _load_function_app()
+    headers = (
+        ("Connection", (" keep-alive,\tX-Hop ",)),
+        ("X-Hop", ("customer-value",)),
+    )
+    assert mod._mcp_connection_nominations(headers) == ("keep-alive", "x-hop")
+    assert mod._has_mcp_connection_nominated_header(headers) is True
+    assert mod._has_mcp_connection_nominated_header(
+        (("Connection", ("keep-alive",)), ("x-safe", ("value",)))
+    ) is False
+
+    for value in ("", "keep-alive,,x-hop", "x hop", "x-hop,\vnext"):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda value=value: mod._mcp_connection_nominations(
+                (("Connection", (value,)),)
+            ),
+        )
+    for headers in (
+        [],
+        (["connection", ("x-hop",)],),
+        (("connection", ["x-hop"]),),
+        (("connection", (1,)),),
+    ):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda headers=headers: mod._mcp_connection_nominations(headers),
+        )
+
+
+def test_mcp_extractor_rejects_connection_and_nominated_supplied_headers():
+    mod = _load_function_app()
+    for headers in (
+        {"connection": ["keep-alive, x-hop"], "x-hop": ["value"]},
+        {"connection": ["keep-alive,,x-hop"], "x-hop": ["value"]},
+    ):
+        _assert_fixed_error(
+            mod._McpTransportContractError,
+            "Invalid MCP transport envelope.",
+            lambda headers=headers: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(headers=headers)
+            ),
+        )
+
+
+def test_mcp_server_policy_is_never_inspected_or_retained():
+    mod = _load_function_app()
+    for policy in (False, 0, {}, [], _ExplodingPolicy()):
+        _assert_fixed_error(
+            mod._McpServerPolicyUnresolved,
+            "MCP server policy is unresolved.",
+            lambda policy=policy: mod._extract_pending_mcp_t1_transport(
+                _valid_mcp_envelope(server_policy=policy)
+            ),
+        )
+
+    pending = mod._extract_pending_mcp_t1_transport(_valid_mcp_envelope())
+    assert not hasattr(pending, "server_policy")
+    assert not hasattr(pending, "url")
+    assert not hasattr(pending, "credential")
+    assert not hasattr(pending, "send")
+
+
+def test_mcp_prepare_is_synchronous_and_always_fails_closed():
+    mod = _load_function_app()
+    assert inspect.iscoroutinefunction(mod._extract_pending_mcp_t1_transport) is False
+    assert inspect.iscoroutinefunction(mod._prepare_mcp_transport) is False
+    _assert_fixed_error(
+        mod._McpServerPolicyUnresolved,
+        "MCP server policy is unresolved.",
+        lambda: mod._prepare_mcp_transport(_valid_mcp_envelope()),
+    )
+    _assert_fixed_error(
+        mod._McpTransportContractError,
+        "Invalid MCP transport envelope.",
+        lambda: mod._prepare_mcp_transport(None),
+    )
+
+
+def test_mcp_errors_are_fixed_and_do_not_leak_customer_canaries():
+    mod = _load_function_app()
+    canaries = ("customer-secret-body", "customer-secret-header")
+    cases = (
+        _valid_mcp_envelope(body="\ud800customer-secret-body"),
+        _valid_mcp_envelope(headers={"safe": ["customer-secret-header", 1]}),
+    )
+
+    records = []
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("transport validation must not perform I/O")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    root_logger = logging.getLogger()
+    previous_level = root_logger.level
+    handler = CaptureHandler()
+    original_get_session = mod._get_session
+    original_client_session = mod.aiohttp.ClientSession
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(handler)
+    mod._get_session = fail_if_called
+    mod.aiohttp.ClientSession = fail_if_called
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            for envelope in cases:
+                error = _assert_fixed_error(
+                    mod._McpTransportContractError,
+                    "Invalid MCP transport envelope.",
+                    lambda envelope=envelope: mod._extract_pending_mcp_t1_transport(
+                        envelope
+                    ),
+                )
+                assert all(canary not in str(error) for canary in canaries)
+    finally:
+        mod._get_session = original_get_session
+        mod.aiohttp.ClientSession = original_client_session
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(previous_level)
+
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+    assert records == []
+
+
+def test_connector_archives_match_source_metadata_and_each_other():
+    root = Path(__file__).resolve().parent
+
+    def normalize_line_endings(content):
+        return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+    expected_members = {
+        "function_app.py": normalize_line_endings(
+            (root / "function_app.py").read_bytes()
+        ),
+        "fabric_lib/functions.metadata": normalize_line_endings(
+            (root / "functions.metadata").read_bytes()
+        ),
+    }
+    archive_paths = (root / "Deploy.zip", root / "SourceCode.zip")
+    archive_bytes = []
+    member_names = []
+    for archive_path in archive_paths:
+        archive_bytes.append(archive_path.read_bytes())
+        with zipfile.ZipFile(archive_path) as archive:
+            assert archive.testzip() is None
+            member_names.append(tuple(info.filename for info in archive.infolist()))
+            non_target_names = tuple(
+                info.filename
+                for info in archive.infolist()
+                if info.filename != "function_app.py"
+            )
+            assert non_target_names == tuple(_ARCHIVE_NON_TARGET_GOLDEN)
+            for info in archive.infolist():
+                assert info.create_system == 0
+                assert info.external_attr == 0
+                if info.filename == "function_app.py":
+                    continue
+                common_info = (
+                    info.date_time,
+                    info.compress_type,
+                    info.comment,
+                    info.extra,
+                    info.create_system,
+                    info.create_version,
+                    info.extract_version,
+                    info.reserved,
+                    info.flag_bits,
+                    info.volume,
+                    info.internal_attr,
+                    info.external_attr,
+                )
+                assert common_info == _ARCHIVE_COMMON_ZIP_INFO
+                content = archive.read(info.filename)
+                assert (
+                    sha256(content).hexdigest(),
+                    info.CRC,
+                    info.compress_size,
+                    info.file_size,
+                ) == _ARCHIVE_NON_TARGET_GOLDEN[info.filename]
+            for member_name, expected_content in expected_members.items():
+                assert normalize_line_endings(archive.read(member_name)) == expected_content
+
+    assert archive_bytes[0] == archive_bytes[1]
+    assert member_names[0] == member_names[1]
+
+
+def test_existing_udf_symbols_remain_and_mcp_udf_is_absent():
+    mod = _load_function_app()
+    assert hasattr(mod, "rayfin_semantic_model_v1")
+    assert hasattr(mod, "rayfin_kusto_v1")
+    assert not hasattr(mod, "rayfin_fabric_mcp_v1")
+
+
 if __name__ == "__main__":
-    test_streams_multiple_chunks_without_buffering()
-    print("  ok: streams multiple chunks without buffering")
-    test_forwards_client_request_id_header()
-    print("  ok: forwards clientRequestId as x-ms-client-request-id header")
-    test_execute_command_routes_to_mgmt_and_streams()
-    print("  ok: executeCommand routes to /v1/rest/mgmt and streams")
-    print("ALL UDF STREAMING TESTS PASSED")
+    tests = [
+        value
+        for name, value in tuple(globals().items())
+        if name.startswith("test_") and callable(value)
+    ]
+    for test in tests:
+        test()
+        print(f"  ok: {test.__name__}")
+    print(f"ALL {len(tests)} TESTS PASSED")

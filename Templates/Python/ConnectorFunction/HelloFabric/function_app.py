@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import os
 import uuid
-from typing import Optional
+from typing import NamedTuple, NoReturn, Optional, Tuple
 from urllib.parse import urlparse
 
 udf = fn.UserDataFunctions()
@@ -11,6 +11,265 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+
+_MCP_T1_FIELD_ORDER = (
+    "transport",
+    "version",
+    "method",
+    "protocolVersion",
+    "headers",
+    "body",
+    "serverPolicy",
+)
+_MCP_T1_FIXED_VALUES = (
+    "mcp-streamable-http",
+    1,
+    "POST",
+    "2025-11-25",
+)
+_MCP_DENIED_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "baggage",
+        "connection",
+        "content-length",
+        "cookie",
+        "forwarded",
+        "host",
+        "keep-alive",
+        "mcp-session-id",
+        "origin",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "traceparent",
+        "tracestate",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_MCP_DENIED_HEADER_PREFIXES = ("x-forwarded-", "x-ms-", "x-rayfin-")
+_MCP_ASCII_TOKEN_CHARACTERS = frozenset(
+    "!#$%&'*+-.^_`|~0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+_MCP_T1_MAX_BODY_SIZE_BYTES = 5 * 1024 * 1024
+_MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE = "Invalid MCP transport envelope."
+_MCP_SERVER_POLICY_UNRESOLVED_MESSAGE = "MCP server policy is unresolved."
+
+
+class _McpTransportContractError(ValueError):
+    """Fixed, customer-data-free error for an invalid MCP T1 envelope."""
+
+
+class _McpServerPolicyUnresolved(_McpTransportContractError):
+    """Fixed error used while no trusted MCP server policy is defined."""
+
+
+class _PendingMcpT1Transport(NamedTuple):
+    transport: str
+    version: int
+    method: str
+    protocol_version: str
+    headers: Tuple[Tuple[str, Tuple[str, ...]], ...]
+    body_bytes: bytes
+
+
+def _is_ascii_http_token(value: object) -> bool:
+    if type(value) is not str or not value:
+        return False
+    return all(character in _MCP_ASCII_TOKEN_CHARACTERS for character in value)
+
+
+def _is_mcp_denied_header_name(name: object) -> bool:
+    if type(name) is not str:
+        return False
+    lower_name = name.lower()
+    return lower_name in _MCP_DENIED_HEADER_NAMES or lower_name.startswith(
+        _MCP_DENIED_HEADER_PREFIXES
+    )
+
+
+def _mcp_connection_nominations(
+    headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
+) -> Tuple[str, ...]:
+    if type(headers) is not tuple:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    nominations = []
+    for header in headers:
+        if type(header) is not tuple or len(header) != 2:
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+        name, values = header
+        if type(name) is not str or type(values) is not tuple:
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+        if any(type(value) is not str for value in values):
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+        if name.lower() != "connection":
+            continue
+        for value in values:
+            for part in value.split(","):
+                token = part.strip(" \t")
+                if not _is_ascii_http_token(token):
+                    raise _McpTransportContractError(
+                        _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+                    ) from None
+                nominations.append(token.lower())
+    return tuple(nominations)
+
+
+def _has_mcp_connection_nominated_header(
+    headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
+) -> bool:
+    nominations = frozenset(_mcp_connection_nominations(headers))
+    return any(
+        name.lower() != "connection" and name.lower() in nominations
+        for name, _values in headers
+    )
+
+
+def _extract_pending_mcp_t1_transport(
+    envelope: object,
+) -> _PendingMcpT1Transport:
+    if type(envelope) is not dict:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    envelope_items = tuple(envelope.items())
+    if len(envelope_items) != len(_MCP_T1_FIELD_ORDER):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    envelope_keys = tuple(key for key, _value in envelope_items)
+    if any(type(key) is not str for key in envelope_keys):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    if envelope_keys != _MCP_T1_FIELD_ORDER:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    (
+        transport,
+        version,
+        method,
+        protocol_version,
+        headers,
+        body,
+        server_policy,
+    ) = tuple(value for _key, value in envelope_items)
+    if server_policy is not None:
+        raise _McpServerPolicyUnresolved(
+            _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
+        ) from None
+    if (
+        type(transport) is not str
+        or type(version) is not int
+        or type(method) is not str
+        or type(protocol_version) is not str
+        or type(headers) is not dict
+        or type(body) is not str
+    ):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    if (
+        transport,
+        version,
+        method,
+        protocol_version,
+    ) != _MCP_T1_FIXED_VALUES:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    frozen_headers = []
+    for name, values in tuple(headers.items()):
+        if type(name) is not str or type(values) is not list:
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+        frozen_values = tuple(values)
+        if any(type(value) is not str for value in frozen_values):
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+        frozen_headers.append((name, frozen_values))
+
+    immutable_headers = tuple(frozen_headers)
+    header_names = tuple(name for name, _values in immutable_headers)
+    if any(
+        not _is_ascii_http_token(name) or name != name.lower()
+        for name in header_names
+    ):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    for index in range(1, len(header_names)):
+        if header_names[index - 1] > header_names[index]:
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+
+    if _has_mcp_connection_nominated_header(immutable_headers):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    if any(_is_mcp_denied_header_name(name) for name in header_names):
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    for name, values in immutable_headers:
+        if name == "mcp-protocol-version" and values != ("2025-11-25",):
+            raise _McpTransportContractError(
+                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+            ) from None
+
+    if len(body) > _MCP_T1_MAX_BODY_SIZE_BYTES:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    try:
+        body_bytes = body.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+    if len(body_bytes) > _MCP_T1_MAX_BODY_SIZE_BYTES:
+        raise _McpTransportContractError(
+            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
+        ) from None
+
+    return _PendingMcpT1Transport(
+        transport,
+        version,
+        method,
+        protocol_version,
+        immutable_headers,
+        body_bytes,
+    )
+
+
+def _prepare_mcp_transport(envelope: object) -> NoReturn:
+    _extract_pending_mcp_t1_transport(envelope)
+    raise _McpServerPolicyUnresolved(
+        _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
+    ) from None
+
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -44,6 +303,55 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+class _ResponseBodyIterator:
+    """Own an acquired response while relaying its body without buffering."""
+
+    def __init__(self, response: aiohttp.ClientResponse):
+        self._response = None
+        self._iterator = None
+        self._released = True
+        self._response = response
+        self._released = False
+        self._iterator = response.content.iter_any().__aiter__()
+
+    def _release_response(self):
+        response = self._response
+        if response is None:
+            return
+        self._response = None
+        self._released = True
+        response.release()
+
+    def __del__(self):
+        self._release_response()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._released:
+            raise StopAsyncIteration
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException as read_error:
+            try:
+                await self.aclose()
+            except BaseException as close_error:
+                raise read_error from close_error
+            raise
+
+    async def aclose(self):
+        if self._released:
+            return
+        self._release_response()
+        close_iterator = getattr(self._iterator, "aclose", None)
+        if close_iterator is not None:
+            await close_iterator()
 
 
 @udf.streaming_function()
@@ -84,25 +392,17 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     if resp.status != 200:
         # Surface the upstream error verbatim and don't open a stream.
         detail = await resp.text()   # fully drains the body -> connection returns to pool
-        await resp.release()         # release the RESPONSE, never the shared session
+        resp.release()               # release the RESPONSE, never the shared session
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", "application/json"),
             status_code=resp.status,
         )
 
-    async def relay():
-        try:
-            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
-            async for chunk in resp.content.iter_any():
-                yield chunk
-        finally:
-            # Release the response so its connection returns to the pool (or is
-            # closed if the client disconnected mid-stream). Do NOT close the
-            # shared session here.
-            await resp.release()
-
-    return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
+    return fn.StreamResponse(
+        _ResponseBodyIterator(resp),
+        media_type=_ARROW_MEDIA_TYPE,
+    )
 
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
@@ -163,7 +463,7 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     if resp.status != 200:
         # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.
         detail = await resp.text()
-        await resp.release()
+        resp.release()
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
@@ -179,15 +479,7 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     # was set from the SDK-supplied clientRequestId above, so the SDK can
     # correlate without reading the body; `x-ms-activity-id` is not relayed
     # (accepted loss, same as the semantic-model path).
-    async def relay():
-        try:
-            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
-            async for chunk in resp.content.iter_any():
-                yield chunk
-        finally:
-            # Release the response so its connection returns to the pool (or is
-            # closed if the client disconnected mid-stream). Do NOT close the
-            # shared session here.
-            await resp.release()
-
-    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
+    return fn.StreamResponse(
+        _ResponseBodyIterator(resp),
+        media_type=_JSON_MEDIA_TYPE,
+    )
