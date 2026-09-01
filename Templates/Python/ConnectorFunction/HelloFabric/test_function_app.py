@@ -1184,6 +1184,51 @@ def test_managed_mcp_forwards_required_tasks_meta_and_optional_list_cursor():
         )
 
 
+def test_managed_mcp_server_discovery_requires_protocol_and_tasks_capability():
+    mod = _load_function_app()
+    request = mod._prepare_managed_mcp_request(
+        _managed_mcp_payload("server/discover")
+    )
+    valid = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {
+                "extensions": {"io.modelcontextprotocol/tasks": {}}
+            },
+        },
+    }
+    assert mod._validate_managed_mcp_response(
+        mod_json(valid), request, 7, _managed_mcp_limits(mod)
+    ) == valid
+
+    incompatible_results = (
+        {},
+        {
+            "supportedVersions": ["2025-11-25"],
+            "capabilities": {
+                "extensions": {"io.modelcontextprotocol/tasks": {}}
+            },
+        },
+        {
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {"extensions": {}},
+        },
+    )
+    for result in incompatible_results:
+        _assert_fixed_error(
+            mod._McpUpstreamError,
+            "Managed MCP upstream response is invalid.",
+            lambda result=result: mod._validate_managed_mcp_response(
+                mod_json({"jsonrpc": "2.0", "id": 7, "result": result}),
+                request,
+                7,
+                _managed_mcp_limits(mod),
+            ),
+        )
+
+
 def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
     request = _managed_mcp_payload(
         "tasks/get",
@@ -1347,10 +1392,10 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
-                "resultType": "complete",
+                "resultType": "task",
                 "taskId": "expected-task",
                 "status": "working",
-                "statusMessage": "x" * 4096,
+                "statusMessage": None,
                 "pollIntervalMs": 0,
                 "createdAt": "2026-09-01T00:00:00Z",
                 "lastUpdatedAt": "2026-09-01T00:00:01Z",
@@ -1476,6 +1521,24 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "status": "cancelled",
             "result": {},
         },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "result": None,
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "cancelled",
+            "error": None,
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "failed",
+            "error": None,
+        },
     )
     for result in invalid_results:
         _assert_fixed_error(
@@ -1520,7 +1583,7 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
     synchronous = {
         "jsonrpc": "2.0",
         "id": 7,
-        "result": {"resultType": "complete", "content": [], "isError": False},
+        "result": {"content": [], "isError": False},
     }
     task = {
         "jsonrpc": "2.0",
