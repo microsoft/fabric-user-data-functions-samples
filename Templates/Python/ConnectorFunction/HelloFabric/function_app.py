@@ -44,6 +44,7 @@ class _McpManagedLimits(NamedTuple):
     max_output_bytes: int
     max_json_depth: int
     allowed_status_codes: Tuple[int, ...]
+    task_statuses: Tuple[str, ...]
     final_task_statuses: Tuple[str, ...]
     max_poll_count: int
 
@@ -150,7 +151,7 @@ def _prepare_managed_mcp_request(payload: object) -> _McpManagedRequest:
         body_bytes = json.dumps(
             forwarded_message, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8", errors="strict")
-    except (TypeError, ValueError, UnicodeEncodeError):
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
         _raise_mcp_contract_error()
     if len(body_bytes) > _MCP_REQUEST_LIMIT_BYTES:
         _raise_mcp_contract_error()
@@ -165,6 +166,11 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
             int(value)
             for value in os.environ["FABRIC_MCP_ALLOWED_STATUS_CODES"].split(",")
         )
+        task_statuses = tuple(
+            value
+            for value in os.environ["FABRIC_MCP_TASK_STATUSES"].split(",")
+            if value
+        )
         final_task_statuses = tuple(
             value
             for value in os.environ["FABRIC_MCP_FINAL_TASK_STATUSES"].split(",")
@@ -177,6 +183,7 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
         max_output_bytes,
         max_json_depth,
         allowed_status_codes,
+        task_statuses,
         final_task_statuses,
         max_poll_count,
     )
@@ -190,6 +197,7 @@ def _validate_managed_mcp_limits(limits: object) -> None:
         or type(limits.max_output_bytes) is not int
         or type(limits.max_json_depth) is not int
         or type(limits.allowed_status_codes) is not tuple
+        or type(limits.task_statuses) is not tuple
         or type(limits.final_task_statuses) is not tuple
         or type(limits.max_poll_count) is not int
         or limits.max_output_bytes <= 0
@@ -199,10 +207,13 @@ def _validate_managed_mcp_limits(limits: object) -> None:
             type(status) is not int or status < 100 or status > 599
             for status in limits.allowed_status_codes
         )
+        or not limits.task_statuses
+        or any(not _valid_routing_name(status) for status in limits.task_statuses)
         or not limits.final_task_statuses
         or any(
             not _valid_routing_name(status) for status in limits.final_task_statuses
         )
+        or not frozenset(limits.final_task_statuses).issubset(limits.task_statuses)
         or limits.max_poll_count < 0
     ):
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
@@ -223,6 +234,7 @@ def _json_depth(value: object) -> int:
 
 def _validate_managed_mcp_response(
     content: bytes,
+    request: _McpManagedRequest,
     request_id: object,
     limits: _McpManagedLimits,
 ) -> object:
@@ -232,7 +244,7 @@ def _validate_managed_mcp_response(
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     try:
         message = json.loads(content.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if (
         type(message) is not dict
@@ -247,7 +259,120 @@ def _validate_managed_mcp_response(
         or message["id"] != request_id
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if "error" in message:
+        error = message["error"]
+        if (
+            type(error) is not dict
+            or tuple(error) not in (("code", "message"), ("code", "message", "data"))
+            or type(error["code"]) is not int
+            or type(error["message"]) is not str
+        ):
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        return message
+
+    result = message["result"]
+    if request.method in ("server/discover", "tools/list"):
+        if type(result) is not dict:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    elif request.method == "tools/call":
+        if type(result) is not dict:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        if "taskId" in result or "status" in result:
+            _validate_mcp_task_result(result, None, limits, require_terminal=False)
+    elif request.method == "tasks/get":
+        _validate_mcp_task_result(
+            result,
+            request.routing_name,
+            limits,
+            require_terminal=False,
+        )
+    else:
+        _validate_mcp_task_result(
+            result,
+            request.routing_name,
+            limits,
+            require_terminal=True,
+            require_terminal_payload=False,
+        )
     return message
+
+
+def _validate_mcp_task_result(
+    result: object,
+    expected_task_id: Optional[str],
+    limits: _McpManagedLimits,
+    require_terminal: bool,
+    require_terminal_payload: bool = True,
+) -> None:
+    if type(result) is not dict:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    allowed_fields = frozenset(
+        (
+            "resultType",
+            "taskId",
+            "status",
+            "statusMessage",
+            "pollIntervalMs",
+            "result",
+            "error",
+        )
+    )
+    if (
+        any(type(key) is not str or key not in allowed_fields for key in result)
+        or type(result.get("taskId")) is not str
+        or not _valid_routing_name(result["taskId"])
+        or (
+            expected_task_id is not None
+            and result["taskId"] != expected_task_id
+        )
+        or type(result.get("status")) is not str
+        or result["status"] not in limits.task_statuses
+    ):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+
+    is_terminal = result["status"] in limits.final_task_statuses
+    if require_terminal and not is_terminal:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    result_value = result.get("result")
+    error_value = result.get("error")
+    has_result = result_value is not None
+    has_error = error_value is not None
+    if not is_terminal and (has_result or has_error):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if has_result and has_error:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if is_terminal and require_terminal_payload and not (has_result or has_error):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if has_error and type(error_value) is not dict:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+
+
+class _ManagedMcpResponseOwner:
+    def __init__(self, response: aiohttp.ClientResponse):
+        self._response = response
+
+    def release(self) -> None:
+        response = self._response
+        if response is None:
+            return
+        response.release()
+        self._response = None
+
+    def release_with_retry(self) -> None:
+        try:
+            self.release()
+        except BaseException as release_error:
+            try:
+                self.release()
+            except BaseException as retry_error:
+                response = self._response
+                try:
+                    response.close()
+                except BaseException as close_error:
+                    raise release_error from close_error
+                self._response = None
+                raise release_error from retry_error
+            raise
 
 
 async def _read_bounded_mcp_response(
@@ -289,6 +414,7 @@ async def _invoke_managed_mcp(
         headers=headers,
         timeout=aiohttp.ClientTimeout(total=_MCP_INVOKE_TIMEOUT_SECONDS),
     )
+    owner = _ManagedMcpResponseOwner(response)
     try:
         if response.status not in limits.allowed_status_codes:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
@@ -298,11 +424,12 @@ async def _invoke_managed_mcp(
         )
         message = _validate_managed_mcp_response(
             content,
+            request,
             payload["message"]["id"],
             limits,
         )
     finally:
-        response.release()
+        owner.release_with_retry()
     return {"version": 1, "message": message}
 
 
