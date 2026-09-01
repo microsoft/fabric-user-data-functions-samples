@@ -400,6 +400,17 @@ def _valid_mcp_server_policy():
 def _managed_mcp_payload(method="tools/list", params=None, request_id=7):
     if params is None:
         params = {}
+    params = dict(params)
+    params["_meta"] = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "test-client",
+            "version": "1.0.0",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {"io.modelcontextprotocol/tasks": {}}
+        },
+    }
     return {
         "version": 1,
         "protocolVersion": "2026-07-28",
@@ -448,7 +459,7 @@ def _managed_mcp_limits(mod):
         ("working", "completed", "failed", "cancelled"),
         ("completed", "failed", "cancelled"),
         4096,
-        100,
+        0,
         60_000,
         100,
     )
@@ -1141,6 +1152,38 @@ def test_managed_mcp_method_shapes_and_task_routing_are_stateless():
             )
 
 
+def test_managed_mcp_forwards_required_tasks_meta_and_optional_list_cursor():
+    mod = _load_function_app()
+    payload = _managed_mcp_payload("tools/list", {"cursor": "next-page"})
+    payload["message"]["params"]["_meta"][
+        "io.modelcontextprotocol/clientInfo"
+    ]["name"] = "authority-client"
+    prepared = mod._prepare_managed_mcp_request(payload)
+    forwarded = mod.json.loads(prepared.body_bytes)
+    assert tuple(forwarded["params"]) == ("cursor", "_meta")
+    assert forwarded["params"]["cursor"] == "next-page"
+    assert forwarded["params"]["_meta"] == payload["message"]["params"]["_meta"]
+
+    for invalid_meta in (
+        {},
+        {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "client",
+                "version": "1",
+            },
+            "io.modelcontextprotocol/clientCapabilities": {"extensions": {}},
+        },
+    ):
+        invalid = _managed_mcp_payload()
+        invalid["message"]["params"]["_meta"] = invalid_meta
+        _assert_fixed_error(
+            mod._McpContractError,
+            "Invalid managed MCP request.",
+            lambda invalid=invalid: mod._prepare_managed_mcp_request(invalid),
+        )
+
+
 def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
     request = _managed_mcp_payload(
         "tasks/get",
@@ -1237,7 +1280,7 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
             "working,completed,failed,cancelled",
             "completed,failed,cancelled",
             "4096",
-            "100",
+            "0",
             "60000",
             "100",
         )
@@ -1304,11 +1347,14 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
-                "resultType": "task",
+                "resultType": "complete",
                 "taskId": "expected-task",
                 "status": "working",
                 "statusMessage": "x" * 4096,
-                "pollIntervalMs": 100,
+                "pollIntervalMs": 0,
+                "createdAt": "2026-09-01T00:00:00Z",
+                "lastUpdatedAt": "2026-09-01T00:00:01Z",
+                "ttlMs": 0,
             },
         },
         {
@@ -1331,6 +1377,15 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
                 "error": {"code": "TaskFailed"},
             },
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "resultType": "complete",
+                "taskId": "expected-task",
+                "status": "cancelled",
+            },
+        },
     )
     for message in valid:
         assert mod._validate_managed_mcp_response(
@@ -1339,17 +1394,17 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
 
     invalid_results = (
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "attacker-task",
             "status": "working",
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "invented",
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "working",
             "result": {"premature": True},
@@ -1374,25 +1429,25 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "pollIntervalMs": -1,
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "working",
             "statusMessage": {},
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "working",
             "statusMessage": "x" * 4097,
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "working",
             "pollIntervalMs": -1,
         },
         {
-            "resultType": "task",
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "working",
             "pollIntervalMs": 60_001,
@@ -1400,15 +1455,26 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
         {
             "resultType": "complete",
             "taskId": "expected-task",
-            "status": "completed",
-            "result": {},
-            "pollIntervalMs": 100,
-        },
-        {
-            "resultType": "task",
-            "taskId": "expected-task",
             "status": "working",
             "extra": True,
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "working",
+            "createdAt": {},
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "working",
+            "ttlMs": -1,
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "cancelled",
+            "result": {},
         },
     )
     for result in invalid_results:
@@ -1454,34 +1520,31 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
     synchronous = {
         "jsonrpc": "2.0",
         "id": 7,
-        "result": {"content": [], "isError": False},
+        "result": {"resultType": "complete", "content": [], "isError": False},
     }
     task = {
         "jsonrpc": "2.0",
         "id": 7,
         "result": {
             "resultType": "task",
-            "taskId": "task-123",
-            "status": "working",
+            "task": {
+                "taskId": "task-123",
+                "status": "working",
+                "createdAt": "2026-09-01T00:00:00Z",
+                "lastUpdatedAt": "2026-09-01T00:00:01Z",
+                "ttlMs": 1000,
+                "pollIntervalMs": 0,
+            },
         },
     }
-    completed_task = {
-        "jsonrpc": "2.0",
-        "id": 7,
-        "result": {
-            "resultType": "complete",
-            "taskId": "task-123",
-            "status": "completed",
-            "result": {"content": [], "isError": False},
-        },
-    }
-    for message in (synchronous, task, completed_task):
+    for message in (synchronous, task):
         assert mod._validate_managed_mcp_response(
             mod_json(message), request, 7, limits
         ) == message
 
     malformed_results = (
         {"resultType": "task"},
+        {"resultType": "task", "task": {"taskId": "task-123"}},
         {"resultType": "invented"},
         {"resultType": "complete"},
         {"taskId": "task-123", "status": "working"},
