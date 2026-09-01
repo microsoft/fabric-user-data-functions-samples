@@ -1,9 +1,10 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import json
 import os
 import uuid
-from typing import NamedTuple, NoReturn, Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 from urllib.parse import urlparse
 
 udf = fn.UserDataFunctions()
@@ -12,450 +13,297 @@ _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
 
-_MCP_T1_FIELD_ORDER = (
-    "transport",
-    "version",
-    "method",
-    "protocolVersion",
-    "headers",
-    "body",
-    "serverPolicy",
+_MCP_INPUT_FIELD_ORDER = ("version", "protocolVersion", "message")
+_MCP_OUTPUT_FIELD_ORDER = ("version", "message")
+_MCP_PROTOCOL_VERSION = "2026-07-28"
+_MCP_ALLOWED_METHODS = frozenset(
+    ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
-_MCP_T1_FIXED_VALUES = (
-    "mcp-streamable-http",
-    1,
-    "POST",
-    "2025-11-25",
-)
-_MCP_DENIED_HEADER_NAMES = frozenset(
-    {
-        "authorization",
-        "baggage",
-        "connection",
-        "content-length",
-        "cookie",
-        "forwarded",
-        "host",
-        "keep-alive",
-        "mcp-session-id",
-        "origin",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "proxy-connection",
-        "te",
-        "traceparent",
-        "tracestate",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    }
-)
-_MCP_DENIED_HEADER_PREFIXES = ("x-forwarded-", "x-ms-", "x-rayfin-")
-_MCP_ASCII_TOKEN_CHARACTERS = frozenset(
-    "!#$%&'*+-.^_`|~0123456789"
-    "abcdefghijklmnopqrstuvwxyz"
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-)
-_MCP_T1_MAX_BODY_SIZE_BYTES = 5 * 1024 * 1024
-_MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE = "Invalid MCP transport envelope."
-_MCP_SERVER_POLICY_UNRESOLVED_MESSAGE = "MCP server policy is unresolved."
-_MCP_SERVER_POLICY_INVALID_MESSAGE = "Invalid MCP server policy."
-_MCP_T2_CANDIDATE_EVIDENCE = (
-    "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
-)
-_MCP_T2_CANDIDATE_SOURCE_VERSION = (
-    "ananke:454357b4696d5a8669596209ed88bf10daeb0844"
-)
-_MCP_T2_CANDIDATE_PROFILE_ID = "fabriciq"
-_MCP_T2_CANDIDATE_ENDPOINT = (
-    "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
-)
-_MCP_T2_CANDIDATE_PROTECTED_HEADERS = (
-    (
-        "X-Variant",
-        "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
-    ),
-)
+_MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+_MCP_VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+_MCP_REQUEST_LIMIT_BYTES = 5 * 1024 * 1024
+_MCP_INVOKE_TIMEOUT_SECONDS = 5 * 60
+_MCP_CONTRACT_ERROR_MESSAGE = "Invalid managed MCP request."
+_MCP_CONFIGURATION_ERROR_MESSAGE = "Managed MCP limits are not configured."
+_MCP_UPSTREAM_ERROR_MESSAGE = "Managed MCP upstream response is invalid."
 
 
-class _McpTransportContractError(ValueError):
-    """Fixed, customer-data-free error for an invalid MCP T1 envelope."""
+class _McpContractError(ValueError):
+    pass
 
 
-class _McpServerPolicyUnresolved(_McpTransportContractError):
-    """Fixed error used while no trusted MCP server policy is defined."""
+class _McpConfigurationError(RuntimeError):
+    pass
 
 
-class _McpServerPolicyInvalid(_McpTransportContractError):
-    """Fixed, customer-data-free error for an untrusted MCP server policy."""
+class _McpUpstreamError(RuntimeError):
+    pass
 
 
-class _PendingMcpT1Transport(NamedTuple):
-    transport: str
-    version: int
+class _McpManagedLimits(NamedTuple):
+    max_output_bytes: int
+    max_json_depth: int
+    allowed_status_codes: Tuple[int, ...]
+    final_task_statuses: Tuple[str, ...]
+    max_poll_count: int
+
+
+class _McpManagedRequest(NamedTuple):
     method: str
-    protocol_version: str
-    headers: Tuple[Tuple[str, Tuple[str, ...]], ...]
+    routing_name: Optional[str]
     body_bytes: bytes
 
 
-class _McpT2CandidateContract(NamedTuple):
-    source_version: str
-    profile_id: str
-    endpoint: str
-    protected_headers: Tuple[Tuple[str, str], ...]
+def _raise_mcp_contract_error():
+    raise _McpContractError(_MCP_CONTRACT_ERROR_MESSAGE) from None
 
 
-_MCP_T2_CANDIDATE_CONTRACT = _McpT2CandidateContract(
-    _MCP_T2_CANDIDATE_SOURCE_VERSION,
-    _MCP_T2_CANDIDATE_PROFILE_ID,
-    _MCP_T2_CANDIDATE_ENDPOINT,
-    _MCP_T2_CANDIDATE_PROTECTED_HEADERS,
-)
+def _contains_session_id(value: object) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if type(current) is dict:
+            for key, nested in tuple(current.items()):
+                if type(key) is not str or key.lower() == "sessionid":
+                    return True
+                pending.append(nested)
+        elif type(current) is list:
+            pending.extend(current)
+    return False
 
 
-class _ParsedMcpT1Envelope(NamedTuple):
-    pending: _PendingMcpT1Transport
-    server_policy: object
-
-
-class _PreparedMcpTransport(NamedTuple):
-    policy_source_version: str
-    endpoint: str
-    headers: Tuple[Tuple[str, Tuple[str, ...]], ...]
-    body_bytes: bytes
-
-
-def _is_ascii_http_token(value: object) -> bool:
-    if type(value) is not str or not value:
-        return False
-    return all(character in _MCP_ASCII_TOKEN_CHARACTERS for character in value)
-
-
-def _is_mcp_denied_header_name(name: object) -> bool:
-    if type(name) is not str:
-        return False
-    lower_name = name.lower()
-    return lower_name in _MCP_DENIED_HEADER_NAMES or lower_name.startswith(
-        _MCP_DENIED_HEADER_PREFIXES
+def _valid_routing_name(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and not any(character in "\r\n" or ord(character) < 0x20 for character in value)
     )
 
 
-def _mcp_connection_nominations(
-    headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
-) -> Tuple[str, ...]:
-    if type(headers) is not tuple:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-
-    nominations = []
-    for header in headers:
-        if type(header) is not tuple or len(header) != 2:
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-        name, values = header
-        if type(name) is not str or type(values) is not tuple:
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-        if any(type(value) is not str for value in values):
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-        if name.lower() != "connection":
-            continue
-        for value in values:
-            for part in value.split(","):
-                token = part.strip(" \t")
-                if not _is_ascii_http_token(token):
-                    raise _McpTransportContractError(
-                        _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-                    ) from None
-                nominations.append(token.lower())
-    return tuple(nominations)
+def _request_meta() -> dict:
+    return {
+        "io.modelcontextprotocol/protocolVersion": _MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "Fabric-User-Data-Functions",
+            "version": "1.0.0",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {"io.modelcontextprotocol/tasks": {}}
+        },
+    }
 
 
-def _has_mcp_connection_nominated_header(
-    headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
-) -> bool:
-    nominations = frozenset(_mcp_connection_nominations(headers))
-    return any(
-        name.lower() != "connection" and name.lower() in nominations
-        for name, _values in headers
-    )
-
-
-def _parse_mcp_t1_envelope(
-    envelope: object,
-) -> _ParsedMcpT1Envelope:
-    if type(envelope) is not dict:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-
-    envelope_items = tuple(envelope.items())
-    if len(envelope_items) != len(_MCP_T1_FIELD_ORDER):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-    envelope_keys = tuple(key for key, _value in envelope_items)
-    if any(type(key) is not str for key in envelope_keys):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-    if envelope_keys != _MCP_T1_FIELD_ORDER:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-
-    (
-        transport,
-        version,
-        method,
-        protocol_version,
-        headers,
-        body,
-        server_policy,
-    ) = tuple(value for _key, value in envelope_items)
+def _prepare_managed_mcp_request(payload: object) -> _McpManagedRequest:
+    if type(payload) is not dict or tuple(payload) != _MCP_INPUT_FIELD_ORDER:
+        _raise_mcp_contract_error()
+    version, protocol_version, message = tuple(payload.values())
     if (
-        type(transport) is not str
-        or type(version) is not int
-        or type(method) is not str
+        type(version) is not int
+        or version != 1
         or type(protocol_version) is not str
-        or type(headers) is not dict
-        or type(body) is not str
+        or protocol_version != _MCP_PROTOCOL_VERSION
+        or type(message) is not dict
+        or tuple(message) != ("jsonrpc", "id", "method", "params")
+        or _contains_session_id(payload)
     ):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
+        _raise_mcp_contract_error()
+
+    jsonrpc, request_id, method, params = tuple(message.values())
     if (
-        transport,
-        version,
-        method,
-        protocol_version,
-    ) != _MCP_T1_FIXED_VALUES:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-
-    frozen_headers = []
-    for name, values in tuple(headers.items()):
-        if type(name) is not str or type(values) is not list:
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-        frozen_values = tuple(values)
-        if any(type(value) is not str for value in frozen_values):
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-        frozen_headers.append((name, frozen_values))
-
-    immutable_headers = tuple(frozen_headers)
-    header_names = tuple(name for name, _values in immutable_headers)
-    if any(
-        not _is_ascii_http_token(name) or name != name.lower()
-        for name in header_names
+        type(jsonrpc) is not str
+        or jsonrpc != "2.0"
+        or type(request_id) not in (int, str)
+        or type(request_id) is bool
+        or request_id == ""
+        or type(method) is not str
+        or method not in _MCP_ALLOWED_METHODS
+        or type(params) is not dict
     ):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
+        _raise_mcp_contract_error()
 
-    for index in range(1, len(header_names)):
-        if header_names[index - 1] > header_names[index]:
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
+    routing_name = None
+    if method in ("server/discover", "tools/list"):
+        if params:
+            _raise_mcp_contract_error()
+    elif method == "tools/call":
+        if tuple(params) != ("name", "arguments"):
+            _raise_mcp_contract_error()
+        routing_name, arguments = tuple(params.values())
+        if not _valid_routing_name(routing_name) or type(arguments) is not dict:
+            _raise_mcp_contract_error()
+    else:
+        if tuple(params) != ("taskId",):
+            _raise_mcp_contract_error()
+        routing_name = params["taskId"]
+        if not _valid_routing_name(routing_name):
+            _raise_mcp_contract_error()
 
-    if _has_mcp_connection_nominated_header(immutable_headers):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-    if any(_is_mcp_denied_header_name(name) for name in header_names):
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-    for name, values in immutable_headers:
-        if name == "mcp-protocol-version" and values != ("2025-11-25",):
-            raise _McpTransportContractError(
-                _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-            ) from None
-
-    if len(body) > _MCP_T1_MAX_BODY_SIZE_BYTES:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
+    forwarded_params = dict(params)
+    forwarded_params["_meta"] = _request_meta()
+    forwarded_message = {
+        "jsonrpc": jsonrpc,
+        "id": request_id,
+        "method": method,
+        "params": forwarded_params,
+    }
     try:
-        body_bytes = body.encode("utf-8", errors="strict")
-    except UnicodeEncodeError:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-    if len(body_bytes) > _MCP_T1_MAX_BODY_SIZE_BYTES:
-        raise _McpTransportContractError(
-            _MCP_TRANSPORT_CONTRACT_ERROR_MESSAGE
-        ) from None
-
-    return _ParsedMcpT1Envelope(
-        _PendingMcpT1Transport(
-            transport,
-            version,
-            method,
-            protocol_version,
-            immutable_headers,
-            body_bytes,
-        ),
-        server_policy,
-    )
+        body_bytes = json.dumps(
+            forwarded_message, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        _raise_mcp_contract_error()
+    if len(body_bytes) > _MCP_REQUEST_LIMIT_BYTES:
+        _raise_mcp_contract_error()
+    return _McpManagedRequest(method, routing_name, body_bytes)
 
 
-def _extract_pending_mcp_t1_transport(
-    envelope: object,
-) -> _PendingMcpT1Transport:
-    if type(envelope) is dict:
-        envelope_items = tuple(envelope.items())
-        envelope_keys = tuple(key for key, _value in envelope_items)
-        if (
-            len(envelope_items) == len(_MCP_T1_FIELD_ORDER)
-            and all(type(key) is str for key in envelope_keys)
-            and envelope_keys == _MCP_T1_FIELD_ORDER
-            and envelope_items[-1][1] is not None
-        ):
-            raise _McpServerPolicyUnresolved(
-                _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
-            ) from None
-
-    parsed = _parse_mcp_t1_envelope(envelope)
-    return parsed.pending
-
-
-def _raise_invalid_mcp_server_policy() -> NoReturn:
-    raise _McpServerPolicyInvalid(_MCP_SERVER_POLICY_INVALID_MESSAGE) from None
-
-
-def _resolve_mcp_t2_candidate_policy(
-    server_policy: object,
-) -> _McpT2CandidateContract:
-    expected_contract = _McpT2CandidateContract(
-        "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
-        "fabriciq",
-        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
-        (
-            (
-                "X-Variant",
-                "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect",
-            ),
-        ),
-    )
-    contract = _MCP_T2_CANDIDATE_CONTRACT
-    if (
-        type(contract) is not _McpT2CandidateContract
-        or type(contract.source_version) is not str
-        or type(contract.profile_id) is not str
-        or type(contract.endpoint) is not str
-        or type(contract.protected_headers) is not tuple
-        or len(contract.protected_headers) != 1
-    ):
-        _raise_invalid_mcp_server_policy()
-    for protected_header in contract.protected_headers:
-        if (
-            type(protected_header) is not tuple
-            or len(protected_header) != 2
-            or type(protected_header[0]) is not str
-            or type(protected_header[1]) is not str
-        ):
-            _raise_invalid_mcp_server_policy()
-    if contract != expected_contract:
-        _raise_invalid_mcp_server_policy()
-
-    if server_policy is None:
-        raise _McpServerPolicyUnresolved(
-            _MCP_SERVER_POLICY_UNRESOLVED_MESSAGE
-        ) from None
-    if type(server_policy) is not dict:
-        _raise_invalid_mcp_server_policy()
-
+def _load_managed_mcp_limits() -> _McpManagedLimits:
     try:
-        policy_items = tuple(server_policy.items())
-    except RuntimeError:
-        _raise_invalid_mcp_server_policy()
-    policy_keys = tuple(key for key, _value in policy_items)
-    if (
-        len(policy_items) != 3
-        or any(type(key) is not str for key in policy_keys)
-        or frozenset(policy_keys) != frozenset(("id", "url", "protectedHeaders"))
-    ):
-        _raise_invalid_mcp_server_policy()
-
-    profile_id = None
-    endpoint = None
-    protected_headers = None
-    for key, value in policy_items:
-        if key == "id":
-            profile_id = value
-        elif key == "url":
-            endpoint = value
-        else:
-            protected_headers = value
-    if (
-        type(profile_id) is not str
-        or type(endpoint) is not str
-        or type(protected_headers) is not dict
-        or profile_id != contract.profile_id
-        or endpoint != contract.endpoint
-    ):
-        _raise_invalid_mcp_server_policy()
-
-    try:
-        protected_header_items = tuple(protected_headers.items())
-    except RuntimeError:
-        _raise_invalid_mcp_server_policy()
-    if (
-        any(
-            type(name) is not str or type(value) is not str
-            for name, value in protected_header_items
+        max_output_bytes = int(os.environ["FABRIC_MCP_MAX_OUTPUT_BYTES"])
+        max_json_depth = int(os.environ["FABRIC_MCP_MAX_JSON_DEPTH"])
+        allowed_status_codes = tuple(
+            int(value)
+            for value in os.environ["FABRIC_MCP_ALLOWED_STATUS_CODES"].split(",")
         )
-        or protected_header_items != contract.protected_headers
+        final_task_statuses = tuple(
+            value
+            for value in os.environ["FABRIC_MCP_FINAL_TASK_STATUSES"].split(",")
+            if value
+        )
+        max_poll_count = int(os.environ["FABRIC_MCP_MAX_POLL_COUNT"])
+    except (KeyError, TypeError, ValueError):
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    limits = _McpManagedLimits(
+        max_output_bytes,
+        max_json_depth,
+        allowed_status_codes,
+        final_task_statuses,
+        max_poll_count,
+    )
+    _validate_managed_mcp_limits(limits)
+    return limits
+
+
+def _validate_managed_mcp_limits(limits: object) -> None:
+    if (
+        type(limits) is not _McpManagedLimits
+        or type(limits.max_output_bytes) is not int
+        or type(limits.max_json_depth) is not int
+        or type(limits.allowed_status_codes) is not tuple
+        or type(limits.final_task_statuses) is not tuple
+        or type(limits.max_poll_count) is not int
+        or limits.max_output_bytes <= 0
+        or limits.max_json_depth <= 0
+        or not limits.allowed_status_codes
+        or any(
+            type(status) is not int or status < 100 or status > 599
+            for status in limits.allowed_status_codes
+        )
+        or not limits.final_task_statuses
+        or any(
+            not _valid_routing_name(status) for status in limits.final_task_statuses
+        )
+        or limits.max_poll_count < 0
     ):
-        _raise_invalid_mcp_server_policy()
-    return expected_contract
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
 
 
-def _merge_mcp_candidate_headers(
-    caller_headers: Tuple[Tuple[str, Tuple[str, ...]], ...],
-    protected_headers: Tuple[Tuple[str, str], ...],
-) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
-    protected_names = frozenset(name.lower() for name, _value in protected_headers)
-    if any(name.lower() in protected_names for name, _values in caller_headers):
-        _raise_invalid_mcp_server_policy()
-
-    merged = list(caller_headers)
-    for name, value in protected_headers:
-        lower_name = name.lower()
-        insertion_index = len(merged)
-        for index, (existing_name, _existing_values) in enumerate(merged):
-            if lower_name < existing_name.lower():
-                insertion_index = index
-                break
-        merged.insert(insertion_index, (name, (value,)))
-    return tuple(merged)
+def _json_depth(value: object) -> int:
+    maximum = 1
+    pending = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        maximum = max(maximum, depth)
+        if type(current) is dict:
+            pending.extend((nested, depth + 1) for nested in current.values())
+        elif type(current) is list:
+            pending.extend((nested, depth + 1) for nested in current)
+    return maximum
 
 
-def _prepare_mcp_transport(envelope: object) -> _PreparedMcpTransport:
-    parsed = _parse_mcp_t1_envelope(envelope)
-    policy = _resolve_mcp_t2_candidate_policy(parsed.server_policy)
-    headers = _merge_mcp_candidate_headers(
-        parsed.pending.headers,
-        policy.protected_headers,
+def _validate_managed_mcp_response(
+    content: bytes,
+    request_id: object,
+    limits: _McpManagedLimits,
+) -> object:
+    if not content:
+        return None
+    if len(content) > limits.max_output_bytes:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    try:
+        message = json.loads(content.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if (
+        type(message) is not dict
+        or _contains_session_id(message)
+        or _json_depth(message) > limits.max_json_depth
+        or tuple(message) not in (
+            ("jsonrpc", "id", "result"),
+            ("jsonrpc", "id", "error"),
+        )
+        or message["jsonrpc"] != "2.0"
+        or type(message["id"]) is not type(request_id)
+        or message["id"] != request_id
+    ):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    return message
+
+
+async def _read_bounded_mcp_response(
+    response: aiohttp.ClientResponse,
+    max_output_bytes: int,
+) -> bytes:
+    content = bytearray()
+    async for chunk in response.content.iter_any():
+        if len(content) + len(chunk) > max_output_bytes:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        content.extend(chunk)
+    return bytes(content)
+
+
+async def _invoke_managed_mcp(
+    payload: object,
+    access_token: str,
+    limits: _McpManagedLimits,
+    session: aiohttp.ClientSession,
+) -> dict:
+    request = _prepare_managed_mcp_request(payload)
+    _validate_managed_mcp_limits(limits)
+    if type(access_token) is not str or not access_token:
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": _JSON_MEDIA_TYPE,
+        "Accept": _JSON_MEDIA_TYPE,
+        "MCP-Protocol-Version": _MCP_PROTOCOL_VERSION,
+        "Mcp-Method": request.method,
+        "X-Variants": _MCP_VARIANTS,
+    }
+    if request.routing_name is not None:
+        headers["Mcp-Name"] = request.routing_name
+
+    response = await session.post(
+        _MCP_ENDPOINT,
+        data=request.body_bytes,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=_MCP_INVOKE_TIMEOUT_SECONDS),
     )
-    return _PreparedMcpTransport(
-        policy.source_version,
-        policy.endpoint,
-        headers,
-        parsed.pending.body_bytes,
-    )
+    try:
+        if response.status not in limits.allowed_status_codes:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        content = await _read_bounded_mcp_response(
+            response,
+            limits.max_output_bytes,
+        )
+        message = _validate_managed_mcp_response(
+            content,
+            payload["message"]["id"],
+            limits,
+        )
+    finally:
+        response.release()
+    return {"version": 1, "message": message}
 
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
@@ -490,6 +338,13 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+@udf.function()
+async def rayfin_fabric_mcp_v1(payload: dict, accesstoken: str) -> dict:
+    limits = _load_managed_mcp_limits()
+    session = await _get_session()
+    return await _invoke_managed_mcp(payload, accesstoken, limits, session)
 
 
 class _ResponseBodyIterator:

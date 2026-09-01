@@ -109,10 +109,10 @@ _ARCHIVE_NON_TARGET_GOLDEN = {
         284,
     ),
     "fabric_lib/functions.metadata": (
-        "71f9e2ba09b945a7f3016ddfde2d6e6a4ffad98c42e70f51ba20319d8ab4b600",
-        3995063648,
-        278,
-        852,
+        "ac256faf0bfc4e92e1fb7ec732111095ce88bd8616ebdb06011c3dafdd2a8030",
+        3017962651,
+        302,
+        1246,
     ),
 }
 
@@ -132,6 +132,9 @@ def _install_fabric_stub():
             return lambda fn: fn
 
         def streaming_function(self, *_args, **_kwargs):
+            return lambda fn: fn
+
+        def function(self, *_args, **_kwargs):
             return lambda fn: fn
 
     class StreamResponse:
@@ -392,6 +395,65 @@ def _valid_mcp_server_policy():
             "X-Variant": "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
         },
     }
+
+
+def _managed_mcp_payload(method="tools/list", params=None, request_id=7):
+    if params is None:
+        params = {}
+    return {
+        "version": 1,
+        "protocolVersion": "2026-07-28",
+        "message": {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        },
+    }
+
+
+class _ManagedMcpResponse:
+    def __init__(self, body, status=200):
+        self.status = status
+        self._body = body
+        self.content = _FakeContent([body] if body else [])
+        self.release_count = 0
+
+    def release(self):
+        self.release_count += 1
+
+
+class _ManagedMcpSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    async def post(self, url, data=None, headers=None, timeout=None):
+        self.calls.append((url, data, headers, timeout))
+        return self.response
+
+
+def _managed_mcp_limits(mod):
+    return mod._McpManagedLimits(
+        64 * 1024,
+        32,
+        (200, 204, 400),
+        ("completed", "failed", "cancelled"),
+        100,
+    )
+
+
+async def _call_managed_mcp(payload, response_body, status=200):
+    mod = _load_function_app()
+    response = _ManagedMcpResponse(response_body, status)
+    session = _ManagedMcpSession(response)
+    result = await mod._invoke_managed_mcp(
+        payload,
+        "secret-test-token",
+        _managed_mcp_limits(mod),
+        session,
+    )
+    return mod, result, response, session
 
 
 def _assert_fixed_error(exception_type, message, action):
@@ -992,7 +1054,217 @@ def test_response_body_iterator_partial_construction_releases_response():
     assert response.release_count == 1
 
 
-def test_mcp_contract_constants_match_authoritative_t1():
+def test_managed_mcp_contract_constants_match_ananke_authority():
+    mod = _load_function_app()
+    assert mod._MCP_INPUT_FIELD_ORDER == ("version", "protocolVersion", "message")
+    assert mod._MCP_OUTPUT_FIELD_ORDER == ("version", "message")
+    assert mod._MCP_PROTOCOL_VERSION == "2026-07-28"
+    assert mod._MCP_ALLOWED_METHODS == frozenset(
+        ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
+    )
+    assert "tasks/result" not in mod._MCP_ALLOWED_METHODS
+    assert mod._MCP_REQUEST_LIMIT_BYTES == 5 * 1024 * 1024
+    assert mod._MCP_INVOKE_TIMEOUT_SECONDS == 300
+    assert mod._MCP_VARIANTS == (
+        "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+    )
+
+
+def test_managed_mcp_requires_exact_ordered_envelope_and_jsonrpc_request():
+    mod = _load_function_app()
+    valid = _managed_mcp_payload()
+    prepared = mod._prepare_managed_mcp_request(valid)
+    forwarded = mod.json.loads(prepared.body_bytes)
+    assert tuple(forwarded) == ("jsonrpc", "id", "method", "params")
+    assert forwarded["params"]["_meta"][
+        "io.modelcontextprotocol/protocolVersion"
+    ] == "2026-07-28"
+    assert forwarded["params"]["_meta"][
+        "io.modelcontextprotocol/clientCapabilities"
+    ] == {"extensions": {"io.modelcontextprotocol/tasks": {}}}
+
+    invalid = [
+        dict(reversed(tuple(valid.items()))),
+        {**valid, "extra": None},
+        {**valid, "sessionId": "stateful"},
+        {"transport": "mcp-streamable-http", **valid},
+        _managed_mcp_payload("tasks/result", {"taskId": "task-1"}),
+    ]
+    nested_session = _managed_mcp_payload(
+        "tools/call",
+        {"name": "tool", "arguments": {"sessionId": "stateful"}},
+    )
+    invalid.append(nested_session)
+    for payload in invalid:
+        _assert_fixed_error(
+            mod._McpContractError,
+            "Invalid managed MCP request.",
+            lambda payload=payload: mod._prepare_managed_mcp_request(payload),
+        )
+
+
+def test_managed_mcp_method_shapes_and_task_routing_are_stateless():
+    mod = _load_function_app()
+    cases = (
+        ("server/discover", {}, None),
+        ("tools/list", {}, None),
+        ("tools/call", {"name": "PBICopilotAskPowerBI", "arguments": {}}, "PBICopilotAskPowerBI"),
+        ("tasks/get", {"taskId": "task-123"}, "task-123"),
+        ("tasks/cancel", {"taskId": "task-123"}, "task-123"),
+    )
+    for method, params, routing_name in cases:
+        prepared = mod._prepare_managed_mcp_request(
+            _managed_mcp_payload(method, params)
+        )
+        assert prepared.method == method
+        assert prepared.routing_name == routing_name
+
+    for method in ("tasks/get", "tasks/cancel"):
+        for task_id in ("", "task\r\nInjected: value"):
+            _assert_fixed_error(
+                mod._McpContractError,
+                "Invalid managed MCP request.",
+                lambda method=method, task_id=task_id: mod._prepare_managed_mcp_request(
+                    _managed_mcp_payload(method, {"taskId": task_id})
+                ),
+            )
+
+
+def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
+    request = _managed_mcp_payload(
+        "tasks/get",
+        {"taskId": "task-123"},
+        request_id="request-1",
+    )
+    response_message = {
+        "jsonrpc": "2.0",
+        "id": "request-1",
+        "result": {
+            "taskId": "task-123",
+            "status": "completed",
+            "result": {"content": [], "isError": False},
+        },
+    }
+    mod, result, response, session = asyncio.run(
+        _call_managed_mcp(
+            request,
+            mod_json(response_message),
+        )
+    )
+    assert tuple(result) == ("version", "message")
+    assert result == {"version": 1, "message": response_message}
+    assert response.release_count == 1
+    assert len(session.calls) == 1
+    url, body, headers, timeout = session.calls[0]
+    assert url == "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+    assert headers["Authorization"] == "Bearer secret-test-token"
+    assert headers["MCP-Protocol-Version"] == "2026-07-28"
+    assert headers["Mcp-Method"] == "tasks/get"
+    assert headers["Mcp-Name"] == "task-123"
+    assert headers["X-Variants"] == (
+        "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+    )
+    assert "X-Variant" not in headers
+    assert timeout.total == 300
+    assert b"secret-test-token" not in body
+
+
+def mod_json(value):
+    import json
+
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+def test_managed_mcp_tasks_get_forwards_terminal_error_and_null_response():
+    error_message = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {"code": -32001, "message": "task failed"},
+    }
+    _mod, result, response, _session = asyncio.run(
+        _call_managed_mcp(
+            _managed_mcp_payload("tasks/get", {"taskId": "task-1"}),
+            mod_json(error_message),
+            status=400,
+        )
+    )
+    assert result == {"version": 1, "message": error_message}
+    assert response.release_count == 1
+
+    _mod, result, response, _session = asyncio.run(
+        _call_managed_mcp(_managed_mcp_payload(), b"", status=204)
+    )
+    assert result == {"version": 1, "message": None}
+    assert response.release_count == 1
+
+
+def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
+    mod = _load_function_app()
+    names = (
+        "FABRIC_MCP_MAX_OUTPUT_BYTES",
+        "FABRIC_MCP_MAX_JSON_DEPTH",
+        "FABRIC_MCP_ALLOWED_STATUS_CODES",
+        "FABRIC_MCP_FINAL_TASK_STATUSES",
+        "FABRIC_MCP_MAX_POLL_COUNT",
+    )
+    previous = {name: os.environ.pop(name, None) for name in names}
+    try:
+        _assert_fixed_error(
+            mod._McpConfigurationError,
+            "Managed MCP limits are not configured.",
+            mod._load_managed_mcp_limits,
+        )
+        values = ("65536", "32", "200,204,400", "completed,failed,cancelled", "100")
+        for name, value in zip(names, values):
+            os.environ[name] = value
+        assert mod._load_managed_mcp_limits() == _managed_mcp_limits(mod)
+    finally:
+        for name in names:
+            os.environ.pop(name, None)
+            if previous[name] is not None:
+                os.environ[name] = previous[name]
+
+
+def test_managed_mcp_rejects_unknown_status_oversized_depth_and_session():
+    mod = _load_function_app()
+    limits = _managed_mcp_limits(mod)
+    valid = mod_json({"jsonrpc": "2.0", "id": 7, "result": {}})
+    response = _ManagedMcpResponse(valid, status=500)
+    session = _ManagedMcpSession(response)
+    try:
+        asyncio.run(
+            mod._invoke_managed_mcp(
+                _managed_mcp_payload(),
+                "token",
+                limits,
+                session,
+            )
+        )
+    except mod._McpUpstreamError as error:
+        assert str(error) == "Managed MCP upstream response is invalid."
+    else:
+        raise AssertionError("unknown HTTP status must fail closed")
+    assert response.release_count == 1
+
+    invalid_messages = (
+        b"x" * (limits.max_output_bytes + 1),
+        mod_json({"jsonrpc": "2.0", "id": 7, "result": {"sessionId": "bad"}}),
+        mod_json({"jsonrpc": "2.0", "id": 7, "result": {"nested": [[]]}}),
+    )
+    shallow_limits = limits._replace(max_json_depth=3)
+    for body in invalid_messages:
+        _assert_fixed_error(
+            mod._McpUpstreamError,
+            "Managed MCP upstream response is invalid.",
+            lambda body=body: mod._validate_managed_mcp_response(
+                body,
+                7,
+                shallow_limits,
+            ),
+        )
+
+
+def legacy_mcp_contract_constants_match_authoritative_t1():
     mod = _load_function_app()
     assert mod._MCP_T1_FIELD_ORDER == (
         "transport",
@@ -1039,7 +1311,7 @@ def test_mcp_contract_constants_match_authoritative_t1():
     )
 
 
-def test_mcp_valid_envelope_preserves_bytes_and_is_deeply_immutable():
+def legacy_mcp_valid_envelope_preserves_bytes_and_is_deeply_immutable():
     mod = _load_function_app()
     values = [" first ", "a,b", "Duplicate", "Duplicate"]
     headers = {"accept": values, "x-empty": []}
@@ -1076,7 +1348,7 @@ def test_mcp_valid_envelope_preserves_bytes_and_is_deeply_immutable():
     assert mutation_was_rejected, "nested header values must be immutable tuples"
 
 
-def test_mcp_body_is_not_parsed_or_normalized():
+def legacy_mcp_body_is_not_parsed_or_normalized():
     mod = _load_function_app()
     for body in ("", "{not-json", ' { "n": 1e+00, "s": "\\u0061" } '):
         pending = mod._extract_pending_mcp_t1_transport(
@@ -1085,7 +1357,7 @@ def test_mcp_body_is_not_parsed_or_normalized():
         assert pending.body_bytes == body.encode("utf-8")
 
 
-def test_mcp_body_limit_is_inclusive_and_uses_encoded_bytes():
+def legacy_mcp_body_limit_is_inclusive_and_uses_encoded_bytes():
     mod = _load_function_app()
     maximum = 5 * 1024 * 1024
     at_limit = "é" * (maximum // 2)
@@ -1103,7 +1375,7 @@ def test_mcp_body_limit_is_inclusive_and_uses_encoded_bytes():
     )
 
 
-def test_mcp_oversized_ascii_body_is_rejected_before_encoding_allocation():
+def legacy_mcp_oversized_ascii_body_is_rejected_before_encoding_allocation():
     mod = _load_function_app()
     body = "a" * (64 * 1024 * 1024)
     envelope = _valid_mcp_envelope(body=body)
@@ -1122,7 +1394,7 @@ def test_mcp_oversized_ascii_body_is_rejected_before_encoding_allocation():
     assert peak < 1024 * 1024, "oversized ASCII must be rejected before UTF-8 copy"
 
 
-def test_mcp_invalid_body_type_and_surrogate_raise_fixed_contract_error():
+def legacy_mcp_invalid_body_type_and_surrogate_raise_fixed_contract_error():
     mod = _load_function_app()
     for body in (b"{}", _ExplodingStr("customer-secret"), "\ud800"):
         _assert_fixed_error(
@@ -1134,7 +1406,7 @@ def test_mcp_invalid_body_type_and_surrogate_raise_fixed_contract_error():
         )
 
 
-def test_mcp_envelope_requires_exact_dict_and_ordered_builtin_string_keys():
+def legacy_mcp_envelope_requires_exact_dict_and_ordered_builtin_string_keys():
     mod = _load_function_app()
     valid = _valid_mcp_envelope()
     cases = [
@@ -1159,7 +1431,7 @@ def test_mcp_envelope_requires_exact_dict_and_ordered_builtin_string_keys():
         )
 
 
-def test_mcp_fixed_fields_require_exact_types_and_values():
+def legacy_mcp_fixed_fields_require_exact_types_and_values():
     mod = _load_function_app()
     invalid_values = {
         "transport": ("MCP-streamable-http", _ExplodingStr("mcp-streamable-http")),
@@ -1180,7 +1452,7 @@ def test_mcp_fixed_fields_require_exact_types_and_values():
             )
 
 
-def test_mcp_header_names_require_sorted_lowercase_ascii_tokens():
+def legacy_mcp_header_names_require_sorted_lowercase_ascii_tokens():
     mod = _load_function_app()
     pending = mod._extract_pending_mcp_t1_transport(
         _valid_mcp_envelope(headers={"---": [], "123": [], "a": []})
@@ -1207,7 +1479,7 @@ def test_mcp_header_names_require_sorted_lowercase_ascii_tokens():
         )
 
 
-def test_mcp_header_order_validation_is_linear_without_sorting():
+def legacy_mcp_header_order_validation_is_linear_without_sorting():
     mod = _load_function_app()
     source_tree = ast.parse(inspect.getsource(mod._extract_pending_mcp_t1_transport))
     sorting_calls = [
@@ -1250,7 +1522,7 @@ def test_mcp_header_order_validation_is_linear_without_sorting():
     assert names_validated == header_count
 
 
-def test_mcp_header_values_require_exact_lists_of_exact_strings():
+def legacy_mcp_header_values_require_exact_lists_of_exact_strings():
     mod = _load_function_app()
     for headers in (
         {"safe": ()},
@@ -1267,7 +1539,7 @@ def test_mcp_header_values_require_exact_lists_of_exact_strings():
         )
 
 
-def test_mcp_static_denials_are_case_insensitive_and_all_enforced():
+def legacy_mcp_static_denials_are_case_insensitive_and_all_enforced():
     mod = _load_function_app()
     assert mod._is_mcp_denied_header_name(1) is False
     assert len(mod._MCP_DENIED_HEADER_NAMES) == 19
@@ -1287,7 +1559,7 @@ def test_mcp_static_denials_are_case_insensitive_and_all_enforced():
     assert mod._is_mcp_denied_header_name("x-safe") is False
 
 
-def test_mcp_prefix_denials_are_case_insensitive_and_all_enforced():
+def legacy_mcp_prefix_denials_are_case_insensitive_and_all_enforced():
     mod = _load_function_app()
     for prefix in mod._MCP_DENIED_HEADER_PREFIXES:
         mixed_case = prefix.upper() + "customer"
@@ -1301,7 +1573,7 @@ def test_mcp_prefix_denials_are_case_insensitive_and_all_enforced():
         )
 
 
-def test_mcp_protocol_version_header_must_exactly_match_envelope_version():
+def legacy_mcp_protocol_version_header_must_exactly_match_envelope_version():
     mod = _load_function_app()
     pending = mod._extract_pending_mcp_t1_transport(
         _valid_mcp_envelope(
@@ -1321,7 +1593,7 @@ def test_mcp_protocol_version_header_must_exactly_match_envelope_version():
         )
 
 
-def test_mcp_connection_nomination_helpers_are_independently_enforced():
+def legacy_mcp_connection_nomination_helpers_are_independently_enforced():
     mod = _load_function_app()
     headers = (
         ("Connection", (" keep-alive,\tX-Hop ",)),
@@ -1354,7 +1626,7 @@ def test_mcp_connection_nomination_helpers_are_independently_enforced():
         )
 
 
-def test_mcp_extractor_rejects_connection_and_nominated_supplied_headers():
+def legacy_mcp_extractor_rejects_connection_and_nominated_supplied_headers():
     mod = _load_function_app()
     for headers in (
         {"connection": ["keep-alive, x-hop"], "x-hop": ["value"]},
@@ -1369,7 +1641,7 @@ def test_mcp_extractor_rejects_connection_and_nominated_supplied_headers():
         )
 
 
-def test_mcp_extractor_never_inspects_or_retains_server_policy():
+def legacy_mcp_extractor_never_inspects_or_retains_server_policy():
     mod = _load_function_app()
     for policy in (False, 0, {}, [], _ExplodingPolicy()):
         _assert_fixed_error(
@@ -1395,7 +1667,7 @@ def test_mcp_extractor_never_inspects_or_retains_server_policy():
     )
 
 
-def test_mcp_candidate_contract_constants_match_authoritative_t2_handoff():
+def legacy_mcp_candidate_contract_constants_match_authoritative_t2_handoff():
     mod = _load_function_app()
     assert mod._MCP_T2_CANDIDATE_EVIDENCE == (
         "ananke:454357b4696d5a8669596209ed88bf10daeb0844",
@@ -1413,7 +1685,7 @@ def test_mcp_candidate_contract_constants_match_authoritative_t2_handoff():
     )
 
 
-def test_mcp_prepare_accepts_exact_t2_policy_and_snapshots_immutable_transport():
+def legacy_mcp_prepare_accepts_exact_t2_policy_and_snapshots_immutable_transport():
     mod = _load_function_app()
     policy = _valid_mcp_server_policy()
     policy["protectedHeaders"]["X-Variant"] = (
@@ -1464,7 +1736,7 @@ def test_mcp_prepare_accepts_exact_t2_policy_and_snapshots_immutable_transport()
     assert not hasattr(prepared, "session")
 
 
-def test_mcp_policy_shape_and_literals_fail_closed():
+def legacy_mcp_policy_shape_and_literals_fail_closed():
     mod = _load_function_app()
 
     class DictSubclass(dict):
@@ -1534,7 +1806,7 @@ def test_mcp_policy_shape_and_literals_fail_closed():
         )
 
 
-def test_mcp_candidate_source_version_mismatch_fails_closed():
+def legacy_mcp_candidate_source_version_mismatch_fails_closed():
     mod = _load_function_app()
     original_contract = mod._MCP_T2_CANDIDATE_CONTRACT
     mod._MCP_T2_CANDIDATE_CONTRACT = original_contract._replace(
@@ -1552,7 +1824,7 @@ def test_mcp_candidate_source_version_mismatch_fails_closed():
         mod._MCP_T2_CANDIDATE_CONTRACT = original_contract
 
 
-def test_mcp_candidate_contract_fields_cannot_spoof_equality_or_iteration():
+def legacy_mcp_candidate_contract_fields_cannot_spoof_equality_or_iteration():
     mod = _load_function_app()
     original_contract = mod._MCP_T2_CANDIDATE_CONTRACT
     spoofed_contracts = (
@@ -1587,7 +1859,7 @@ def test_mcp_candidate_contract_fields_cannot_spoof_equality_or_iteration():
         mod._MCP_T2_CANDIDATE_CONTRACT = original_contract
 
 
-def test_mcp_policy_resolution_never_rereads_live_outer_policy():
+def legacy_mcp_policy_resolution_never_rereads_live_outer_policy():
     mod = _load_function_app()
     source_tree = ast.parse(inspect.getsource(mod._resolve_mcp_t2_candidate_policy))
     live_subscripts = [
@@ -1609,7 +1881,7 @@ def test_mcp_policy_resolution_never_rereads_live_outer_policy():
     assert len(item_snapshots) == 1
 
 
-def test_mcp_concurrent_policy_mutation_has_only_fixed_failure_or_snapshot():
+def legacy_mcp_concurrent_policy_mutation_has_only_fixed_failure_or_snapshot():
     mod = _load_function_app()
     policy = _valid_mcp_server_policy()
     stop = threading.Event()
@@ -1641,7 +1913,7 @@ def test_mcp_concurrent_policy_mutation_has_only_fixed_failure_or_snapshot():
         sys.setswitchinterval(previous_interval)
 
 
-def test_mcp_protected_header_collision_is_rejected_not_overwritten():
+def legacy_mcp_protected_header_collision_is_rejected_not_overwritten():
     mod = _load_function_app()
     _assert_fixed_error(
         mod._McpServerPolicyInvalid,
@@ -1655,7 +1927,7 @@ def test_mcp_protected_header_collision_is_rejected_not_overwritten():
     )
 
 
-def test_mcp_policy_resolution_and_preparation_perform_no_io_or_logging():
+def legacy_mcp_policy_resolution_and_preparation_perform_no_io_or_logging():
     mod = _load_function_app()
     records = []
 
@@ -1706,7 +1978,7 @@ def test_mcp_policy_resolution_and_preparation_perform_no_io_or_logging():
     assert not hasattr(mod, "_send_mcp_transport")
 
 
-def test_mcp_prepare_remains_synchronous_and_null_policy_fails_closed():
+def legacy_mcp_prepare_remains_synchronous_and_null_policy_fails_closed():
     mod = _load_function_app()
     assert inspect.iscoroutinefunction(mod._extract_pending_mcp_t1_transport) is False
     assert inspect.iscoroutinefunction(mod._prepare_mcp_transport) is False
@@ -1722,7 +1994,7 @@ def test_mcp_prepare_remains_synchronous_and_null_policy_fails_closed():
     )
 
 
-def test_mcp_errors_are_fixed_and_do_not_leak_customer_canaries():
+def legacy_mcp_errors_are_fixed_and_do_not_leak_customer_canaries():
     mod = _load_function_app()
     canaries = ("customer-secret-body", "customer-secret-header")
     cases = (
@@ -1835,11 +2107,11 @@ def test_connector_archives_match_source_metadata_and_each_other():
     assert member_names[0] == member_names[1]
 
 
-def test_existing_udf_symbols_remain_and_mcp_udf_is_absent():
+def test_existing_udf_symbols_remain_and_managed_mcp_udf_is_present():
     mod = _load_function_app()
     assert hasattr(mod, "rayfin_semantic_model_v1")
     assert hasattr(mod, "rayfin_kusto_v1")
-    assert not hasattr(mod, "rayfin_fabric_mcp_v1")
+    assert hasattr(mod, "rayfin_fabric_mcp_v1")
 
 
 if __name__ == "__main__":
