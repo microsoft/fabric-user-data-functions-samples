@@ -447,6 +447,9 @@ def _managed_mcp_limits(mod):
         (200, 204, 400),
         ("working", "completed", "failed", "cancelled"),
         ("completed", "failed", "cancelled"),
+        4096,
+        100,
+        60_000,
         100,
     )
 
@@ -1148,6 +1151,7 @@ def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
         "jsonrpc": "2.0",
         "id": "request-1",
         "result": {
+            "resultType": "complete",
             "taskId": "task-123",
             "status": "completed",
             "result": {"content": [], "isError": False},
@@ -1214,6 +1218,9 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
         "FABRIC_MCP_ALLOWED_STATUS_CODES",
         "FABRIC_MCP_TASK_STATUSES",
         "FABRIC_MCP_FINAL_TASK_STATUSES",
+        "FABRIC_MCP_MAX_STATUS_MESSAGE_BYTES",
+        "FABRIC_MCP_MIN_POLL_INTERVAL_MS",
+        "FABRIC_MCP_MAX_POLL_INTERVAL_MS",
         "FABRIC_MCP_MAX_POLL_COUNT",
     )
     previous = {name: os.environ.pop(name, None) for name in names}
@@ -1229,6 +1236,9 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
             "200,204,400",
             "working,completed,failed,cancelled",
             "completed,failed,cancelled",
+            "4096",
+            "100",
+            "60000",
             "100",
         )
         for name, value in zip(names, values):
@@ -1293,12 +1303,19 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
         {
             "jsonrpc": "2.0",
             "id": 7,
-            "result": {"taskId": "expected-task", "status": "working"},
+            "result": {
+                "resultType": "task",
+                "taskId": "expected-task",
+                "status": "working",
+                "statusMessage": "x" * 4096,
+                "pollIntervalMs": 100,
+            },
         },
         {
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
+                "resultType": "complete",
                 "taskId": "expected-task",
                 "status": "completed",
                 "result": {"content": [], "isError": False},
@@ -1308,6 +1325,7 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
+                "resultType": "complete",
                 "taskId": "expected-task",
                 "status": "failed",
                 "error": {"code": "TaskFailed"},
@@ -1320,19 +1338,77 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
         ) == message
 
     invalid_results = (
-        {"taskId": "attacker-task", "status": "working"},
-        {"taskId": "expected-task", "status": "invented"},
         {
+            "resultType": "task",
+            "taskId": "attacker-task",
+            "status": "working",
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "invented",
+        },
+        {
+            "resultType": "task",
             "taskId": "expected-task",
             "status": "working",
             "result": {"premature": True},
         },
-        {"taskId": "expected-task", "status": "completed"},
         {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "completed",
+        },
+        {
+            "resultType": "complete",
             "taskId": "expected-task",
             "status": "completed",
             "result": {},
             "error": {},
+        },
+        {
+            "resultType": "invented",
+            "taskId": "expected-task",
+            "status": "working",
+            "statusMessage": {},
+            "pollIntervalMs": -1,
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "statusMessage": {},
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "statusMessage": "x" * 4097,
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "pollIntervalMs": -1,
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "pollIntervalMs": 60_001,
+        },
+        {
+            "resultType": "complete",
+            "taskId": "expected-task",
+            "status": "completed",
+            "result": {},
+            "pollIntervalMs": 100,
+        },
+        {
+            "resultType": "task",
+            "taskId": "expected-task",
+            "status": "working",
+            "extra": True,
         },
     )
     for result in invalid_results:
@@ -1389,7 +1465,17 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
             "status": "working",
         },
     }
-    for message in (synchronous, task):
+    completed_task = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+            "resultType": "complete",
+            "taskId": "task-123",
+            "status": "completed",
+            "result": {"content": [], "isError": False},
+        },
+    }
+    for message in (synchronous, task, completed_task):
         assert mod._validate_managed_mcp_response(
             mod_json(message), request, 7, limits
         ) == message

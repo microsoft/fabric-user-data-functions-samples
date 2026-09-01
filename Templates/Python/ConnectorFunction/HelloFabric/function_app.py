@@ -46,6 +46,9 @@ class _McpManagedLimits(NamedTuple):
     allowed_status_codes: Tuple[int, ...]
     task_statuses: Tuple[str, ...]
     final_task_statuses: Tuple[str, ...]
+    max_status_message_bytes: int
+    min_poll_interval_ms: int
+    max_poll_interval_ms: int
     max_poll_count: int
 
 
@@ -176,6 +179,11 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
             for value in os.environ["FABRIC_MCP_FINAL_TASK_STATUSES"].split(",")
             if value
         )
+        max_status_message_bytes = int(
+            os.environ["FABRIC_MCP_MAX_STATUS_MESSAGE_BYTES"]
+        )
+        min_poll_interval_ms = int(os.environ["FABRIC_MCP_MIN_POLL_INTERVAL_MS"])
+        max_poll_interval_ms = int(os.environ["FABRIC_MCP_MAX_POLL_INTERVAL_MS"])
         max_poll_count = int(os.environ["FABRIC_MCP_MAX_POLL_COUNT"])
     except (KeyError, TypeError, ValueError):
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
@@ -185,6 +193,9 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
         allowed_status_codes,
         task_statuses,
         final_task_statuses,
+        max_status_message_bytes,
+        min_poll_interval_ms,
+        max_poll_interval_ms,
         max_poll_count,
     )
     _validate_managed_mcp_limits(limits)
@@ -199,6 +210,9 @@ def _validate_managed_mcp_limits(limits: object) -> None:
         or type(limits.allowed_status_codes) is not tuple
         or type(limits.task_statuses) is not tuple
         or type(limits.final_task_statuses) is not tuple
+        or type(limits.max_status_message_bytes) is not int
+        or type(limits.min_poll_interval_ms) is not int
+        or type(limits.max_poll_interval_ms) is not int
         or type(limits.max_poll_count) is not int
         or limits.max_output_bytes <= 0
         or limits.max_json_depth <= 0
@@ -214,6 +228,9 @@ def _validate_managed_mcp_limits(limits: object) -> None:
             not _valid_routing_name(status) for status in limits.final_task_statuses
         )
         or not frozenset(limits.final_task_statuses).issubset(limits.task_statuses)
+        or limits.max_status_message_bytes <= 0
+        or limits.min_poll_interval_ms <= 0
+        or limits.max_poll_interval_ms < limits.min_poll_interval_ms
         or limits.max_poll_count < 0
     ):
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
@@ -278,7 +295,7 @@ def _validate_managed_mcp_response(
         if type(result) is not dict:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
         if "resultType" in result:
-            if result["resultType"] != "task":
+            if result["resultType"] not in ("task", "complete"):
                 raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
             _validate_mcp_task_result(result, None, limits, require_terminal=False)
         elif "taskId" in result or "status" in result:
@@ -321,6 +338,8 @@ def _validate_mcp_task_result(
     )
     if (
         any(type(key) is not str or key not in allowed_fields for key in result)
+        or type(result.get("resultType")) is not str
+        or result["resultType"] not in ("task", "complete")
         or type(result.get("taskId")) is not str
         or not _valid_routing_name(result["taskId"])
         or (
@@ -333,6 +352,28 @@ def _validate_mcp_task_result(
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
 
     is_terminal = result["status"] in limits.final_task_statuses
+    expected_result_type = "complete" if is_terminal else "task"
+    if result["resultType"] != expected_result_type:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if "statusMessage" in result:
+        status_message = result["statusMessage"]
+        if type(status_message) is not str:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        try:
+            status_message_size = len(status_message.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        if status_message_size > limits.max_status_message_bytes:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if "pollIntervalMs" in result:
+        poll_interval_ms = result["pollIntervalMs"]
+        if (
+            is_terminal
+            or type(poll_interval_ms) is not int
+            or poll_interval_ms < limits.min_poll_interval_ms
+            or poll_interval_ms > limits.max_poll_interval_ms
+        ):
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if require_terminal and not is_terminal:
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     result_value = result.get("result")
