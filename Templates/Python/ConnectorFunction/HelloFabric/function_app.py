@@ -20,6 +20,7 @@ _MCP_ALLOWED_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
 _MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+_MCP_ALLOWED_ENDPOINTS = (_MCP_ENDPOINT,)
 _MCP_VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
 _MCP_REQUEST_LIMIT_BYTES = 5 * 1024 * 1024
 _MCP_INVOKE_TIMEOUT_SECONDS = 5 * 60
@@ -47,6 +48,7 @@ class _McpManagedLimits(NamedTuple):
     task_statuses: Tuple[str, ...]
     final_task_statuses: Tuple[str, ...]
     max_status_message_bytes: int
+    max_routing_name_bytes: int
     min_poll_interval_ms: int
     max_poll_interval_ms: int
     max_poll_count: int
@@ -76,12 +78,12 @@ def _contains_session_id(value: object) -> bool:
     return False
 
 
-def _valid_routing_name(value: object) -> bool:
-    return (
-        type(value) is str
-        and bool(value)
-        and not any(character in "\r\n" or ord(character) < 0x20 for character in value)
-    )
+def _valid_routing_name(value: object, max_bytes: Optional[int] = None) -> bool:
+    if type(value) is not str or not value or not value.isascii():
+        return False
+    if any(ord(character) < 0x21 or ord(character) > 0x7E for character in value):
+        return False
+    return max_bytes is None or len(value) <= max_bytes
 
 
 def _request_meta() -> dict:
@@ -222,6 +224,9 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
         max_status_message_bytes = int(
             os.environ["FABRIC_MCP_MAX_STATUS_MESSAGE_BYTES"]
         )
+        max_routing_name_bytes = int(
+            os.environ["FABRIC_MCP_MAX_ROUTING_NAME_BYTES"]
+        )
         min_poll_interval_ms = int(os.environ["FABRIC_MCP_MIN_POLL_INTERVAL_MS"])
         max_poll_interval_ms = int(os.environ["FABRIC_MCP_MAX_POLL_INTERVAL_MS"])
         max_poll_count = int(os.environ["FABRIC_MCP_MAX_POLL_COUNT"])
@@ -234,6 +239,7 @@ def _load_managed_mcp_limits() -> _McpManagedLimits:
         task_statuses,
         final_task_statuses,
         max_status_message_bytes,
+        max_routing_name_bytes,
         min_poll_interval_ms,
         max_poll_interval_ms,
         max_poll_count,
@@ -251,6 +257,7 @@ def _validate_managed_mcp_limits(limits: object) -> None:
         or type(limits.task_statuses) is not tuple
         or type(limits.final_task_statuses) is not tuple
         or type(limits.max_status_message_bytes) is not int
+        or type(limits.max_routing_name_bytes) is not int
         or type(limits.min_poll_interval_ms) is not int
         or type(limits.max_poll_interval_ms) is not int
         or type(limits.max_poll_count) is not int
@@ -269,6 +276,7 @@ def _validate_managed_mcp_limits(limits: object) -> None:
         )
         or not frozenset(limits.final_task_statuses).issubset(limits.task_statuses)
         or limits.max_status_message_bytes <= 0
+        or limits.max_routing_name_bytes <= 0
         or limits.min_poll_interval_ms < 0
         or limits.max_poll_interval_ms < limits.min_poll_interval_ms
         or limits.max_poll_count < 0
@@ -291,16 +299,24 @@ def _json_depth(value: object) -> int:
 
 def _validate_managed_mcp_response(
     content: bytes,
+    content_type: str,
     request: _McpManagedRequest,
     request_id: object,
     limits: _McpManagedLimits,
 ) -> object:
     if not content:
-        return None
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if len(content) > limits.max_output_bytes:
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     try:
-        message = json.loads(content.decode("utf-8", errors="strict"))
+        decoded = content.decode("utf-8", errors="strict")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type == _JSON_MEDIA_TYPE:
+            message = json.loads(decoded)
+        elif media_type == "text/event-stream":
+            message = _extract_sse_jsonrpc_response(decoded, request_id)
+        else:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if (
@@ -367,6 +383,30 @@ def _validate_managed_mcp_response(
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     return message
+
+
+def _extract_sse_jsonrpc_response(payload: str, request_id: object) -> object:
+    data_lines = []
+    candidates = []
+    for line in payload.splitlines() + [""]:
+        if not line:
+            if data_lines:
+                try:
+                    candidate = json.loads("\n".join(data_lines))
+                except (json.JSONDecodeError, RecursionError):
+                    raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+                if (
+                    type(candidate) is dict
+                    and candidate.get("id") == request_id
+                ):
+                    candidates.append(candidate)
+                data_lines = []
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+    if len(candidates) != 1:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    return candidates[0]
 
 
 def _validate_server_discovery(result: object) -> None:
@@ -438,7 +478,9 @@ def _validate_mcp_task(
         )
         or (not include_result_type and "resultType" in result)
         or type(result.get("taskId")) is not str
-        or not _valid_routing_name(result["taskId"])
+        or not _valid_routing_name(
+            result["taskId"], limits.max_routing_name_bytes
+        )
         or (
             expected_task_id is not None
             and result["taskId"] != expected_task_id
@@ -549,7 +591,15 @@ async def _invoke_managed_mcp(
 ) -> dict:
     request = _prepare_managed_mcp_request(payload)
     _validate_managed_mcp_limits(limits)
+    if request.routing_name is not None and not _valid_routing_name(
+        request.routing_name,
+        limits.max_routing_name_bytes,
+    ):
+        _raise_mcp_contract_error()
     if type(access_token) is not str or not access_token:
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    endpoint = os.environ.get("FABRIC_MCP_ENDPOINT", _MCP_ENDPOINT)
+    if endpoint not in _MCP_ALLOWED_ENDPOINTS:
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -562,12 +612,15 @@ async def _invoke_managed_mcp(
     if request.routing_name is not None:
         headers["Mcp-Name"] = request.routing_name
 
-    response = await session.post(
-        _MCP_ENDPOINT,
-        data=request.body_bytes,
-        headers=headers,
-        timeout=aiohttp.ClientTimeout(total=_MCP_INVOKE_TIMEOUT_SECONDS),
-    )
+    try:
+        response = await session.post(
+            endpoint,
+            data=request.body_bytes,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=_MCP_INVOKE_TIMEOUT_SECONDS),
+        )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     owner = _ManagedMcpResponseOwner(response)
     try:
         if response.status not in limits.allowed_status_codes:
@@ -578,6 +631,7 @@ async def _invoke_managed_mcp(
         )
         message = _validate_managed_mcp_response(
             content,
+            response.headers.get("Content-Type", ""),
             request,
             payload["message"]["id"],
             limits,

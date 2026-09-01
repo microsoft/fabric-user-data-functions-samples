@@ -424,8 +424,15 @@ def _managed_mcp_payload(method="tools/list", params=None, request_id=7):
 
 
 class _ManagedMcpResponse:
-    def __init__(self, body, status=200, release_failures=0):
+    def __init__(
+        self,
+        body,
+        status=200,
+        release_failures=0,
+        content_type="application/json",
+    ):
         self.status = status
+        self.headers = {"Content-Type": content_type}
         self._body = body
         self.content = _FakeContent([body] if body else [])
         self.release_count = 0
@@ -459,6 +466,7 @@ def _managed_mcp_limits(mod):
         ("working", "completed", "failed", "cancelled"),
         ("completed", "failed", "cancelled"),
         4096,
+        256,
         0,
         60_000,
         100,
@@ -1200,7 +1208,7 @@ def test_managed_mcp_server_discovery_requires_protocol_and_tasks_capability():
         },
     }
     assert mod._validate_managed_mcp_response(
-        mod_json(valid), request, 7, _managed_mcp_limits(mod)
+        mod_json(valid), "application/json", request, 7, _managed_mcp_limits(mod)
     ) == valid
 
     incompatible_results = (
@@ -1222,6 +1230,7 @@ def test_managed_mcp_server_discovery_requires_protocol_and_tasks_capability():
             "Managed MCP upstream response is invalid.",
             lambda result=result: mod._validate_managed_mcp_response(
                 mod_json({"jsonrpc": "2.0", "id": 7, "result": result}),
+                "application/json",
                 request,
                 7,
                 _managed_mcp_limits(mod),
@@ -1291,11 +1300,128 @@ def test_managed_mcp_tasks_get_forwards_terminal_error_and_null_response():
     assert result == {"version": 1, "message": error_message}
     assert response.release_count == 1
 
-    _mod, result, response, _session = asyncio.run(
-        _call_managed_mcp(_managed_mcp_payload(), b"", status=204)
-    )
-    assert result == {"version": 1, "message": None}
+    mod = _load_function_app()
+    response = _ManagedMcpResponse(b"", status=204)
+    session = _ManagedMcpSession(response)
+    try:
+        asyncio.run(
+            mod._invoke_managed_mcp(
+                _managed_mcp_payload(),
+                "token",
+                _managed_mcp_limits(mod),
+                session,
+            )
+        )
+    except mod._McpUpstreamError as error:
+        assert str(error) == "Managed MCP upstream response is invalid."
+    else:
+        raise AssertionError("request responses must be nonempty")
     assert response.release_count == 1
+
+
+def test_managed_mcp_accepts_json_and_sse_only_and_selects_matching_response():
+    mod = _load_function_app()
+    request = _managed_mcp_payload()
+    expected = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"tools": []},
+    }
+    notification = '{"jsonrpc":"2.0","method":"notifications/progress"}'
+    sse = (
+        f"data: {notification}\n\n"
+        'data: {"jsonrpc":"2.0","id":8,"result":{"tools":[]}}\n\n'
+        f"data: {mod_json(expected).decode()}\n\n"
+    ).encode()
+    prepared = mod._prepare_managed_mcp_request(request)
+    assert mod._validate_managed_mcp_response(
+        sse,
+        "text/event-stream; charset=utf-8",
+        prepared,
+        7,
+        _managed_mcp_limits(mod),
+    ) == expected
+
+    for content_type in ("", "text/plain"):
+        _assert_fixed_error(
+            mod._McpUpstreamError,
+            "Managed MCP upstream response is invalid.",
+            lambda content_type=content_type: mod._validate_managed_mcp_response(
+                mod_json(expected),
+                content_type,
+                prepared,
+                7,
+                _managed_mcp_limits(mod),
+            ),
+        )
+
+
+def test_managed_mcp_endpoint_and_routing_header_are_allowlisted_and_bounded():
+    mod = _load_function_app()
+    limits = _managed_mcp_limits(mod)._replace(max_routing_name_bytes=8)
+    oversized = _managed_mcp_payload("tasks/get", {"taskId": "123456789"})
+    response = _ManagedMcpResponse(
+        mod_json({"jsonrpc": "2.0", "id": 7, "result": {}})
+    )
+    session = _ManagedMcpSession(response)
+    _assert_fixed_error(
+        mod._McpContractError,
+        "Invalid managed MCP request.",
+        lambda: asyncio.run(
+            mod._invoke_managed_mcp(oversized, "token", limits, session)
+        ),
+    )
+    for task_id in ("café", "has space", "tab\tvalue"):
+        _assert_fixed_error(
+            mod._McpContractError,
+            "Invalid managed MCP request.",
+            lambda task_id=task_id: mod._prepare_managed_mcp_request(
+                _managed_mcp_payload("tasks/get", {"taskId": task_id})
+            ),
+        )
+
+    previous = os.environ.get("FABRIC_MCP_ENDPOINT")
+    os.environ["FABRIC_MCP_ENDPOINT"] = "https://attacker.invalid/mcp"
+    try:
+        _assert_fixed_error(
+            mod._McpConfigurationError,
+            "Managed MCP limits are not configured.",
+            lambda: asyncio.run(
+                mod._invoke_managed_mcp(
+                    _managed_mcp_payload(), "token", _managed_mcp_limits(mod), session
+                )
+            ),
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("FABRIC_MCP_ENDPOINT", None)
+        else:
+            os.environ["FABRIC_MCP_ENDPOINT"] = previous
+
+
+def test_managed_mcp_transport_failures_are_sanitized_without_customer_content():
+    mod = _load_function_app()
+
+    class FailingSession:
+        async def post(self, *_args, **_kwargs):
+            raise mod.aiohttp.ClientConnectionError(
+                "customer-secret-upstream-detail"
+            )
+
+    try:
+        asyncio.run(
+            mod._invoke_managed_mcp(
+                _managed_mcp_payload(),
+                "token",
+                _managed_mcp_limits(mod),
+                FailingSession(),
+            )
+        )
+    except mod._McpUpstreamError as error:
+        assert str(error) == "Managed MCP upstream response is invalid."
+        assert "customer-secret" not in str(error)
+    else:
+        raise AssertionError("transport failure must be sanitized")
 
 
 def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
@@ -1307,6 +1433,7 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
         "FABRIC_MCP_TASK_STATUSES",
         "FABRIC_MCP_FINAL_TASK_STATUSES",
         "FABRIC_MCP_MAX_STATUS_MESSAGE_BYTES",
+        "FABRIC_MCP_MAX_ROUTING_NAME_BYTES",
         "FABRIC_MCP_MIN_POLL_INTERVAL_MS",
         "FABRIC_MCP_MAX_POLL_INTERVAL_MS",
         "FABRIC_MCP_MAX_POLL_COUNT",
@@ -1325,6 +1452,7 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
             "working,completed,failed,cancelled",
             "completed,failed,cancelled",
             "4096",
+            "256",
             "0",
             "60000",
             "100",
@@ -1373,6 +1501,7 @@ def test_managed_mcp_rejects_unknown_status_oversized_depth_and_session():
             "Managed MCP upstream response is invalid.",
             lambda body=body: mod._validate_managed_mcp_response(
                 body,
+                "application/json",
                 prepared,
                 7,
                 shallow_limits,
@@ -1434,7 +1563,7 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
     )
     for message in valid:
         assert mod._validate_managed_mcp_response(
-            mod_json(message), request, 7, limits
+            mod_json(message), "application/json", request, 7, limits
         ) == message
 
     invalid_results = (
@@ -1546,6 +1675,7 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "Managed MCP upstream response is invalid.",
             lambda result=result: mod._validate_managed_mcp_response(
                 mod_json({"jsonrpc": "2.0", "id": 7, "result": result}),
+                "application/json",
                 request,
                 7,
                 limits,
@@ -1565,6 +1695,7 @@ def test_managed_mcp_cancel_accepts_authoritative_completion_envelope():
     }
     assert mod._validate_managed_mcp_response(
         mod_json(message),
+        "application/json",
         request,
         7,
         _managed_mcp_limits(mod),
@@ -1602,7 +1733,7 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
     }
     for message in (synchronous, task):
         assert mod._validate_managed_mcp_response(
-            mod_json(message), request, 7, limits
+            mod_json(message), "application/json", request, 7, limits
         ) == message
 
     malformed_results = (
@@ -1618,6 +1749,7 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
             "Managed MCP upstream response is invalid.",
             lambda result=result: mod._validate_managed_mcp_response(
                 mod_json({"jsonrpc": "2.0", "id": 7, "result": result}),
+                "application/json",
                 request,
                 7,
                 limits,
@@ -1654,6 +1786,7 @@ def test_managed_mcp_deep_json_uses_fixed_content_free_errors():
         "Managed MCP upstream response is invalid.",
         lambda: mod._validate_managed_mcp_response(
             deep_response,
+            "application/json",
             prepared,
             7,
             _managed_mcp_limits(mod)._replace(max_json_depth=depth + 10),

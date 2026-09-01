@@ -91,7 +91,14 @@ def main():
         type(payload) is not dict
         or payload.get("jsonrpc") != "2.0"
         or payload.get("id") != 1
-        or ("result" not in payload and "error" not in payload)
+        or type(payload.get("result")) is not dict
+        or PROTOCOL_VERSION not in payload["result"].get("supportedVersions", ())
+        or type(payload["result"].get("capabilities")) is not dict
+        or type(
+            payload["result"]["capabilities"].get("extensions")
+        ) is not dict
+        or "io.modelcontextprotocol/tasks"
+        not in payload["result"]["capabilities"]["extensions"]
     ):
         print("FAIL: invalid JSON-RPC response", file=sys.stderr)
         return 1
