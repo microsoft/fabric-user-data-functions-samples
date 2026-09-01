@@ -277,8 +277,12 @@ def _validate_managed_mcp_response(
     elif request.method == "tools/call":
         if type(result) is not dict:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-        if "taskId" in result or "status" in result:
+        if "resultType" in result:
+            if result["resultType"] != "task":
+                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
             _validate_mcp_task_result(result, None, limits, require_terminal=False)
+        elif "taskId" in result or "status" in result:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     elif request.method == "tasks/get":
         _validate_mcp_task_result(
             result,
@@ -286,14 +290,12 @@ def _validate_managed_mcp_response(
             limits,
             require_terminal=False,
         )
-    else:
-        _validate_mcp_task_result(
-            result,
-            request.routing_name,
-            limits,
-            require_terminal=True,
-            require_terminal_payload=False,
-        )
+    elif (
+        type(result) is not dict
+        or tuple(result) != ("resultType",)
+        or result["resultType"] != "complete"
+    ):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     return message
 
 

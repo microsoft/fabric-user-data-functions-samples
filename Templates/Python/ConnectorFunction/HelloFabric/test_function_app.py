@@ -1348,6 +1348,71 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
         )
 
 
+def test_managed_mcp_cancel_accepts_authoritative_completion_envelope():
+    mod = _load_function_app()
+    request = mod._prepare_managed_mcp_request(
+        _managed_mcp_payload("tasks/cancel", {"taskId": "task-123"})
+    )
+    message = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"resultType": "complete"},
+    }
+    assert mod._validate_managed_mcp_response(
+        mod_json(message),
+        request,
+        7,
+        _managed_mcp_limits(mod),
+    ) == message
+
+
+def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
+    mod = _load_function_app()
+    request = mod._prepare_managed_mcp_request(
+        _managed_mcp_payload(
+            "tools/call",
+            {"name": "tool", "arguments": {}},
+        )
+    )
+    limits = _managed_mcp_limits(mod)
+    synchronous = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"content": [], "isError": False},
+    }
+    task = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+            "resultType": "task",
+            "taskId": "task-123",
+            "status": "working",
+        },
+    }
+    for message in (synchronous, task):
+        assert mod._validate_managed_mcp_response(
+            mod_json(message), request, 7, limits
+        ) == message
+
+    malformed_results = (
+        {"resultType": "task"},
+        {"resultType": "invented"},
+        {"resultType": "complete"},
+        {"taskId": "task-123", "status": "working"},
+    )
+    for result in malformed_results:
+        _assert_fixed_error(
+            mod._McpUpstreamError,
+            "Managed MCP upstream response is invalid.",
+            lambda result=result: mod._validate_managed_mcp_response(
+                mod_json({"jsonrpc": "2.0", "id": 7, "result": result}),
+                request,
+                7,
+                limits,
+            ),
+        )
+
+
 def test_managed_mcp_deep_json_uses_fixed_content_free_errors():
     mod = _load_function_app()
     depth = sys.getrecursionlimit() * 4
