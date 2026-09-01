@@ -2,6 +2,7 @@ import fabric.functions as fn
 import aiohttp
 import asyncio
 import json
+import logging
 import os
 import uuid
 from typing import NamedTuple, Optional, Tuple
@@ -20,13 +21,21 @@ _MCP_ALLOWED_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
 _MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
-_MCP_ALLOWED_ENDPOINTS = (_MCP_ENDPOINT,)
 _MCP_VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+_MCP_PROFILES = {"daily": (_MCP_ENDPOINT, _MCP_VARIANTS)}
 _MCP_REQUEST_LIMIT_BYTES = 5 * 1024 * 1024
 _MCP_INVOKE_TIMEOUT_SECONDS = 5 * 60
+_MCP_MAX_SSE_EVENTS = 256
+_MCP_MAX_SSE_LINES_PER_EVENT = 8
 _MCP_CONTRACT_ERROR_MESSAGE = "Invalid managed MCP request."
 _MCP_CONFIGURATION_ERROR_MESSAGE = "Managed MCP limits are not configured."
 _MCP_UPSTREAM_ERROR_MESSAGE = "Managed MCP upstream response is invalid."
+_MCP_REMOTE_ERROR_MESSAGE = "Managed MCP upstream request failed."
+_MCP_LOGGER = logging.getLogger(__name__)
+_MCP_TELEMETRY_EVENTS = frozenset(
+    ("upstream_response", "request_completed", "request_failed")
+)
+_MCP_TELEMETRY_FAILURES = frozenset(("transport", "protocol"))
 
 
 class _McpContractError(ValueError):
@@ -265,7 +274,7 @@ def _validate_managed_mcp_limits(limits: object) -> None:
         or limits.max_json_depth <= 0
         or not limits.allowed_status_codes
         or any(
-            type(status) is not int or status < 100 or status > 599
+            type(status) is not int or status < 200 or status > 299
             for status in limits.allowed_status_codes
         )
         or not limits.task_statuses
@@ -297,6 +306,73 @@ def _json_depth(value: object) -> int:
     return maximum
 
 
+def _managed_mcp_profile() -> Tuple[str, str]:
+    profile = _MCP_PROFILES.get(os.environ.get("FABRIC_MCP_PROFILE", "daily"))
+    if profile is None:
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    endpoint, variants = profile
+    parsed = urlparse(endpoint)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "fabriciq.svc.cloud.microsoft"
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/v1/mcp/fabriciq"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or variants != _MCP_VARIANTS
+    ):
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    return endpoint, variants
+
+
+def _mcp_media_type(content_type: object) -> str:
+    if type(content_type) is not str or not content_type:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    parts = [part.strip().lower() for part in content_type.split(";")]
+    media_type = parts[0]
+    if media_type not in (_JSON_MEDIA_TYPE, "text/event-stream"):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if len(parts) > 2 or (len(parts) == 2 and parts[1] != "charset=utf-8"):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    return media_type
+
+
+def _emit_mcp_telemetry(
+    event: str,
+    *,
+    method: Optional[str] = None,
+    status_code: Optional[int] = None,
+    transport: Optional[str] = None,
+    failure: Optional[str] = None,
+) -> None:
+    if (
+        event not in _MCP_TELEMETRY_EVENTS
+        or (method is not None and method not in _MCP_ALLOWED_METHODS)
+        or (
+            status_code is not None
+            and (type(status_code) is not int or not 100 <= status_code <= 599)
+        )
+        or (transport is not None and transport not in ("json", "sse"))
+        or (failure is not None and failure not in _MCP_TELEMETRY_FAILURES)
+    ):
+        return
+    fields = {
+        key: value
+        for key, value in (
+            ("mcp_event", event),
+            ("mcp_method", method),
+            ("mcp_status_code", status_code),
+            ("mcp_transport", transport),
+            ("mcp_failure", failure),
+        )
+        if value is not None
+    }
+    _MCP_LOGGER.info("managed_mcp_operation", extra=fields)
+
+
 def _validate_managed_mcp_response(
     content: bytes,
     content_type: str,
@@ -310,7 +386,7 @@ def _validate_managed_mcp_response(
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     try:
         decoded = content.decode("utf-8", errors="strict")
-        media_type = content_type.split(";", 1)[0].strip().lower()
+        media_type = _mcp_media_type(content_type)
         if media_type == _JSON_MEDIA_TYPE:
             message = json.loads(decoded)
         elif media_type == "text/event-stream":
@@ -341,7 +417,14 @@ def _validate_managed_mcp_response(
             or type(error["message"]) is not str
         ):
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-        return message
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": error["code"],
+                "message": _MCP_REMOTE_ERROR_MESSAGE,
+            },
+        }
 
     result = message["result"]
     if request.method == "server/discover":
@@ -386,27 +469,69 @@ def _validate_managed_mcp_response(
 
 
 def _extract_sse_jsonrpc_response(payload: str, request_id: object) -> object:
-    data_lines = []
-    candidates = []
-    for line in payload.splitlines() + [""]:
-        if not line:
-            if data_lines:
-                try:
-                    candidate = json.loads("\n".join(data_lines))
-                except (json.JSONDecodeError, RecursionError):
-                    raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-                if (
-                    type(candidate) is dict
-                    and candidate.get("id") == request_id
-                ):
-                    candidates.append(candidate)
-                data_lines = []
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line[5:].lstrip(" "))
-    if len(candidates) != 1:
+    if "\r" in payload.replace("\r\n", ""):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-    return candidates[0]
+    normalized = payload.replace("\r\n", "\n")
+    if not normalized.endswith("\n\n"):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    events = normalized[:-2].split("\n\n")
+    if (
+        not events
+        or len(events) > _MCP_MAX_SSE_EVENTS
+        or any(not event for event in events)
+    ):
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+
+    matching_response = None
+    for event in events:
+        lines = event.split("\n")
+        if len(lines) > _MCP_MAX_SSE_LINES_PER_EVENT:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        event_name = None
+        data_lines = []
+        for line in lines:
+            if line.startswith("event:"):
+                if event_name is not None:
+                    raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+                event_name = line[6:].lstrip(" ")
+                if event_name != "message":
+                    raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
+            else:
+                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        if event_name != "message" or not data_lines:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        try:
+            candidate = json.loads("\n".join(data_lines))
+        except (json.JSONDecodeError, RecursionError):
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        if type(candidate) is not dict or candidate.get("jsonrpc") != "2.0":
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        if "id" in candidate:
+            if (
+                type(candidate["id"]) is not type(request_id)
+                or candidate["id"] != request_id
+            ):
+                continue
+            if matching_response is not None:
+                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+            matching_response = candidate
+            continue
+        if (
+            set(candidate)
+            not in (
+                {"jsonrpc", "method"},
+                {"jsonrpc", "method", "params"},
+            )
+            or type(candidate.get("method")) is not str
+            or not candidate["method"].startswith("notifications/")
+            or ("params" in candidate and type(candidate["params"]) is not dict)
+        ):
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    if matching_response is None:
+        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+    return matching_response
 
 
 def _validate_server_discovery(result: object) -> None:
@@ -598,16 +723,14 @@ async def _invoke_managed_mcp(
         _raise_mcp_contract_error()
     if type(access_token) is not str or not access_token:
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
-    endpoint = os.environ.get("FABRIC_MCP_ENDPOINT", _MCP_ENDPOINT)
-    if endpoint not in _MCP_ALLOWED_ENDPOINTS:
-        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    endpoint, variants = _managed_mcp_profile()
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": _JSON_MEDIA_TYPE,
-        "Accept": _JSON_MEDIA_TYPE,
+        "Accept": f"{_JSON_MEDIA_TYPE},text/event-stream",
         "MCP-Protocol-Version": _MCP_PROTOCOL_VERSION,
         "Mcp-Method": request.method,
-        "X-Variants": _MCP_VARIANTS,
+        "X-Variants": variants,
     }
     if request.routing_name is not None:
         headers["Mcp-Name"] = request.routing_name
@@ -618,13 +741,24 @@ async def _invoke_managed_mcp(
             data=request.body_bytes,
             headers=headers,
             timeout=aiohttp.ClientTimeout(total=_MCP_INVOKE_TIMEOUT_SECONDS),
+            allow_redirects=False,
         )
     except (aiohttp.ClientError, asyncio.TimeoutError):
+        _emit_mcp_telemetry(
+            "request_failed", method=request.method, failure="transport"
+        )
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     owner = _ManagedMcpResponseOwner(response)
     try:
         if response.status not in limits.allowed_status_codes:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        media_type = _mcp_media_type(response.headers.get("Content-Type", ""))
+        _emit_mcp_telemetry(
+            "upstream_response",
+            method=request.method,
+            status_code=response.status,
+            transport="json" if media_type == _JSON_MEDIA_TYPE else "sse",
+        )
         content = await _read_bounded_mcp_response(
             response,
             limits.max_output_bytes,
@@ -636,6 +770,12 @@ async def _invoke_managed_mcp(
             payload["message"]["id"],
             limits,
         )
+        _emit_mcp_telemetry("request_completed", method=request.method)
+    except _McpUpstreamError:
+        _emit_mcp_telemetry(
+            "request_failed", method=request.method, failure="protocol"
+        )
+        raise
     finally:
         owner.release_with_retry()
     return {"version": 1, "message": message}

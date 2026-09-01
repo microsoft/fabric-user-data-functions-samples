@@ -453,8 +453,15 @@ class _ManagedMcpSession:
         self.response = response
         self.calls = []
 
-    async def post(self, url, data=None, headers=None, timeout=None):
-        self.calls.append((url, data, headers, timeout))
+    async def post(
+        self,
+        url,
+        data=None,
+        headers=None,
+        timeout=None,
+        allow_redirects=True,
+    ):
+        self.calls.append((url, data, headers, timeout, allow_redirects))
         return self.response
 
 
@@ -462,7 +469,7 @@ def _managed_mcp_limits(mod):
     return mod._McpManagedLimits(
         64 * 1024,
         32,
-        (200, 204, 400),
+        (200, 202, 204),
         ("working", "completed", "failed", "cancelled"),
         ("completed", "failed", "cancelled"),
         4096,
@@ -1264,7 +1271,7 @@ def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
     assert result == {"version": 1, "message": response_message}
     assert response.release_count == 1
     assert len(session.calls) == 1
-    url, body, headers, timeout = session.calls[0]
+    url, body, headers, timeout, allow_redirects = session.calls[0]
     assert url == "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
     assert headers["Authorization"] == "Bearer secret-test-token"
     assert headers["MCP-Protocol-Version"] == "2026-07-28"
@@ -1273,8 +1280,10 @@ def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
     assert headers["X-Variants"] == (
         "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
     )
+    assert headers["Accept"] == "application/json,text/event-stream"
     assert "X-Variant" not in headers
     assert timeout.total == 300
+    assert allow_redirects is False
     assert b"secret-test-token" not in body
 
 
@@ -1288,16 +1297,30 @@ def test_managed_mcp_tasks_get_forwards_terminal_error_and_null_response():
     error_message = {
         "jsonrpc": "2.0",
         "id": 7,
-        "error": {"code": -32001, "message": "task failed"},
+        "error": {
+            "code": -32001,
+            "message": "customer task failed",
+            "data": {"customerContent": "secret"},
+        },
     }
     _mod, result, response, _session = asyncio.run(
         _call_managed_mcp(
             _managed_mcp_payload("tasks/get", {"taskId": "task-1"}),
             mod_json(error_message),
-            status=400,
+            status=200,
         )
     )
-    assert result == {"version": 1, "message": error_message}
+    assert result == {
+        "version": 1,
+        "message": {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "error": {
+                "code": -32001,
+                "message": "Managed MCP upstream request failed.",
+            },
+        },
+    }
     assert response.release_count == 1
 
     mod = _load_function_app()
@@ -1329,9 +1352,8 @@ def test_managed_mcp_accepts_json_and_sse_only_and_selects_matching_response():
     }
     notification = '{"jsonrpc":"2.0","method":"notifications/progress"}'
     sse = (
-        f"data: {notification}\n\n"
-        'data: {"jsonrpc":"2.0","id":8,"result":{"tools":[]}}\n\n'
-        f"data: {mod_json(expected).decode()}\n\n"
+        f"event: message\ndata: {notification}\n\n"
+        f"event: message\ndata: {mod_json(expected).decode()}\n\n"
     ).encode()
     prepared = mod._prepare_managed_mcp_request(request)
     assert mod._validate_managed_mcp_response(
@@ -1354,6 +1376,60 @@ def test_managed_mcp_accepts_json_and_sse_only_and_selects_matching_response():
                 _managed_mcp_limits(mod),
             ),
         )
+
+
+def test_managed_mcp_sse_rejects_unbounded_or_unknown_framing():
+    mod = _load_function_app()
+    prepared = mod._prepare_managed_mcp_request(_managed_mcp_payload())
+    response = 'event: message\ndata: {"jsonrpc":"2.0","id":7,"result":{"tools":[]}}\n\n'
+    notification = 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
+    invalid = (
+        response.rstrip("\n"),
+        response + response,
+        notification,
+        'event: other\ndata: {"jsonrpc":"2.0","id":7,"result":{}}\n\n',
+        'event: message\nid: 1\ndata: {"jsonrpc":"2.0","id":7,"result":{}}\n\n',
+        'event: message\ndata: {"jsonrpc":"2.0","id":8,"result":{}}\n\n',
+        'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":[]}\n\n',
+        "event: message\ndata: not-json\n\n",
+        response.replace("\n", "\r", 1),
+        notification * (mod._MCP_MAX_SSE_EVENTS + 1),
+    )
+    for body in invalid:
+        _assert_fixed_error(
+            mod._McpUpstreamError,
+            "Managed MCP upstream response is invalid.",
+            lambda body=body: mod._validate_managed_mcp_response(
+                body.encode(),
+                "text/event-stream",
+                prepared,
+                7,
+                _managed_mcp_limits(mod),
+            ),
+        )
+
+
+def test_smoke_parser_matches_production_sse_and_json_contract():
+    import smoke_fabric_mcp as smoke
+
+    expected = {"jsonrpc": "2.0", "id": 1, "result": {}}
+    encoded = mod_json(expected)
+    assert smoke.parse_response(encoded, "application/json", 1) == expected
+    framed = b"event: message\ndata: " + encoded + b"\n\n"
+    assert smoke.parse_response(framed, "text/event-stream", 1) == expected
+    for body, content_type in (
+        (b"", "application/json"),
+        (framed[:-1], "text/event-stream"),
+        (framed + framed, "text/event-stream"),
+        (b"{}", "text/plain"),
+        (b"x" * (smoke.MAX_RESPONSE_BYTES + 1), "application/json"),
+    ):
+        try:
+            smoke.parse_response(body, content_type, 1)
+        except (ValueError, UnicodeError):
+            pass
+        else:
+            raise AssertionError("smoke parser must fail closed")
 
 
 def test_managed_mcp_endpoint_and_routing_header_are_allowlisted_and_bounded():
@@ -1380,8 +1456,8 @@ def test_managed_mcp_endpoint_and_routing_header_are_allowlisted_and_bounded():
             ),
         )
 
-    previous = os.environ.get("FABRIC_MCP_ENDPOINT")
-    os.environ["FABRIC_MCP_ENDPOINT"] = "https://attacker.invalid/mcp"
+    previous = os.environ.get("FABRIC_MCP_PROFILE")
+    os.environ["FABRIC_MCP_PROFILE"] = "attacker"
     try:
         _assert_fixed_error(
             mod._McpConfigurationError,
@@ -1394,9 +1470,9 @@ def test_managed_mcp_endpoint_and_routing_header_are_allowlisted_and_bounded():
         )
     finally:
         if previous is None:
-            os.environ.pop("FABRIC_MCP_ENDPOINT", None)
+            os.environ.pop("FABRIC_MCP_PROFILE", None)
         else:
-            os.environ["FABRIC_MCP_ENDPOINT"] = previous
+            os.environ["FABRIC_MCP_PROFILE"] = previous
 
 
 def test_managed_mcp_transport_failures_are_sanitized_without_customer_content():
@@ -1424,6 +1500,42 @@ def test_managed_mcp_transport_failures_are_sanitized_without_customer_content()
         raise AssertionError("transport failure must be sanitized")
 
 
+def test_managed_mcp_telemetry_is_content_safe_and_allowlisted():
+    mod = _load_function_app()
+
+    class RecordingLogger:
+        def __init__(self):
+            self.events = []
+
+        def info(self, message, extra=None):
+            self.events.append((message, extra))
+
+    original = mod._MCP_LOGGER
+    logger = RecordingLogger()
+    mod._MCP_LOGGER = logger
+    try:
+        mod._emit_mcp_telemetry(
+            "upstream_response",
+            method="server/discover",
+            status_code=200,
+            transport="sse",
+        )
+        mod._emit_mcp_telemetry("unknown", method="customer-secret")
+    finally:
+        mod._MCP_LOGGER = original
+    assert logger.events == [
+        (
+            "managed_mcp_operation",
+            {
+                "mcp_event": "upstream_response",
+                "mcp_method": "server/discover",
+                "mcp_status_code": 200,
+                "mcp_transport": "sse",
+            },
+        )
+    ]
+
+
 def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
     mod = _load_function_app()
     names = (
@@ -1448,7 +1560,7 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
         values = (
             "65536",
             "32",
-            "200,204,400",
+            "200,202,204",
             "working,completed,failed,cancelled",
             "completed,failed,cancelled",
             "4096",
