@@ -1390,6 +1390,10 @@ def test_managed_mcp_sse_rejects_unbounded_or_unknown_framing():
         'event: other\ndata: {"jsonrpc":"2.0","id":7,"result":{}}\n\n',
         'event: message\nid: 1\ndata: {"jsonrpc":"2.0","id":7,"result":{}}\n\n',
         'event: message\ndata: {"jsonrpc":"2.0","id":8,"result":{}}\n\n',
+        (
+            'event: message\ndata: {"jsonrpc":"2.0","id":8,"result":{}}\n\n'
+            + response
+        ),
         'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":[]}\n\n',
         "event: message\ndata: not-json\n\n",
         response.replace("\n", "\r", 1),

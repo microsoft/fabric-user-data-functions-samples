@@ -513,7 +513,7 @@ def _extract_sse_jsonrpc_response(payload: str, request_id: object) -> object:
                 type(candidate["id"]) is not type(request_id)
                 or candidate["id"] != request_id
             ):
-                continue
+                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
             if matching_response is not None:
                 raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
             matching_response = candidate
