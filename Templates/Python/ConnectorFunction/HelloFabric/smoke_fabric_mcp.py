@@ -9,9 +9,15 @@ import urllib.error
 import urllib.request
 
 
-ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
 PROTOCOL_VERSION = "2026-07-28"
 VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
+PROFILES = {
+    "prod": "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+    "msit": "https://msitapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+    "dxt": "https://dxtapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+    "daily": "https://dailyapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+    "edog": "https://powerbiapi.analysis-df.windows.net/v1/mcp/fabriciq",
+}
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_SSE_EVENTS = 256
 MAX_SSE_LINES_PER_EVENT = 8
@@ -123,6 +129,13 @@ def access_token():
     return token
 
 
+def endpoint():
+    profile = os.environ.get("FABRIC_MCP_PROFILE")
+    if profile not in PROFILES:
+        raise RuntimeError("FABRIC_MCP_PROFILE is missing or invalid.")
+    return PROFILES[profile]
+
+
 def main():
     if os.environ.get("FABRIC_MCP_DAILY_SMOKE") != "1":
         print("Skipped: set FABRIC_MCP_DAILY_SMOKE=1 to run.")
@@ -146,13 +159,18 @@ def main():
         },
     }
     try:
+        target_endpoint = endpoint()
+    except RuntimeError:
+        print("FAIL: FABRIC_MCP_PROFILE is missing or invalid.", file=sys.stderr)
+        return 1
+    try:
         token = access_token()
     except (FileNotFoundError, subprocess.CalledProcessError, RuntimeError) as error:
         print(f"FAIL: access token unavailable ({type(error).__name__})", file=sys.stderr)
         return 1
 
     request = urllib.request.Request(
-        ENDPOINT,
+        target_endpoint,
         data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {token}",

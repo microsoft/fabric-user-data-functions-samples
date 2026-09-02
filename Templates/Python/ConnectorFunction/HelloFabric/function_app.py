@@ -20,9 +20,29 @@ _MCP_PROTOCOL_VERSION = "2026-07-28"
 _MCP_ALLOWED_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
-_MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
 _MCP_VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
-_MCP_PROFILES = {"daily": (_MCP_ENDPOINT, _MCP_VARIANTS)}
+_MCP_PROFILES = {
+    "prod": (
+        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        _MCP_VARIANTS,
+    ),
+    "msit": (
+        "https://msitapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        _MCP_VARIANTS,
+    ),
+    "dxt": (
+        "https://dxtapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        _MCP_VARIANTS,
+    ),
+    "daily": (
+        "https://dailyapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        _MCP_VARIANTS,
+    ),
+    "edog": (
+        "https://powerbiapi.analysis-df.windows.net/v1/mcp/fabriciq",
+        _MCP_VARIANTS,
+    ),
+}
 _MCP_REQUEST_LIMIT_BYTES = 5 * 1024 * 1024
 _MCP_INVOKE_TIMEOUT_SECONDS = 5 * 60
 _MCP_MAX_SSE_EVENTS = 256
@@ -307,21 +327,18 @@ def _json_depth(value: object) -> int:
 
 
 def _managed_mcp_profile() -> Tuple[str, str]:
-    profile = _MCP_PROFILES.get(os.environ.get("FABRIC_MCP_PROFILE", "daily"))
+    try:
+        profile_name = os.environ["FABRIC_MCP_PROFILE"]
+    except KeyError:
+        raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
+    profile = _MCP_PROFILES.get(profile_name)
     if profile is None:
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
     endpoint, variants = profile
-    parsed = urlparse(endpoint)
     if (
-        parsed.scheme != "https"
-        or parsed.hostname != "fabriciq.svc.cloud.microsoft"
-        or parsed.port is not None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path != "/v1/mcp/fabriciq"
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
+        type(endpoint) is not str
+        or endpoint
+        not in tuple(candidate_endpoint for candidate_endpoint, _ in _MCP_PROFILES.values())
         or variants != _MCP_VARIANTS
     ):
         raise _McpConfigurationError(_MCP_CONFIGURATION_ERROR_MESSAGE) from None
@@ -815,11 +832,16 @@ async def _get_session() -> aiohttp.ClientSession:
     return _session
 
 
+@udf.generic_connection(argName="fabricClient", audienceType="Fabric")
 @udf.function()
-async def rayfin_fabric_mcp_v1(payload: dict, accesstoken: str) -> dict:
+async def rayfin_fabric_mcp_v1(
+    payload: dict,
+    fabricClient: fn.FabricItem,
+) -> dict:
     limits = _load_managed_mcp_limits()
     session = await _get_session()
-    return await _invoke_managed_mcp(payload, accesstoken, limits, session)
+    access_token = fabricClient.get_access_token().get_token().token
+    return await _invoke_managed_mcp(payload, access_token, limits, session)
 
 
 class _ResponseBodyIterator:

@@ -109,10 +109,10 @@ _ARCHIVE_NON_TARGET_GOLDEN = {
         284,
     ),
     "fabric_lib/functions.metadata": (
-        "ac256faf0bfc4e92e1fb7ec732111095ce88bd8616ebdb06011c3dafdd2a8030",
-        3017962651,
-        302,
-        1246,
+        "0f5ae3609ebdd74cdab24658bdc77977e4d2c5be92a6f984a04e0909c6594222",
+        2787323698,
+        309,
+        1295,
     ),
 }
 
@@ -156,6 +156,7 @@ def _install_fabric_stub():
 
 def _load_function_app():
     _install_fabric_stub()
+    os.environ.setdefault("FABRIC_MCP_PROFILE", "daily")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     return importlib.import_module("function_app")
 
@@ -297,6 +298,18 @@ class _FakeCredential:
 class _FakeKustoClient:
     def get_access_token(self):
         return _FakeCredential()
+
+
+class _FakeFabricClient:
+    class _Credential:
+        class _Token:
+            token = "fake-fabric-token"
+
+        def get_token(self):
+            return self._Token()
+
+    def get_access_token(self):
+        return self._Credential()
 
 
 def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
@@ -1272,7 +1285,9 @@ def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
     assert response.release_count == 1
     assert len(session.calls) == 1
     url, body, headers, timeout, allow_redirects = session.calls[0]
-    assert url == "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+    assert url == (
+        "https://dailyapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq"
+    )
     assert headers["Authorization"] == "Bearer secret-test-token"
     assert headers["MCP-Protocol-Version"] == "2026-07-28"
     assert headers["Mcp-Method"] == "tasks/get"
@@ -1477,6 +1492,102 @@ def test_managed_mcp_endpoint_and_routing_header_are_allowlisted_and_bounded():
             os.environ.pop("FABRIC_MCP_PROFILE", None)
         else:
             os.environ["FABRIC_MCP_PROFILE"] = previous
+
+
+def test_managed_mcp_profiles_are_explicit_and_cover_all_authoritative_rings():
+    import smoke_fabric_mcp as smoke
+
+    mod = _load_function_app()
+    expected = {
+        "prod": "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+        "msit": "https://msitapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        "dxt": "https://dxtapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        "daily": "https://dailyapi.fabriciq.svc.cloud.dev.microsoft/v1/mcp/fabriciq",
+        "edog": "https://powerbiapi.analysis-df.windows.net/v1/mcp/fabriciq",
+    }
+    previous = os.environ.pop("FABRIC_MCP_PROFILE", None)
+    try:
+        _assert_fixed_error(
+            mod._McpConfigurationError,
+            "Managed MCP limits are not configured.",
+            mod._managed_mcp_profile,
+        )
+        try:
+            smoke.endpoint()
+        except RuntimeError as error:
+            assert str(error) == "FABRIC_MCP_PROFILE is missing or invalid."
+        else:
+            raise AssertionError("smoke must require an explicit profile")
+        assert set(mod._MCP_PROFILES) == set(expected)
+        assert smoke.PROFILES == expected
+        for profile, endpoint in expected.items():
+            os.environ["FABRIC_MCP_PROFILE"] = profile
+            assert mod._managed_mcp_profile() == (endpoint, mod._MCP_VARIANTS)
+            assert smoke.endpoint() == endpoint
+    finally:
+        os.environ.pop("FABRIC_MCP_PROFILE", None)
+        if previous is not None:
+            os.environ["FABRIC_MCP_PROFILE"] = previous
+
+
+def test_managed_mcp_udf_uses_fabric_generic_connection_token():
+    mod = _load_function_app()
+    limits = _managed_mcp_limits(mod)
+    session = object()
+    captured = {}
+    original_limits = mod._load_managed_mcp_limits
+    original_session = mod._get_session
+    original_invoke = mod._invoke_managed_mcp
+
+    async def fake_get_session():
+        return session
+
+    async def fake_invoke(payload, access_token, actual_limits, actual_session):
+        captured.update(
+            payload=payload,
+            access_token=access_token,
+            limits=actual_limits,
+            session=actual_session,
+        )
+        return {"version": 1, "message": None}
+
+    mod._load_managed_mcp_limits = lambda: limits
+    mod._get_session = fake_get_session
+    mod._invoke_managed_mcp = fake_invoke
+    payload = _managed_mcp_payload()
+    try:
+        result = asyncio.run(
+            mod.rayfin_fabric_mcp_v1(payload, _FakeFabricClient())
+        )
+    finally:
+        mod._load_managed_mcp_limits = original_limits
+        mod._get_session = original_session
+        mod._invoke_managed_mcp = original_invoke
+
+    assert result == {"version": 1, "message": None}
+    assert captured == {
+        "payload": payload,
+        "access_token": "fake-fabric-token",
+        "limits": limits,
+        "session": session,
+    }
+    metadata = mod.json.loads(
+        (Path(__file__).resolve().parent / "functions.metadata").read_text(
+            encoding="utf-8"
+        )
+    )
+    managed = next(
+        item for item in metadata if item["name"] == "rayfin_fabric_mcp_v1"
+    )
+    assert managed["bindings"][-1] == {
+        "name": "fabricClient",
+        "direction": "In",
+        "type": "FabricItem",
+        "audienceType": "Fabric",
+    }
+    assert managed["fabricProperties"]["fabricFunctionParameters"] == [
+        {"name": "payload", "dataType": "dict"}
+    ]
 
 
 def test_managed_mcp_transport_failures_are_sanitized_without_customer_content():
