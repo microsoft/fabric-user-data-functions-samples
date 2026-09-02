@@ -20,6 +20,10 @@ _MCP_PROTOCOL_VERSION = "2026-07-28"
 _MCP_ALLOWED_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
+_MCP_TASK_STATUSES = frozenset(
+    ("working", "input_required", "completed", "failed", "cancelled")
+)
+_MCP_FINAL_TASK_STATUSES = frozenset(("completed", "failed", "cancelled"))
 _MCP_VARIANTS = "Fabric.Routing.M365.V2,Fabric.DisableMsitRedirect"
 _MCP_PROFILES = {
     "prod": (
@@ -308,8 +312,14 @@ def _validate_managed_mcp_limits(limits: object) -> None:
             for status in limits.allowed_status_codes
         )
         or not limits.task_statuses
+        or len(limits.task_statuses) != len(frozenset(limits.task_statuses))
+        or not frozenset(limits.task_statuses).issubset(_MCP_TASK_STATUSES)
         or any(not _valid_routing_name(status) for status in limits.task_statuses)
         or not limits.final_task_statuses
+        or len(limits.final_task_statuses)
+        != len(frozenset(limits.final_task_statuses))
+        or frozenset(limits.final_task_statuses)
+        != frozenset(limits.task_statuses).intersection(_MCP_FINAL_TASK_STATUSES)
         or any(
             not _valid_routing_name(status) for status in limits.final_task_statuses
         )
@@ -605,6 +615,10 @@ def _validate_call_tool_result(result: object) -> None:
         or any(type(key) is not str or key not in allowed_fields for key in result)
         or type(result.get("content")) is not list
         or ("isError" in result and type(result["isError"]) is not bool)
+        or (
+            "structuredContent" in result
+            and type(result["structuredContent"]) is not dict
+        )
         or ("_meta" in result and type(result["_meta"]) is not dict)
         or any(not _valid_content_block(block) for block in result["content"])
     ):
@@ -686,6 +700,7 @@ def _validate_mcp_task(
             and result["taskId"] != expected_task_id
         )
         or type(result.get("status")) is not str
+        or result["status"] not in _MCP_TASK_STATUSES
         or result["status"] not in limits.task_statuses
         or type(result.get("createdAt")) is not str
         or type(result.get("lastUpdatedAt")) is not str
@@ -703,7 +718,7 @@ def _validate_mcp_task(
 
     status = result["status"]
     if (status in limits.final_task_statuses) != (
-        status in ("completed", "failed", "cancelled")
+        status in _MCP_FINAL_TASK_STATUSES
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if "statusMessage" in result:

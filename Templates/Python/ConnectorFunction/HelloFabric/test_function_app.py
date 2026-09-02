@@ -1724,6 +1724,26 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
         for name, value in zip(names, values):
             os.environ[name] = value
         assert mod._load_managed_mcp_limits() == _managed_mcp_limits(mod)
+
+        os.environ["FABRIC_MCP_TASK_STATUSES"] = "working,completed"
+        os.environ["FABRIC_MCP_FINAL_TASK_STATUSES"] = "completed"
+        narrowed = mod._load_managed_mcp_limits()
+        assert narrowed.task_statuses == ("working", "completed")
+        assert narrowed.final_task_statuses == ("completed",)
+
+        invalid_status_configs = (
+            ("working,invented,completed", "completed"),
+            ("working,working,completed", "completed"),
+            ("working,completed", "completed,failed"),
+        )
+        for task_statuses, final_statuses in invalid_status_configs:
+            os.environ["FABRIC_MCP_TASK_STATUSES"] = task_statuses
+            os.environ["FABRIC_MCP_FINAL_TASK_STATUSES"] = final_statuses
+            _assert_fixed_error(
+                mod._McpConfigurationError,
+                "Managed MCP limits are not configured.",
+                mod._load_managed_mcp_limits,
+            )
     finally:
         for name in names:
             os.environ.pop(name, None)
@@ -1829,6 +1849,21 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
         assert mod._validate_managed_mcp_response(
             mod_json(message), "application/json", request, 7, limits
         ) == message
+    narrowed_limits = limits._replace(
+        task_statuses=("working", "completed"),
+        final_task_statuses=("completed",),
+    )
+    _assert_fixed_error(
+        mod._McpUpstreamError,
+        "Managed MCP upstream response is invalid.",
+        lambda: mod._validate_managed_mcp_response(
+            mod_json(valid[2]),
+            "application/json",
+            request,
+            7,
+            narrowed_limits,
+        ),
+    )
 
     invalid_results = (
         {
@@ -1868,6 +1903,11 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "resultType": "complete",
             **_t1_task("completed"),
             "result": {"content": [{}]},
+        },
+        {
+            "resultType": "complete",
+            **_t1_task("completed"),
+            "result": {"content": [], "structuredContent": []},
         },
         {
             "resultType": "invented",
@@ -2027,6 +2067,16 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
             "ttlMs": 0,
             "cacheScope": "shared",
             "content": [],
+        },
+        {
+            "resultType": "complete",
+            "content": [],
+            "structuredContent": None,
+        },
+        {
+            "resultType": "complete",
+            "content": [],
+            "structuredContent": [],
         },
         {
             "resultType": "task",
