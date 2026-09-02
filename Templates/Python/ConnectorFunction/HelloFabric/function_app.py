@@ -162,37 +162,45 @@ def _required(input_data: dict, name: str):
     return value
 
 
-# input.resource -> (SDK coroutine name, kwargs builder).
+# operation -> (SDK coroutine name, kwargs builder).
+#
+# Operation names are flat, matching what a builder writes in rayfin.yml
+# (`operations: - name: getManager`). The same string travels the whole way
+# down: builder config -> BaaS allow-list check -> this table. Nothing has to
+# split or re-join it, which matters because these names do not decompose into
+# a clean verb + noun pair -- `searchUser` is not a "get", and `myProfile` and
+# `relevantPeople` have no standalone noun. `rayfin_kusto_v1` sets the same
+# precedent with its flat `executeQuery`.
 #
 # The builders are not interchangeable and a generic **input_data splat would be
-# wrong: manager/userProfile/directReports take `id`, relevantPeople takes
-# `user_id`, and myProfile/searchUser take no user identifier at all. Encoding
-# each shape here keeps that mapping in one readable place and makes the
-# required-vs-optional argument per resource explicit.
+# wrong: getManager/getUserProfile/getDirectReports take `id`, getRelevantPeople
+# takes `user_id`, and getMyProfile/searchUser take no user identifier at all.
+# Encoding each shape here keeps that mapping in one readable place and makes
+# the required-vs-optional argument per operation explicit.
 #
-# Every entry is a read that answers with a JSON document, which is what lets
-# them share one response path below. Deliberately excluded: userPhoto (returns
-# raw bytes, so json.dumps would raise), the two profile writes (they would drag
-# an 'update' verb into this connector's operation set), and httpRequest (an
-# untyped passthrough that rayfin.yml has no operation name to declare).
-_OFFICE365USERS_RESOURCES = {
-    "manager": ("manager_async", lambda d: {
+# Every entry answers with a JSON document, which is what lets them share one
+# response path below. Deliberately excluded: userPhoto (returns raw bytes, so
+# json.dumps would raise), the two profile writes (this connector is read-only
+# for now), and httpRequest (an untyped passthrough, which would hand any caller
+# the connector's entire surface and defeat the point of an allow-list).
+_OFFICE365USERS_OPERATIONS = {
+    "getManager": ("manager_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
     }),
-    "userProfile": ("user_profile_async", lambda d: {
+    "getUserProfile": ("user_profile_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
     }),
-    "directReports": ("direct_reports_async", lambda d: {
+    "getDirectReports": ("direct_reports_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
         "top": d.get("top"),
     }),
-    "relevantPeople": ("relevant_people_async", lambda d: {
+    "getRelevantPeople": ("relevant_people_async", lambda d: {
         "user_id": _required(d, "userId"),
     }),
-    "myProfile": ("my_profile_async", lambda d: {
+    "getMyProfile": ("my_profile_async", lambda d: {
         "select": d.get("select"),
     }),
     "searchUser": ("search_user_async", lambda d: {
@@ -209,25 +217,22 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     # See _get_office365users_client for why this import is deferred.
     from azure.connectors import ConnectorException
 
-    # Two-level dispatch, on purpose. `operation` is the RBAC verb and is drawn
-    # from the host's fixed action set -- "read" maps onto the existing Read
-    # action, so onboarding this connector needs no host-side enum change.
-    # *Which* thing to read is a connector-level concern and travels separately
-    # on input.resource, because every office365users read shares the same verb:
-    # the verb alone can never select between manager, directReports,
-    # searchUser and the rest. This is the same split rayfin.yml makes when a
-    # builder declares `operations: - name: getManager`.
-    operation = (payload.get("operation") or "read").strip()
+    # One flat operation name, exactly as declared in rayfin.yml. No verb +
+    # resource split: see the table above for why these names do not decompose.
+    operation = (payload.get("operation") or "").strip()
     input_data = payload.get("input", {})
 
-    # connectionRuntimeUrl is resolved server-side by BaaS from the connector
-    # config and stripped if a caller supplies it. That is load-bearing: an ACN
-    # connection is a bearer capability, not a scoped permission, so a caller
-    # who could name the connection could reach every operation on it. It
-    # arrives on payload.input like every other resolved target -- this adapter
-    # never derives an endpoint itself.
-    connectionRuntimeUrl = input_data.get("connectionRuntimeUrl")
-    resource = (input_data.get("resource") or "manager").strip()
+    # The runtime URL is resolved server-side by BaaS from the connector config
+    # and lives on `connection`, outside `input`, so that BaaS-injected data is
+    # structurally separate from app-supplied data. That separation is
+    # load-bearing: an ACN connection is a bearer capability, not a scoped
+    # permission, so a caller who could name the connection would reach every
+    # operation on it. This adapter never derives an endpoint itself.
+    # `input.connectionRuntimeUrl` is accepted as a transitional fallback.
+    connection = payload.get("connection") or {}
+    connectionRuntimeUrl = (
+        connection.get("runtimeUrl") or input_data.get("connectionRuntimeUrl")
+    )
 
     # Narrowing a connection down to the operations an app declared is the app
     # backend's job -- BaaS checks the rayfin.yml allow-list before the call
@@ -235,16 +240,16 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     # a malformed request fails here with a clear message instead of an
     # AttributeError, and so this adapter only ever reaches SDK methods whose
     # response shape it can actually handle.
-    if operation != "read":
-        raise ValueError(f"unsupported operation '{operation}'; expected 'read'")
+    if not operation:
+        raise ValueError("'operation' is required")
     if not connectionRuntimeUrl:
-        raise ValueError("connectionRuntimeUrl is required")
+        raise ValueError("connection.runtimeUrl is required")
 
-    handler = _OFFICE365USERS_RESOURCES.get(resource)
+    handler = _OFFICE365USERS_OPERATIONS.get(operation)
     if handler is None:
-        supported = ", ".join(sorted(_OFFICE365USERS_RESOURCES))
+        supported = ", ".join(sorted(_OFFICE365USERS_OPERATIONS))
         raise ValueError(
-            f"unsupported resource '{resource}'; expected one of: {supported}"
+            f"unsupported operation '{operation}'; expected one of: {supported}"
         )
     methodName, buildKwargs = handler
     kwargs = buildKwargs(input_data)
@@ -258,11 +263,11 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
         # Graph error. Never relay -- or log -- str(exc), exc.path or
         # exc.operation: all three embed the full request path, which contains
         # the ACN connection id, and that connection is a bearer capability.
-        # Log the resource instead: it is already constrained to the table
-        # above, so it says which call failed without leaking the target.
+        # Log the operation name instead: it is already constrained to the
+        # table above, so it says which call failed without leaking the target.
         logging.warning(
-            "rayfin_office365users_v1: resource '%s' failed with status %s",
-            resource,
+            "rayfin_office365users_v1: operation '%s' failed with status %s",
+            operation,
             exc.status_code,
         )
         detail = exc.response_body or ""
