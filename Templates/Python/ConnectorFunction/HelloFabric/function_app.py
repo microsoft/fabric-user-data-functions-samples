@@ -128,15 +128,21 @@ def _request_meta() -> dict:
     }
 
 
-def _validate_request_meta(meta: object) -> None:
+def _validate_request_meta(meta: object, method: str) -> None:
+    required_keys = frozenset(
+        (
+        "io.modelcontextprotocol/protocolVersion",
+        "io.modelcontextprotocol/clientInfo",
+        "io.modelcontextprotocol/clientCapabilities",
+        )
+    )
+    allowed_keys = required_keys
+    if method == "tools/call":
+        allowed_keys |= frozenset(("com.microsoft.rayfin/requestKey",))
     if (
         type(meta) is not dict
-        or tuple(meta)
-        != (
-            "io.modelcontextprotocol/protocolVersion",
-            "io.modelcontextprotocol/clientInfo",
-            "io.modelcontextprotocol/clientCapabilities",
-        )
+        or not required_keys.issubset(meta)
+        or not frozenset(meta).issubset(allowed_keys)
         or meta["io.modelcontextprotocol/protocolVersion"] != _MCP_PROTOCOL_VERSION
     ):
         _raise_mcp_contract_error()
@@ -158,6 +164,10 @@ def _validate_request_meta(meta: object) -> None:
         or capabilities["extensions"]["io.modelcontextprotocol/tasks"]
     ):
         _raise_mcp_contract_error()
+    if "com.microsoft.rayfin/requestKey" in meta:
+        request_key = meta["com.microsoft.rayfin/requestKey"]
+        if type(request_key) is not str or not request_key:
+            _raise_mcp_contract_error()
 
 
 def _prepare_managed_mcp_request(payload: object) -> _McpManagedRequest:
@@ -212,7 +222,7 @@ def _prepare_managed_mcp_request(payload: object) -> _McpManagedRequest:
         routing_name = params["taskId"]
         if not _valid_routing_name(routing_name):
             _raise_mcp_contract_error()
-    _validate_request_meta(params["_meta"])
+    _validate_request_meta(params["_meta"], method)
 
     forwarded_params = dict(params)
     forwarded_message = {
@@ -452,17 +462,15 @@ def _validate_managed_mcp_response(
     elif request.method == "tools/call":
         if type(result) is not dict:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-        if "resultType" not in result:
+        if result.get("resultType") == "complete":
             _validate_sync_tool_result(result)
-        elif result["resultType"] == "task":
-            if tuple(result) != ("resultType", "task"):
-                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        elif result.get("resultType") == "task":
             _validate_mcp_task(
-                result["task"],
+                result,
                 None,
                 limits,
                 result_type="task",
-                include_result_type=False,
+                include_result_type=True,
             )
         else:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
@@ -471,9 +479,7 @@ def _validate_managed_mcp_response(
             result,
             request.routing_name,
             limits,
-            result_type=(
-                result.get("resultType") if type(result) is dict else ""
-            ),
+            result_type="complete",
             include_result_type=True,
         )
     elif (
@@ -570,18 +576,39 @@ def _validate_server_discovery(result: object) -> None:
 
 
 def _validate_sync_tool_result(result: object) -> None:
+    allowed_fields = frozenset(
+        (
+            "resultType",
+            "ttlMs",
+            "cacheScope",
+            "content",
+            "isError",
+            "structuredContent",
+            "_meta",
+        )
+    )
     if (
         type(result) is not dict
-        or tuple(result) not in (
-            ("content", "isError"),
-            ("content", "isError", "structuredContent"),
-        )
-        or type(result["content"]) is not list
-        or type(result["isError"]) is not bool
+        or any(type(key) is not str or key not in allowed_fields for key in result)
+        or result.get("resultType") != "complete"
+        or type(result.get("content")) is not list
+        or ("isError" in result and type(result["isError"]) is not bool)
         or (
             "structuredContent" in result
             and type(result["structuredContent"]) is not dict
         )
+        or (
+            "ttlMs" in result
+            and (
+                type(result["ttlMs"]) is not int
+                or result["ttlMs"] < 0
+            )
+        )
+        or (
+            "cacheScope" in result
+            and result["cacheScope"] != "private"
+        )
+        or ("_meta" in result and type(result["_meta"]) is not dict)
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
 
@@ -607,6 +634,8 @@ def _validate_mcp_task(
             "ttlMs",
             "result",
             "error",
+            "inputRequests",
+            "_meta",
         )
     )
     if (
@@ -629,36 +658,35 @@ def _validate_mcp_task(
         )
         or type(result.get("status")) is not str
         or result["status"] not in limits.task_statuses
+        or type(result.get("createdAt")) is not str
+        or type(result.get("lastUpdatedAt")) is not str
+        or "ttlMs" not in result
+        or (
+            result.get("ttlMs") is not None
+            and (
+                type(result.get("ttlMs")) is not int
+                or result["ttlMs"] < 0
+            )
+        )
+        or ("_meta" in result and type(result["_meta"]) is not dict)
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
 
     status = result["status"]
-    is_terminal = status in limits.final_task_statuses
-    expected_result_type = "complete" if is_terminal else "task"
-    if result_type != expected_result_type:
-        raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-    for timestamp_name in ("createdAt", "lastUpdatedAt"):
-        if timestamp_name in result and (
-            type(result[timestamp_name]) is not str or not result[timestamp_name]
-        ):
-            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-    if "ttlMs" in result and (
-        type(result["ttlMs"]) is not int or result["ttlMs"] < 0
+    if (status in limits.final_task_statuses) != (
+        status in ("completed", "failed", "cancelled")
     ):
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if "statusMessage" in result:
         status_message = result["statusMessage"]
-        if status_message is None:
-            status_message_size = 0
-        elif type(status_message) is not str:
+        if type(status_message) is not str:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
-        else:
-            try:
-                status_message_size = len(
-                    status_message.encode("utf-8", errors="strict")
-                )
-            except UnicodeEncodeError:
-                raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
+        try:
+            status_message_size = len(
+                status_message.encode("utf-8", errors="strict")
+            )
+        except UnicodeEncodeError:
+            raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
         if status_message_size > limits.max_status_message_bytes:
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     if "pollIntervalMs" in result:
@@ -671,16 +699,34 @@ def _validate_mcp_task(
             raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
     has_result = "result" in result
     has_error = "error" in result
-    if status == "completed":
-        valid_payload = has_result and not has_error and result["result"] is not None
+    has_input_requests = "inputRequests" in result
+    if status == "input_required":
+        valid_payload = (
+            has_input_requests
+            and type(result["inputRequests"]) is dict
+            and not has_result
+            and not has_error
+        )
+    elif status == "completed":
+        valid_payload = (
+            has_result
+            and not has_error
+            and not has_input_requests
+            and type(result["result"]) is dict
+        )
     elif status == "failed":
+        error = result.get("error")
         valid_payload = (
             has_error
             and not has_result
-            and type(result["error"]) is dict
+            and not has_input_requests
+            and type(error) is dict
+            and tuple(error) in (("code", "message"), ("code", "message", "data"))
+            and type(error.get("code")) is int
+            and type(error.get("message")) is str
         )
     else:
-        valid_payload = not has_result and not has_error
+        valid_payload = not has_result and not has_error and not has_input_requests
     if not valid_payload:
         raise _McpUpstreamError(_MCP_UPSTREAM_ERROR_MESSAGE) from None
 

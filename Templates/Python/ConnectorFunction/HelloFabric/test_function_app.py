@@ -436,6 +436,18 @@ def _managed_mcp_payload(method="tools/list", params=None, request_id=7):
     }
 
 
+def _t1_task(status, task_id="expected-task", **extra):
+    return {
+        "taskId": task_id,
+        "status": status,
+        "createdAt": "2026-09-01T00:00:00Z",
+        "lastUpdatedAt": "2026-09-01T00:00:01Z",
+        "ttlMs": 600_000,
+        "pollIntervalMs": 0,
+        **extra,
+    }
+
+
 class _ManagedMcpResponse:
     def __init__(
         self,
@@ -483,7 +495,7 @@ def _managed_mcp_limits(mod):
         64 * 1024,
         32,
         (200, 202, 204),
-        ("working", "completed", "failed", "cancelled"),
+        ("working", "input_required", "completed", "failed", "cancelled"),
         ("completed", "failed", "cancelled"),
         4096,
         256,
@@ -1212,6 +1224,32 @@ def test_managed_mcp_forwards_required_tasks_meta_and_optional_list_cursor():
         )
 
 
+def test_managed_mcp_tools_call_forwards_qualified_request_key_metadata():
+    mod = _load_function_app()
+    payload = _managed_mcp_payload(
+        "tools/call",
+        {"name": "PBICopilotAskPowerBI", "arguments": {}},
+    )
+    payload["message"]["params"]["_meta"][
+        "com.microsoft.rayfin/requestKey"
+    ] = "request-key-123"
+    prepared = mod._prepare_managed_mcp_request(payload)
+    forwarded = mod.json.loads(prepared.body_bytes)
+    assert forwarded["params"]["_meta"][
+        "com.microsoft.rayfin/requestKey"
+    ] == "request-key-123"
+
+    invalid = _managed_mcp_payload()
+    invalid["message"]["params"]["_meta"][
+        "com.microsoft.rayfin/requestKey"
+    ] = "request-key-123"
+    _assert_fixed_error(
+        mod._McpContractError,
+        "Invalid managed MCP request.",
+        lambda: mod._prepare_managed_mcp_request(invalid),
+    )
+
+
 def test_managed_mcp_server_discovery_requires_protocol_and_tasks_capability():
     mod = _load_function_app()
     request = mod._prepare_managed_mcp_request(
@@ -1269,8 +1307,7 @@ def test_managed_mcp_owns_endpoint_auth_policy_and_returns_exact_envelope():
         "id": "request-1",
         "result": {
             "resultType": "complete",
-            "taskId": "task-123",
-            "status": "completed",
+            **_t1_task("completed", task_id="task-123"),
             "result": {"content": [], "isError": False},
         },
     }
@@ -1676,7 +1713,7 @@ def test_managed_mcp_limits_are_injected_and_fail_closed(monkeypatch=None):
             "65536",
             "32",
             "200,202,204",
-            "working,completed,failed,cancelled",
+            "working,input_required,completed,failed,cancelled",
             "completed,failed,cancelled",
             "4096",
             "256",
@@ -1748,14 +1785,8 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "jsonrpc": "2.0",
             "id": 7,
             "result": {
-                "resultType": "task",
-                "taskId": "expected-task",
-                "status": "working",
-                "statusMessage": None,
-                "pollIntervalMs": 0,
-                "createdAt": "2026-09-01T00:00:00Z",
-                "lastUpdatedAt": "2026-09-01T00:00:01Z",
-                "ttlMs": 0,
+                "resultType": "complete",
+                **_t1_task("working", statusMessage="processing"),
             },
         },
         {
@@ -1763,8 +1794,7 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "id": 7,
             "result": {
                 "resultType": "complete",
-                "taskId": "expected-task",
-                "status": "completed",
+                **_t1_task("completed"),
                 "result": {"content": [], "isError": False},
             },
         },
@@ -1773,9 +1803,8 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "id": 7,
             "result": {
                 "resultType": "complete",
-                "taskId": "expected-task",
-                "status": "failed",
-                "error": {"code": "TaskFailed"},
+                **_t1_task("failed"),
+                "error": {"code": -32001, "message": "task failed"},
             },
         },
         {
@@ -1783,8 +1812,16 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "id": 7,
             "result": {
                 "resultType": "complete",
-                "taskId": "expected-task",
-                "status": "cancelled",
+                **_t1_task("cancelled"),
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "resultType": "complete",
+                **_t1_task("input_required"),
+                "inputRequests": {"field": {"type": "string"}},
             },
         },
     )
@@ -1941,21 +1978,20 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
     synchronous = {
         "jsonrpc": "2.0",
         "id": 7,
-        "result": {"content": [], "isError": False},
+        "result": {
+            "resultType": "complete",
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "content": [],
+            "isError": False,
+        },
     }
     task = {
         "jsonrpc": "2.0",
         "id": 7,
         "result": {
             "resultType": "task",
-            "task": {
-                "taskId": "task-123",
-                "status": "working",
-                "createdAt": "2026-09-01T00:00:00Z",
-                "lastUpdatedAt": "2026-09-01T00:00:01Z",
-                "ttlMs": 1000,
-                "pollIntervalMs": 0,
-            },
+            **_t1_task("working", task_id="task-123"),
         },
     }
     for message in (synchronous, task):
@@ -1965,10 +2001,25 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
 
     malformed_results = (
         {"resultType": "task"},
-        {"resultType": "task", "task": {"taskId": "task-123"}},
+        {
+            "resultType": "task",
+            "task": {"taskId": "task-123"},
+        },
         {"resultType": "invented"},
         {"resultType": "complete"},
         {"taskId": "task-123", "status": "working"},
+        {
+            "resultType": "complete",
+            "ttlMs": -1,
+            "cacheScope": "private",
+            "content": [],
+        },
+        {
+            "resultType": "complete",
+            "ttlMs": 0,
+            "cacheScope": "shared",
+            "content": [],
+        },
     )
     for result in malformed_results:
         _assert_fixed_error(
