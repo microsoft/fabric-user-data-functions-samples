@@ -155,6 +155,55 @@ async def _get_office365users_client(connectionRuntimeUrl: str):
     return client
 
 
+def _required(input_data: dict, name: str):
+    value = input_data.get(name)
+    if not value:
+        raise ValueError(f"'{name}' is required for this resource")
+    return value
+
+
+# input.resource -> (SDK coroutine name, kwargs builder).
+#
+# The builders are not interchangeable and a generic **input_data splat would be
+# wrong: manager/userProfile/directReports take `id`, relevantPeople takes
+# `user_id`, and myProfile/searchUser take no user identifier at all. Encoding
+# each shape here keeps that mapping in one readable place and makes the
+# required-vs-optional argument per resource explicit.
+#
+# Every entry is a read that answers with a JSON document, which is what lets
+# them share one response path below. Deliberately excluded: userPhoto (returns
+# raw bytes, so json.dumps would raise), the two profile writes (they would drag
+# an 'update' verb into this connector's operation set), and httpRequest (an
+# untyped passthrough that rayfin.yml has no operation name to declare).
+_OFFICE365USERS_RESOURCES = {
+    "manager": ("manager_async", lambda d: {
+        "id": _required(d, "userId"),
+        "select": d.get("select"),
+    }),
+    "userProfile": ("user_profile_async", lambda d: {
+        "id": _required(d, "userId"),
+        "select": d.get("select"),
+    }),
+    "directReports": ("direct_reports_async", lambda d: {
+        "id": _required(d, "userId"),
+        "select": d.get("select"),
+        "top": d.get("top"),
+    }),
+    "relevantPeople": ("relevant_people_async", lambda d: {
+        "user_id": _required(d, "userId"),
+    }),
+    "myProfile": ("my_profile_async", lambda d: {
+        "select": d.get("select"),
+    }),
+    "searchUser": ("search_user_async", lambda d: {
+        "search_term": d.get("searchTerm"),
+        "top": d.get("top"),
+        "is_search_term_required": d.get("isSearchTermRequired"),
+        "skip_token": d.get("skipToken"),
+    }),
+}
+
+
 @udf.streaming_function()
 async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     # See _get_office365users_client for why this import is deferred.
@@ -164,10 +213,10 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     # from the host's fixed action set -- "read" maps onto the existing Read
     # action, so onboarding this connector needs no host-side enum change.
     # *Which* thing to read is a connector-level concern and travels separately
-    # on input.resource. The split matters because the office365users SDK
-    # exposes ~14 methods (manager, directReports, searchUser, myProfile, ...)
-    # and they are all reads: the verb alone can never select one. Keeping the
-    # selector open-ended lets the rest ship later without touching the host.
+    # on input.resource, because every office365users read shares the same verb:
+    # the verb alone can never select between manager, directReports,
+    # searchUser and the rest. This is the same split rayfin.yml makes when a
+    # builder declares `operations: - name: getManager`.
     operation = (payload.get("operation") or "read").strip()
     input_data = payload.get("input", {})
 
@@ -179,30 +228,41 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     # never derives an endpoint itself.
     connectionRuntimeUrl = input_data.get("connectionRuntimeUrl")
     resource = (input_data.get("resource") or "manager").strip()
-    userId = input_data.get("userId")
-    select = input_data.get("select")
 
+    # Narrowing a connection down to the operations an app declared is the app
+    # backend's job -- BaaS checks the rayfin.yml allow-list before the call
+    # reaches this function. The check below is not that boundary. It exists so
+    # a malformed request fails here with a clear message instead of an
+    # AttributeError, and so this adapter only ever reaches SDK methods whose
+    # response shape it can actually handle.
     if operation != "read":
         raise ValueError(f"unsupported operation '{operation}'; expected 'read'")
-    if resource != "manager":
-        raise ValueError(f"unsupported resource '{resource}'; expected 'manager'")
-    if not connectionRuntimeUrl or not userId:
-        raise ValueError("connectionRuntimeUrl and userId are required")
+    if not connectionRuntimeUrl:
+        raise ValueError("connectionRuntimeUrl is required")
+
+    handler = _OFFICE365USERS_RESOURCES.get(resource)
+    if handler is None:
+        supported = ", ".join(sorted(_OFFICE365USERS_RESOURCES))
+        raise ValueError(
+            f"unsupported resource '{resource}'; expected one of: {supported}"
+        )
+    methodName, buildKwargs = handler
+    kwargs = buildKwargs(input_data)
 
     client = await _get_office365users_client(connectionRuntimeUrl)
 
     try:
-        manager = await client.manager_async(id=userId, select=select)
+        result = await getattr(client, methodName)(**kwargs)
     except ConnectorException as exc:
         # Relay the upstream error body verbatim so the caller sees the real
         # Graph error. Never relay -- or log -- str(exc), exc.path or
         # exc.operation: all three embed the full request path, which contains
         # the ACN connection id, and that connection is a bearer capability.
-        # Method plus status is enough to diagnose; there is only one upstream
-        # call in this function, so there is nothing to disambiguate.
+        # Log the resource instead: it is already constrained to the table
+        # above, so it says which call failed without leaking the target.
         logging.warning(
-            "rayfin_office365users_v1: %s failed with status %s",
-            exc.method,
+            "rayfin_office365users_v1: resource '%s' failed with status %s",
+            resource,
             exc.status_code,
         )
         detail = exc.response_body or ""
@@ -212,12 +272,12 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
             status_code=exc.status_code or 502,
         )
 
-    # manager_async returns None when upstream answered 2xx with an empty body,
-    # i.e. the user has no manager. Emit a JSON `null` rather than a zero-length
-    # body so the client SDK can JSON.parse the response unconditionally.
+    # The SDK returns None when upstream answered 2xx with an empty body, e.g.
+    # the user has no manager. Emit a JSON `null` rather than a zero-length body
+    # so the client SDK can JSON.parse the response unconditionally.
     # Pass the upstream document straight through -- no envelope. Shaping the
     # result is the client SDK's job, same as for the connector above.
-    document = json.dumps(manager) if manager is not None else "null"
+    document = json.dumps(result) if result is not None else "null"
 
     # Already buffered by the SDK above, so this is a single chunk. We still
     # return a StreamResponse to keep one uniform adapter contract across every
