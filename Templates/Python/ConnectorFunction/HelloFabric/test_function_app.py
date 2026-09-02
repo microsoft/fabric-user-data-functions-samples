@@ -1860,6 +1860,16 @@ def test_managed_mcp_tasks_v2_enforces_task_continuity_status_and_shapes():
             "error": {},
         },
         {
+            "resultType": "complete",
+            **_t1_task("completed"),
+            "result": {},
+        },
+        {
+            "resultType": "complete",
+            **_t1_task("completed"),
+            "result": {"content": [{}]},
+        },
+        {
             "resultType": "invented",
             "taskId": "expected-task",
             "status": "working",
@@ -1980,8 +1990,6 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
         "id": 7,
         "result": {
             "resultType": "complete",
-            "ttlMs": 0,
-            "cacheScope": "private",
             "content": [],
             "isError": False,
         },
@@ -2010,7 +2018,7 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
         {"taskId": "task-123", "status": "working"},
         {
             "resultType": "complete",
-            "ttlMs": -1,
+            "ttlMs": 0,
             "cacheScope": "private",
             "content": [],
         },
@@ -2019,6 +2027,30 @@ def test_managed_mcp_tools_call_result_type_requires_valid_task_handle():
             "ttlMs": 0,
             "cacheScope": "shared",
             "content": [],
+        },
+        {
+            "resultType": "task",
+            **_t1_task(
+                "working",
+                task_id="task-123",
+                result={"content": []},
+            ),
+        },
+        {
+            "resultType": "task",
+            **_t1_task(
+                "failed",
+                task_id="task-123",
+                error={"code": -32001, "message": "invalid"},
+            ),
+        },
+        {
+            "resultType": "task",
+            **_t1_task(
+                "input_required",
+                task_id="task-123",
+                inputRequests={},
+            ),
         },
     )
     for result in malformed_results:
