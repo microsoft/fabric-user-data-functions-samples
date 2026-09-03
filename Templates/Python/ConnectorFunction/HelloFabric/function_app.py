@@ -165,16 +165,20 @@ def _required(input_data: dict, name: str):
 # operation -> (SDK coroutine name, kwargs builder).
 #
 # Operation names are flat, matching what a builder writes in rayfin.yml
-# (`operations: - name: getManager`). The same string travels the whole way
+# (`operations: - name: managerAsync`). The same string travels the whole way
 # down: builder config -> BaaS allow-list check -> this table. Nothing has to
 # split or re-join it, which matters because these names do not decompose into
-# a clean verb + noun pair -- `searchUser` is not a "get", and `myProfile` and
-# `relevantPeople` have no standalone noun. `rayfin_kusto_v1` sets the same
-# precedent with its flat `executeQuery`.
+# a clean verb + noun pair -- `searchUserAsync` is not a "get", and
+# `myProfileAsync` and `relevantPeopleAsync` have no standalone noun.
+# `rayfin_kusto_v1` sets the same precedent with its flat `executeQuery`.
+#
+# The names mirror the generated Azure Connector Namespace TypeScript SDK
+# method names 1:1, so an app calling `connectors.o365.managerAsync(...)` puts
+# exactly that string on the wire and it lands here unmodified.
 #
 # The builders are not interchangeable and a generic **input_data splat would be
-# wrong: getManager/getUserProfile/getDirectReports take `id`, getRelevantPeople
-# takes `user_id`, and getMyProfile/searchUser take no user identifier at all.
+# wrong: manager/userProfile/directReports take `id`, relevantPeople
+# takes `user_id`, and myProfile/searchUser take no user identifier at all.
 # Encoding each shape here keeps that mapping in one readable place and makes
 # the required-vs-optional argument per operation explicit.
 #
@@ -184,32 +188,44 @@ def _required(input_data: dict, name: str):
 # for now), and httpRequest (an untyped passthrough, which would hand any caller
 # the connector's entire surface and defeat the point of an allow-list).
 _OFFICE365USERS_OPERATIONS = {
-    "getManager": ("manager_async", lambda d: {
+    "managerAsync": ("manager_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
     }),
-    "getUserProfile": ("user_profile_async", lambda d: {
+    "userProfileAsync": ("user_profile_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
     }),
-    "getDirectReports": ("direct_reports_async", lambda d: {
+    "directReportsAsync": ("direct_reports_async", lambda d: {
         "id": _required(d, "userId"),
         "select": d.get("select"),
         "top": d.get("top"),
     }),
-    "getRelevantPeople": ("relevant_people_async", lambda d: {
+    "relevantPeopleAsync": ("relevant_people_async", lambda d: {
         "user_id": _required(d, "userId"),
     }),
-    "getMyProfile": ("my_profile_async", lambda d: {
+    "myProfileAsync": ("my_profile_async", lambda d: {
         "select": d.get("select"),
     }),
-    "searchUser": ("search_user_async", lambda d: {
+    "searchUserAsync": ("search_user_async", lambda d: {
         "search_term": d.get("searchTerm"),
         "top": d.get("top"),
         "is_search_term_required": d.get("isSearchTermRequired"),
         "skip_token": d.get("skipToken"),
     }),
 }
+
+# Transitional aliases: the un-suffixed names this adapter shipped with, kept
+# so already-captured request bodies keep working after the rename to the ACN
+# `*Async` vocabulary. Remove once every caller has moved over.
+_OFFICE365USERS_OPERATIONS.update({
+    "getManager": _OFFICE365USERS_OPERATIONS["managerAsync"],
+    "getUserProfile": _OFFICE365USERS_OPERATIONS["userProfileAsync"],
+    "getDirectReports": _OFFICE365USERS_OPERATIONS["directReportsAsync"],
+    "getRelevantPeople": _OFFICE365USERS_OPERATIONS["relevantPeopleAsync"],
+    "getMyProfile": _OFFICE365USERS_OPERATIONS["myProfileAsync"],
+    "searchUser": _OFFICE365USERS_OPERATIONS["searchUserAsync"],
+})
 
 
 @udf.streaming_function()
