@@ -1,16 +1,39 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import inspect
+import json
+import logging
+import math
 import os
+import time
 import uuid
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 udf = fn.UserDataFunctions()
 
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+_FABRIC_MCP_PROTOCOL_VERSION = "2026-07-28"
+_FABRIC_MCP_METHODS = frozenset(
+    ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
+)
+_FABRIC_MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+_FABRIC_MCP_VARIANTS = "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
+_FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
+_FABRIC_MCP_MAX_DEPTH = 64
+_FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
+_FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "message")
+_FABRIC_MCP_REQUEST_FIELDS = frozenset(("jsonrpc", "id", "method", "params"))
+_FABRIC_MCP_SAFE_INTEGER_MAX = (1 << 53) - 1
+_FABRIC_MCP_REQUEST_ERROR = "Invalid Fabric MCP request."
+_FABRIC_MCP_RESPONSE_ERROR = "Invalid Fabric MCP response."
+_FABRIC_MCP_BOUNDS_ERROR = "Fabric MCP content exceeds server limits."
+_FABRIC_MCP_CONFIGURATION_ERROR = "Fabric MCP server configuration is unavailable."
+_FABRIC_MCP_UPSTREAM_ERROR = "Fabric MCP upstream request failed."
+_fabric_mcp_logger = logging.getLogger(__name__)
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -34,16 +57,514 @@ async def _get_session() -> aiohttp.ClientSession:
     # Slow path: create once, guarded so concurrent first-invokes don't race.
     async with _session_lock:
         if _session is None or _session.closed:
-            # No total/read timeout: a streamed DAX response can take a while to
-            # drain, and we forward bytes as they arrive rather than time out.
-            timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
+            # No total/read timeout: streamed responses can take a while to drain.
+            timeout = aiohttp.ClientTimeout(
+                total=None, sock_connect=30, sock_read=None
+            )
             connector = aiohttp.TCPConnector(
-                limit=100,            # max pooled connections
-                keepalive_timeout=60, # keep idle conns warm for reuse
-                ttl_dns_cache=300,    # cache DNS so we don't re-resolve each call
+                limit=100,
+                keepalive_timeout=60,
+                ttl_dns_cache=300,
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+class _ResponseBodyIterator:
+    """Own an acquired response until its streaming body is closed."""
+
+    def __init__(self, response):
+        self._response = response
+        self._iterator = response.content.iter_any().__aiter__()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self):
+        if self._response is None:
+            return
+        response = self._response
+        self._response = None
+        response.release()
+        close_iterator = getattr(self._iterator, "aclose", None)
+        if close_iterator is not None:
+            await close_iterator()
+
+
+class FabricMcpRequestError(ValueError):
+    pass
+
+
+class FabricMcpResponseError(RuntimeError):
+    pass
+
+
+class FabricMcpBoundsError(FabricMcpRequestError):
+    pass
+
+
+class FabricMcpConfigurationError(RuntimeError):
+    pass
+
+
+def _fail_mcp_request():
+    raise FabricMcpRequestError(_FABRIC_MCP_REQUEST_ERROR) from None
+
+
+def _fail_mcp_response():
+    raise FabricMcpResponseError(_FABRIC_MCP_RESPONSE_ERROR) from None
+
+
+def _fail_mcp_bounds():
+    raise FabricMcpBoundsError(_FABRIC_MCP_BOUNDS_ERROR) from None
+
+
+def _validate_mcp_json(value, maximum_depth, fail):
+    stack = [(value, 1, False)]
+    active = set()
+    while stack:
+        current, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(current))
+            continue
+        if depth > maximum_depth:
+            fail()
+        if current is None or type(current) in (bool, int, str):
+            continue
+        if type(current) is float:
+            if not math.isfinite(current):
+                fail()
+            continue
+        if type(current) not in (dict, list):
+            fail()
+        identity = id(current)
+        if identity in active:
+            fail()
+        active.add(identity)
+        stack.append((current, depth, True))
+        items = current.items() if type(current) is dict else enumerate(current)
+        items = tuple(items)
+        if type(current) is dict and any(type(key) is not str for key, _ in items):
+            fail()
+        for _, item in reversed(items):
+            stack.append((item, depth + 1, False))
+
+
+def _encode_mcp_json(value, maximum_depth, fail):
+    _validate_mcp_json(value, maximum_depth, fail)
+    try:
+        return json.dumps(
+            value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        fail()
+
+
+def _valid_mcp_id(value):
+    return (
+        type(value) is str
+        and bool(value)
+        or type(value) is int
+        and abs(value) <= _FABRIC_MCP_SAFE_INTEGER_MAX
+    )
+
+
+def _same_mcp_id(left, right):
+    return type(left) is type(right) and left == right
+
+
+def _safe_mcp_task_id(value):
+    return (
+        type(value) is str
+        and bool(value)
+        and value.strip() == value
+        and not any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    )
+
+
+def _parse_mcp_request(payload):
+    if type(payload) is not dict:
+        _fail_mcp_request()
+    items = tuple(payload.items())
+    if tuple(key for key, _ in items) != _FABRIC_MCP_INPUT_FIELDS:
+        _fail_mcp_request()
+    version, protocol_version, message = (item for _, item in items)
+    if (
+        type(version) is not int
+        or version != 1
+        or protocol_version != _FABRIC_MCP_PROTOCOL_VERSION
+        or type(message) is not dict
+        or len(message) != 4
+        or frozenset(message) != _FABRIC_MCP_REQUEST_FIELDS
+        or message.get("jsonrpc") != "2.0"
+        or not _valid_mcp_id(message.get("id"))
+        or type(message.get("method")) is not str
+        or message["method"] not in _FABRIC_MCP_METHODS
+        or type(message.get("params")) is not dict
+    ):
+        _fail_mcp_request()
+
+    task_id = None
+    if message["method"] in ("tasks/get", "tasks/cancel"):
+        task_id = message["params"].get("taskId")
+        if not _safe_mcp_task_id(task_id):
+            _fail_mcp_request()
+
+    envelope = _encode_mcp_json(
+        payload, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_request
+    )
+    if len(envelope) > _FABRIC_MCP_MAX_BYTES:
+        _fail_mcp_bounds()
+    message_bytes = _encode_mcp_json(
+        message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_request
+    )
+    return message, message_bytes, task_id, len(envelope)
+
+
+def _load_mcp_json(raw):
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate member")
+            result[key] = value
+        return result
+
+    return json.loads(raw, object_pairs_hook=reject_duplicates)
+
+
+def _parse_mcp_sse(raw):
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        _fail_mcp_response()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.endswith("\n\n"):
+        _fail_mcp_response()
+
+    messages = []
+    data = []
+    event_name = None
+    for line in text.split("\n"):
+        if not line:
+            if data:
+                if event_name not in (None, "message"):
+                    _fail_mcp_response()
+                try:
+                    messages.append(_load_mcp_json("\n".join(data)))
+                except (
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                ):
+                    _fail_mcp_response()
+                data = []
+                event_name = None
+            elif event_name is not None:
+                _fail_mcp_response()
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("event:") and event_name is None:
+            event_name = line[6:].lstrip(" ")
+        elif line.startswith("data:"):
+            data.append(line[5:].lstrip(" "))
+        else:
+            _fail_mcp_response()
+    if data or event_name is not None:
+        _fail_mcp_response()
+    return messages
+
+
+def _is_mcp_notification(message):
+    return (
+        type(message) is dict
+        and frozenset(message) == frozenset(("jsonrpc", "method", "params"))
+        and message.get("jsonrpc") == "2.0"
+        and type(message.get("method")) is str
+        and type(message.get("params")) is dict
+    )
+
+
+def _parse_mcp_response(raw, content_type, request_id):
+    media_type = content_type.lower().split(";", 1)[0].strip()
+    if media_type == "text/event-stream":
+        events = _parse_mcp_sse(raw)
+        for event in events:
+            _validate_mcp_json(
+                event, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_bounds
+            )
+        messages = [
+            message
+            for message in events
+            if not _is_mcp_notification(message)
+        ]
+        if len(messages) != 1:
+            _fail_mcp_response()
+        message = messages[0]
+    elif media_type == _JSON_MEDIA_TYPE:
+        try:
+            message = _load_mcp_json(raw.decode("utf-8", errors="strict"))
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            RecursionError,
+        ):
+            _fail_mcp_response()
+    else:
+        _fail_mcp_response()
+
+    keys = frozenset(message) if type(message) is dict else frozenset()
+    if (
+        type(message) is not dict
+        or len(message) != 3
+        or message.get("jsonrpc") != "2.0"
+        or not _same_mcp_id(message.get("id"), request_id)
+        or keys
+        not in (
+            frozenset(("jsonrpc", "id", "result")),
+            frozenset(("jsonrpc", "id", "error")),
+        )
+    ):
+        _fail_mcp_response()
+    if "result" in message:
+        if type(message["result"]) is not dict:
+            _fail_mcp_response()
+    else:
+        error = message["error"]
+        if (
+            type(error) is not dict
+            or type(error.get("code")) is not int
+            or abs(error["code"]) > _FABRIC_MCP_SAFE_INTEGER_MAX
+            or type(error.get("message")) is not str
+            or not frozenset(("code", "message")).issubset(error)
+            or not frozenset(error).issubset(("code", "message", "data"))
+        ):
+            _fail_mcp_response()
+    _validate_mcp_json(
+        message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_response
+    )
+    return message
+
+
+async def _read_mcp_response(response):
+    try:
+        iterator = response.content.iter_any().__aiter__()
+    except Exception:
+        try:
+            response.release()
+        except Exception:
+            response.close()
+        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
+
+    chunks = []
+    total = 0
+    failed = False
+    try:
+        async for chunk in iterator:
+            chunk = chunk if type(chunk) is bytes else bytes(chunk)
+            total += len(chunk)
+            if total > _FABRIC_MCP_MAX_BYTES:
+                _fail_mcp_bounds()
+            chunks.append(chunk)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        close_error = None
+        try:
+            response.release()
+        except Exception as error:
+            close_error = error
+            try:
+                response.close()
+            except Exception:
+                pass
+        close_iterator = getattr(iterator, "aclose", None)
+        if close_iterator is not None:
+            try:
+                await close_iterator()
+            except Exception as error:
+                close_error = close_error or error
+                try:
+                    response.close()
+                except Exception:
+                    pass
+        if close_error is not None and not failed:
+            raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
+    return b"".join(chunks)
+
+
+def _load_mcp_endpoint():
+    parsed = urlsplit(_FABRIC_MCP_ENDPOINT)
+    if (
+        os.environ.get("FABRIC_MCP_PROFILE") != "fabriciq"
+        or "FABRIC_MCP_ENDPOINT" in os.environ
+        or "FABRIC_MCP_RING" in os.environ
+        or parsed.scheme != "https"
+        or parsed.geturl() != _FABRIC_MCP_ENDPOINT
+    ):
+        raise FabricMcpConfigurationError(
+            _FABRIC_MCP_CONFIGURATION_ERROR
+        ) from None
+    return _FABRIC_MCP_ENDPOINT
+
+
+def _log_mcp(method, outcome, started, request_bytes, response_bytes):
+    _fabric_mcp_logger.info(
+        "Fabric MCP operation",
+        extra={
+            "fabric_mcp_method": (
+                method if method in _FABRIC_MCP_METHODS else "unknown"
+            ),
+            "fabric_mcp_outcome": outcome,
+            "fabric_mcp_duration_ms": max(
+                0, int((time.monotonic() - started) * 1000)
+            ),
+            "fabric_mcp_request_bytes": max(
+                0, min(request_bytes, _FABRIC_MCP_MAX_BYTES)
+            ),
+            "fabric_mcp_response_bytes": max(
+                0, min(response_bytes, _FABRIC_MCP_MAX_BYTES)
+            ),
+        },
+    )
+
+
+async def _invoke_fabric_mcp(
+    payload, token_provider, session_provider=_get_session
+):
+    started = time.monotonic()
+    request_bytes = 0
+    method = "unknown"
+    try:
+        message, message_bytes, task_id, request_bytes = _parse_mcp_request(
+            payload
+        )
+        method = message["method"]
+        try:
+            token = token_provider()
+            if inspect.isawaitable(token):
+                token = await token
+        except Exception:
+            raise FabricMcpConfigurationError(
+                _FABRIC_MCP_CONFIGURATION_ERROR
+            ) from None
+        if (
+            type(token) is not str
+            or not token
+            or "\r" in token
+            or "\n" in token
+        ):
+            raise FabricMcpConfigurationError(
+                _FABRIC_MCP_CONFIGURATION_ERROR
+            ) from None
+        try:
+            session = session_provider()
+            if inspect.isawaitable(session):
+                session = await session
+        except Exception:
+            raise FabricMcpConfigurationError(
+                _FABRIC_MCP_CONFIGURATION_ERROR
+            ) from None
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": _JSON_MEDIA_TYPE,
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Protocol-Version": _FABRIC_MCP_PROTOCOL_VERSION,
+            "Mcp-Method": method,
+            "X-Variants": _FABRIC_MCP_VARIANTS,
+        }
+        if task_id is not None:
+            headers["Mcp-Name"] = task_id
+
+        async def send_once():
+            response = await session.post(
+                _load_mcp_endpoint(),
+                data=message_bytes,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(
+                    total=_FABRIC_MCP_TIMEOUT_SECONDS, sock_connect=30
+                ),
+                allow_redirects=False,
+            )
+            content_type = response.headers.get(
+                "Content-Type", _JSON_MEDIA_TYPE
+            )
+            raw = await _read_mcp_response(response)
+            if response.status < 200 or response.status >= 300:
+                raise FabricMcpResponseError(
+                    _FABRIC_MCP_UPSTREAM_ERROR
+                ) from None
+            response_message = _parse_mcp_response(
+                raw, content_type, message["id"]
+            )
+            output = {"version": 1, "message": response_message}
+            if (
+                len(
+                    _encode_mcp_json(
+                        output, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_bounds
+                    )
+                )
+                > _FABRIC_MCP_MAX_BYTES
+            ):
+                _fail_mcp_bounds()
+            return output, len(raw)
+
+        output, response_bytes = await asyncio.wait_for(
+            send_once(), timeout=_FABRIC_MCP_TIMEOUT_SECONDS
+        )
+    except asyncio.CancelledError:
+        _log_mcp(method, "cancelled", started, request_bytes, 0)
+        raise
+    except asyncio.TimeoutError:
+        _log_mcp(method, "timeout", started, request_bytes, 0)
+        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
+    except (aiohttp.ClientError, FabricMcpResponseError):
+        _log_mcp(method, "upstream", started, request_bytes, 0)
+        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
+    except (FabricMcpRequestError, FabricMcpConfigurationError):
+        _log_mcp(method, "boundary", started, request_bytes, 0)
+        raise
+    except Exception:
+        _log_mcp(method, "upstream", started, request_bytes, 0)
+        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
+
+    _log_mcp(
+        method,
+        "upstream-error" if "error" in output["message"] else "success",
+        started,
+        request_bytes,
+        response_bytes,
+    )
+    return output
+
+
+@udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
+@udf.function()
+async def rayfin_fabric_mcp_v1(
+    payload: dict, fabricIqClient: fn.FabricItem
+) -> dict:
+    def token_provider():
+        return fabricIqClient.get_access_token().get_token().token
+
+    return await _invoke_fabric_mcp(payload, token_provider)
 
 
 @udf.streaming_function()
@@ -84,25 +605,16 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     if resp.status != 200:
         # Surface the upstream error verbatim and don't open a stream.
         detail = await resp.text()   # fully drains the body -> connection returns to pool
-        await resp.release()         # release the RESPONSE, never the shared session
+        resp.release()               # release the RESPONSE, never the shared session
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", "application/json"),
             status_code=resp.status,
         )
 
-    async def relay():
-        try:
-            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
-            async for chunk in resp.content.iter_any():
-                yield chunk
-        finally:
-            # Release the response so its connection returns to the pool (or is
-            # closed if the client disconnected mid-stream). Do NOT close the
-            # shared session here.
-            await resp.release()
-
-    return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
+    return fn.StreamResponse(
+        _ResponseBodyIterator(resp), media_type=_ARROW_MEDIA_TYPE
+    )
 
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
@@ -163,7 +675,7 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     if resp.status != 200:
         # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.
         detail = await resp.text()
-        await resp.release()
+        resp.release()
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
@@ -179,15 +691,6 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     # was set from the SDK-supplied clientRequestId above, so the SDK can
     # correlate without reading the body; `x-ms-activity-id` is not relayed
     # (accepted loss, same as the semantic-model path).
-    async def relay():
-        try:
-            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
-            async for chunk in resp.content.iter_any():
-                yield chunk
-        finally:
-            # Release the response so its connection returns to the pool (or is
-            # closed if the client disconnected mid-stream). Do NOT close the
-            # shared session here.
-            await resp.release()
-
-    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
+    return fn.StreamResponse(
+        _ResponseBodyIterator(resp), media_type=_JSON_MEDIA_TYPE
+    )

@@ -39,6 +39,9 @@ def _install_fabric_stub():
         def streaming_function(self, *_args, **_kwargs):
             return lambda fn: fn
 
+        def function(self, *_args, **_kwargs):
+            return lambda fn: fn
+
     class StreamResponse:
         def __init__(self, body, media_type=None, status_code=None):
             self.body = body
@@ -83,7 +86,7 @@ class _FakeResponse:
         self.text_called = True
         return ""
 
-    async def release(self):
+    def release(self):
         self.released = True
 
 
