@@ -19,7 +19,7 @@ _JSON_MEDIA_TYPE = "application/json"
 _FABRIC_MCP_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
-_FABRIC_MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+_FABRIC_MCP_ENDPOINT = "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
 _FABRIC_MCP_VARIANTS = "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
 _FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
 _FABRIC_MCP_MAX_DEPTH = 64

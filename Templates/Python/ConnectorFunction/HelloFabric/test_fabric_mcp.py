@@ -113,7 +113,7 @@ def test_raw_contract_constants_and_removed_semantics():
     )
     assert "tasks/result" not in app._FABRIC_MCP_METHODS
     assert app._FABRIC_MCP_ENDPOINT == (
-        "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
+        "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     assert app._FABRIC_MCP_VARIANTS == (
         "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
