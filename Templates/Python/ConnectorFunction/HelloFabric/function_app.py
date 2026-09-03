@@ -16,7 +16,6 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-_FABRIC_MCP_PROTOCOL_VERSION = "2026-07-28"
 _FABRIC_MCP_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
@@ -24,6 +23,7 @@ _FABRIC_MCP_ENDPOINT = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq"
 _FABRIC_MCP_VARIANTS = "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
 _FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
 _FABRIC_MCP_MAX_DEPTH = 64
+_FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH = 128
 _FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
 _FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "message")
 _FABRIC_MCP_REQUEST_FIELDS = frozenset(("jsonrpc", "id", "method", "params"))
@@ -183,6 +183,19 @@ def _same_mcp_id(left, right):
     return type(left) is type(right) and left == right
 
 
+def _safe_mcp_protocol_version(value):
+    return (
+        type(value) is str
+        and 0 < len(value) <= _FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH
+        and value.isascii()
+        and value.strip() == value
+        and not any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    )
+
+
 def _safe_mcp_task_id(value):
     return (
         type(value) is str
@@ -205,7 +218,7 @@ def _parse_mcp_request(payload):
     if (
         type(version) is not int
         or version != 1
-        or protocol_version != _FABRIC_MCP_PROTOCOL_VERSION
+        or not _safe_mcp_protocol_version(protocol_version)
         or type(message) is not dict
         or len(message) != 4
         or frozenset(message) != _FABRIC_MCP_REQUEST_FIELDS
@@ -231,7 +244,7 @@ def _parse_mcp_request(payload):
     message_bytes = _encode_mcp_json(
         message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_request
     )
-    return message, message_bytes, task_id, len(envelope)
+    return protocol_version, message, message_bytes, task_id, len(envelope)
 
 
 def _load_mcp_json(raw):
@@ -342,20 +355,6 @@ def _parse_mcp_response(raw, content_type, request_id):
         )
     ):
         _fail_mcp_response()
-    if "result" in message:
-        if type(message["result"]) is not dict:
-            _fail_mcp_response()
-    else:
-        error = message["error"]
-        if (
-            type(error) is not dict
-            or type(error.get("code")) is not int
-            or abs(error["code"]) > _FABRIC_MCP_SAFE_INTEGER_MAX
-            or type(error.get("message")) is not str
-            or not frozenset(("code", "message")).issubset(error)
-            or not frozenset(error).issubset(("code", "message", "data"))
-        ):
-            _fail_mcp_response()
     _validate_mcp_json(
         message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_response
     )
@@ -453,9 +452,13 @@ async def _invoke_fabric_mcp(
     request_bytes = 0
     method = "unknown"
     try:
-        message, message_bytes, task_id, request_bytes = _parse_mcp_request(
-            payload
-        )
+        (
+            protocol_version,
+            message,
+            message_bytes,
+            task_id,
+            request_bytes,
+        ) = _parse_mcp_request(payload)
         method = message["method"]
         try:
             token = token_provider()
@@ -487,7 +490,7 @@ async def _invoke_fabric_mcp(
             "Authorization": f"Bearer {token}",
             "Content-Type": _JSON_MEDIA_TYPE,
             "Accept": "application/json, text/event-stream",
-            "Mcp-Protocol-Version": _FABRIC_MCP_PROTOCOL_VERSION,
+            "Mcp-Protocol-Version": protocol_version,
             "Mcp-Method": method,
             "X-Variants": _FABRIC_MCP_VARIANTS,
         }

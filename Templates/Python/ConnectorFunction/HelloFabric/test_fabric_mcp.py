@@ -75,10 +75,16 @@ class _Session:
         return next(self.responses)
 
 
-def _request(method="tools/list", request_id="sdk-id", params=None):
+def _request(
+    method="tools/list",
+    request_id="sdk-id",
+    params=None,
+    protocol_version="2026-07-28",
+    version=1,
+):
     return {
-        "version": 1,
-        "protocolVersion": "2026-07-28",
+        "version": version,
+        "protocolVersion": protocol_version,
         "message": {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -100,7 +106,8 @@ def _invoke(app, payload, responses, token="ephemeral-token"):
 
 def test_raw_contract_constants_and_removed_semantics():
     app = _load_function_app()
-    assert app._FABRIC_MCP_PROTOCOL_VERSION == "2026-07-28"
+    assert not hasattr(app, "_FABRIC_MCP_PROTOCOL_VERSION")
+    assert app._FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH == 128
     assert app._FABRIC_MCP_METHODS == frozenset(
         {"server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel"}
     )
@@ -161,12 +168,20 @@ def test_all_five_requests_and_raw_results_pass_through(monkeypatch):
     assert len(session.requests) == 5
 
 
-def test_server_owned_headers_endpoint_and_task_name(monkeypatch):
+@pytest.mark.parametrize("protocol_version", ("2026-07-28", "2027-01-15"))
+def test_protocol_version_and_server_owned_headers_pass_through(
+    monkeypatch, protocol_version
+):
     app = _load_function_app()
     monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     output, session = _invoke(
         app,
-        _request("tasks/get", "get", {"taskId": "server-task"}),
+        _request(
+            "tasks/get",
+            "get",
+            {"taskId": "server-task"},
+            protocol_version=protocol_version,
+        ),
         [_Response({"jsonrpc": "2.0", "id": "get", "result": {}})],
     )
     assert output["version"] == 1
@@ -178,7 +193,7 @@ def test_server_owned_headers_endpoint_and_task_name(monkeypatch):
         "Authorization": "Bearer ephemeral-token",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "Mcp-Protocol-Version": "2026-07-28",
+        "Mcp-Protocol-Version": protocol_version,
         "Mcp-Method": "tasks/get",
         "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
         "Mcp-Name": "server-task",
@@ -196,6 +211,7 @@ def test_server_owned_headers_endpoint_and_task_name(monkeypatch):
         _request(["tools/list"]),
         _request("tasks/get"),
         _request("tasks/cancel", params={"taskId": "bad\nname"}),
+        _request(version=2),
     ),
 )
 def test_invalid_boundary_fails_before_network(monkeypatch, payload):
@@ -211,13 +227,39 @@ def test_invalid_boundary_fails_before_network(monkeypatch, payload):
     assert session.requests == []
 
 
+@pytest.mark.parametrize(
+    "protocol_version",
+    ("", " bad", "bad ", "bad\rvalue", "bad\nvalue", "bad\tvalue", "bad\x7fvalue", "é", "x" * 129),
+)
+def test_unsafe_protocol_version_fails_before_network(
+    monkeypatch, protocol_version
+):
+    app = _load_function_app()
+    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
+    session = _Session(())
+    with pytest.raises(app.FabricMcpRequestError):
+        asyncio.run(
+            app._invoke_fabric_mcp(
+                _request(protocol_version=protocol_version),
+                lambda: "token",
+                session_provider=lambda: session,
+            )
+        )
+    assert session.requests == []
+
+
 def test_task_and_jsonrpc_error_are_not_transformed(monkeypatch):
     app = _load_function_app()
     monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     task = {
         "jsonrpc": "2.0",
         "id": "task",
-        "result": {"resultType": "task", "taskId": "t", "status": "working"},
+        "result": {
+            "resultType": "task",
+            "taskId": "t",
+            "status": "working",
+            "_meta": {"opaque": [1, {"sdk": True}]},
+        },
     }
     error = {
         "jsonrpc": "2.0",
@@ -242,6 +284,23 @@ def test_task_and_jsonrpc_error_are_not_transformed(monkeypatch):
     assert task_output == {"version": 1, "message": task}
     assert "pollIntervalMs" not in task_output["message"]["result"]
     assert error_output == {"version": 1, "message": error}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("result", ["SDK", {"owns": "shape"}]),
+        ("error", {"custom": ["opaque"], "_meta": {"sdk": True}}),
+    ),
+)
+def test_upstream_result_and_error_contents_are_opaque(
+    monkeypatch, field, value
+):
+    app = _load_function_app()
+    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
+    message = {"jsonrpc": "2.0", "id": "sdk-id", field: value}
+    output, _ = _invoke(app, _request(), [_Response(message)])
+    assert output == {"version": 1, "message": message}
 
 
 def test_sse_selects_one_correlated_raw_response(monkeypatch):
