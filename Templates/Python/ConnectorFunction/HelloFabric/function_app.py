@@ -158,7 +158,7 @@ async def _get_office365users_client(connectionRuntimeUrl: str):
 def _required(input_data: dict, name: str):
     value = input_data.get(name)
     if not value:
-        raise ValueError(f"'{name}' is required for this resource")
+        raise ValueError(f"'{name}' is required for this operation")
     return value
 
 
@@ -214,18 +214,6 @@ _OFFICE365USERS_OPERATIONS = {
         "skip_token": d.get("skipToken"),
     }),
 }
-
-# Transitional aliases: the un-suffixed names this adapter shipped with, kept
-# so already-captured request bodies keep working after the rename to the ACN
-# `*Async` vocabulary. Remove once every caller has moved over.
-_OFFICE365USERS_OPERATIONS.update({
-    "getManager": _OFFICE365USERS_OPERATIONS["managerAsync"],
-    "getUserProfile": _OFFICE365USERS_OPERATIONS["userProfileAsync"],
-    "getDirectReports": _OFFICE365USERS_OPERATIONS["directReportsAsync"],
-    "getRelevantPeople": _OFFICE365USERS_OPERATIONS["relevantPeopleAsync"],
-    "getMyProfile": _OFFICE365USERS_OPERATIONS["myProfileAsync"],
-    "searchUser": _OFFICE365USERS_OPERATIONS["searchUserAsync"],
-})
 
 
 @udf.streaming_function()
