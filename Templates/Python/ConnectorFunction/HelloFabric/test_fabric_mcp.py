@@ -132,7 +132,8 @@ def test_raw_contract_constants_and_removed_semantics():
     assert not hasattr(app, "_FABRIC_MCP_VARIANTS")
     assert not hasattr(app, "_FABRIC_MCP_ALLOWED_VARIANTS")
     assert app._FABRIC_MCP_MAX_BYTES == 5_242_880
-    assert app._FABRIC_MCP_MAX_DEPTH == 64
+    assert not hasattr(app, "_FABRIC_MCP_MAX_DEPTH")
+    assert not hasattr(app, "_validate_mcp_json")
     assert app._FABRIC_MCP_TIMEOUT_SECONDS == 300
     for removed in (
         "_merge_fabric_mcp_request_meta",
@@ -463,22 +464,26 @@ def test_sse_rejects_non_object_data_events(payload):
         )
 
 
-def test_sse_events_cannot_bypass_generic_depth(monkeypatch):
+@pytest.mark.parametrize("value", ("NaN", "1e400", "-1e400"))
+def test_json_and_sse_reject_non_finite_numbers(value):
     app = _load_function_app()
-    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 4)
-    deep = (
-        b'data: {"jsonrpc":"2.0","method":"notifications/progress",'
-        b'"params":{"a":{"b":{"c":1}}}}\n\n'
-        b'data: {"jsonrpc":"2.0","id":"sdk-id","result":{}}\n\n'
-    )
-    with pytest.raises(app.FabricMcpBoundsError):
+    non_finite = (
+        f'data: {{"value":{value}}}\n\n'
+        'data: {"final":true}\n\n'
+    ).encode()
+    with pytest.raises(app.FabricMcpResponseError):
         _invoke(
             app,
             _request(),
-            [_Response(raw=deep, content_type="text/event-stream")],
+            [_Response(raw=non_finite, content_type="text/event-stream")],
+        )
+    with pytest.raises(app.FabricMcpResponseError):
+        _invoke(
+            app,
+            _request(),
+            [_Response(raw=f'{{"value":{value}}}'.encode())],
         )
 
-    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 64)
     extended = (
         b'data: {"extension":{"arbitrary":true}}\n\n'
         b'data: {"final":{"opaque":true}}\n\n'
@@ -502,7 +507,7 @@ def test_response_objects_are_not_correlated_or_interpreted(message):
     assert len(session.requests) == 1
 
 
-def test_bounds_depth_http_and_endpoint_fail_closed(monkeypatch):
+def test_serialization_bounds_http_and_endpoint_fail_closed(monkeypatch):
     app = _load_function_app()
     monkeypatch.setattr(app, "_FABRIC_MCP_MAX_BYTES", 64)
     response = _Response(raw=b"x" * 65)
@@ -510,12 +515,21 @@ def test_bounds_depth_http_and_endpoint_fail_closed(monkeypatch):
         asyncio.run(app._read_mcp_response(response))
     assert response.released == 1
 
-    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_BYTES", 5_242_880)
-    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 3)
-    with pytest.raises(app.FabricMcpRequestError):
-        _invoke(app, _request(params={"deep": {"x": 1}}), [])
+    with pytest.raises(app.FabricMcpBoundsError):
+        _invoke(app, _request(message={"padding": "x" * 65}), [])
 
-    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 64)
+    monkeypatch.setattr(app, "_FABRIC_MCP_MAX_BYTES", 5_242_880)
+    with pytest.raises(app.FabricMcpRequestError):
+        _invoke(app, _request(message={"notFinite": float("nan")}), [])
+
+    with pytest.raises(app.FabricMcpRequestError):
+        _invoke(app, _request(message={"notJson": object()}), [])
+
+    cyclic = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(app.FabricMcpRequestError):
+        _invoke(app, _request(message=cyclic), [])
+
     with pytest.raises(app.FabricMcpResponseError):
         _invoke(app, _request(), [_Response({}, status=302)])
     monkeypatch.setenv("FABRIC_MCP_ENDPOINT", "https://attacker.example")

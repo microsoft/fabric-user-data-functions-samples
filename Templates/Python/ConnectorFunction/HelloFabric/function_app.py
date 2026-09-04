@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import time
 import uuid
@@ -18,7 +17,6 @@ _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
 _FABRIC_MCP_ENDPOINT = "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
 _FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
-_FABRIC_MCP_MAX_DEPTH = 64
 _FABRIC_MCP_MAX_HEADERS = 32
 _FABRIC_MCP_MAX_HEADER_NAME_LENGTH = 128
 _FABRIC_MCP_MAX_HEADER_VALUE_LENGTH = 128
@@ -112,49 +110,13 @@ def _fail_mcp_bounds():
     raise FabricMcpBoundsError(_FABRIC_MCP_BOUNDS_ERROR) from None
 
 
-def _validate_mcp_json(value, maximum_depth, fail):
-    stack = [(value, 1, False)]
-    active = set()
-    while stack:
-        current, depth, leaving = stack.pop()
-        if leaving:
-            active.remove(id(current))
-            continue
-        if depth > maximum_depth:
-            fail()
-        if current is None or type(current) in (bool, int, str):
-            continue
-        if type(current) is float:
-            if not math.isfinite(current):
-                fail()
-            continue
-        if type(current) not in (dict, list):
-            fail()
-        identity = id(current)
-        if identity in active:
-            fail()
-        active.add(identity)
-        stack.append((current, depth, True))
-        items = current.items() if type(current) is dict else enumerate(current)
-        items = tuple(items)
-        if type(current) is dict and any(type(key) is not str for key, _ in items):
-            fail()
-        for _, item in reversed(items):
-            stack.append((item, depth + 1, False))
-
-
-def _dump_mcp_json(value, fail):
+def _encode_mcp_json(value, fail):
     try:
         return json.dumps(
             value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
         ).encode("utf-8")
     except (TypeError, ValueError, OverflowError, RecursionError):
         fail()
-
-
-def _encode_mcp_json(value, maximum_depth, fail):
-    _validate_mcp_json(value, maximum_depth, fail)
-    return _dump_mcp_json(value, fail)
 
 
 def _safe_mcp_protocol_version(value):
@@ -264,12 +226,10 @@ def _parse_mcp_request(payload):
     ):
         _fail_mcp_request()
 
-    envelope = _encode_mcp_json(
-        payload, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_request
-    )
+    envelope = _encode_mcp_json(payload, _fail_mcp_request)
     if len(envelope) > _FABRIC_MCP_MAX_BYTES:
         _fail_mcp_bounds()
-    message_bytes = _dump_mcp_json(message, _fail_mcp_request)
+    message_bytes = _encode_mcp_json(message, _fail_mcp_request)
     return (
         protocol_version,
         headers,
@@ -287,7 +247,21 @@ def _load_mcp_json(raw):
             result[key] = value
         return result
 
-    return json.loads(raw, object_pairs_hook=reject_duplicates)
+    def reject_constant(_value):
+        raise ValueError("non-finite number")
+
+    def parse_finite_float(value):
+        parsed = float(value)
+        if parsed in (float("inf"), float("-inf")):
+            raise ValueError("non-finite number")
+        return parsed
+
+    return json.loads(
+        raw,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_constant,
+        parse_float=parse_finite_float,
+    )
 
 
 def _parse_mcp_sse(raw):
@@ -332,17 +306,11 @@ def _parse_mcp_sse(raw):
 
 def _parse_mcp_response(raw, content_type):
     media_type = content_type.lower().split(";", 1)[0].strip()
-    message_validated = False
     if media_type == "text/event-stream":
         events = _parse_mcp_sse(raw)
-        for event in events:
-            _validate_mcp_json(
-                event, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_bounds
-            )
         if not events:
             _fail_mcp_response()
         message = events[-1]
-        message_validated = True
     elif media_type == _JSON_MEDIA_TYPE:
         try:
             message = _load_mcp_json(raw.decode("utf-8", errors="strict"))
@@ -359,10 +327,6 @@ def _parse_mcp_response(raw, content_type):
 
     if type(message) is not dict:
         _fail_mcp_response()
-    if not message_validated:
-        _validate_mcp_json(
-            message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_response
-        )
     return message
 
 
@@ -514,9 +478,7 @@ async def _invoke_fabric_mcp(
             output = {"message": response_message}
             if (
                 len(
-                    _encode_mcp_json(
-                        output, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_bounds
-                    )
+                    _encode_mcp_json(output, _fail_mcp_bounds)
                 )
                 > _FABRIC_MCP_MAX_BYTES
             ):
