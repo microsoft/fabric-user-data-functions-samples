@@ -82,6 +82,7 @@ def _request(
     protocol_version="2026-07-28",
     version=1,
     headers=None,
+    message=None,
 ):
     return {
         "version": version,
@@ -95,12 +96,16 @@ def _request(
             if headers is None
             else headers
         ),
-        "message": {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": {} if params is None else params,
-        },
+        "message": (
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {} if params is None else params,
+            }
+            if message is None
+            else message
+        ),
     }
 
 
@@ -119,6 +124,9 @@ def test_raw_contract_constants_and_removed_semantics():
     assert not hasattr(app, "_FABRIC_MCP_PROTOCOL_VERSION")
     assert app._FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH == 128
     assert not hasattr(app, "_FABRIC_MCP_METHODS")
+    assert not hasattr(app, "_FABRIC_MCP_REQUEST_FIELDS")
+    assert not hasattr(app, "_valid_mcp_id")
+    assert not hasattr(app, "_safe_mcp_task_id")
     assert app._FABRIC_MCP_ENDPOINT == (
         "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
@@ -138,39 +146,40 @@ def test_raw_contract_constants_and_removed_semantics():
         assert not hasattr(app, removed)
 
 
-def test_known_unknown_extension_and_tasks_result_methods_pass_through():
+def test_arbitrary_objects_notifications_and_extensions_pass_through():
     app = _load_function_app()
-    cases = (
-        ("server/discover", {"_meta": {"sdk": {"opaque": True}}}),
-        ("tools/call", {"name": "tool", "arguments": {"nested": [1]}}),
-        ("tasks/result", {"taskId": "task-1", "_meta": {"sdk": True}}),
-        ("vendor.example/extension", {"opaque": True}),
-        ("future/method", {}),
+    messages = (
+        {"opaque": {"notJsonRpc": True}},
+        {"method": "notifications/future", "extension": [1, 2, 3]},
+        {"params": {"taskId": "task-1"}, "futureField": "preserved"},
     )
     responses = [
-        _Response(
-            {
-                "jsonrpc": "2.0",
-                "id": index,
-                "result": {"opaque": method, "sdkOwnsSemantics": True},
-            }
-        )
-        for index, (method, _) in enumerate(cases)
+        _Response({"opaqueResponse": index}) for index, _ in enumerate(messages)
     ]
     session = _Session(responses)
-    for index, (method, params) in enumerate(cases):
-        payload = _request(method, index, params)
+    for index, message in enumerate(messages):
+        payload = _request(message=message)
         output = asyncio.run(
             app._invoke_fabric_mcp(
                 payload, lambda: "token", session_provider=lambda: session
             )
         )
-        assert output["message"]["result"] == {
-            "opaque": method,
-            "sdkOwnsSemantics": True,
-        }
+        assert output["message"] == {"opaqueResponse": index}
         assert json.loads(session.requests[index]["data"]) == payload["message"]
-    assert len(session.requests) == len(cases)
+    assert len(session.requests) == len(messages)
+
+
+def test_outer_fields_are_validated_by_name_not_order():
+    app = _load_function_app()
+    payload = _request(message={"notification": True})
+    reordered = {
+        "message": payload["message"],
+        "headers": payload["headers"],
+        "version": payload["version"],
+        "protocolVersion": payload["protocolVersion"],
+    }
+    output, _ = _invoke(app, reordered, [_Response({"ack": True})])
+    assert output == {"version": 1, "message": {"ack": True}}
 
 
 @pytest.mark.parametrize("protocol_version", ("2026-07-28", "2027-01-15"))
@@ -196,9 +205,7 @@ def test_protocol_version_and_server_owned_headers_pass_through(protocol_version
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "Mcp-Protocol-Version": protocol_version,
-        "Mcp-Method": "vendor.example/extension",
         "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
-        "Mcp-Name": "server-task",
     }
 
 
@@ -283,9 +290,7 @@ def test_generic_application_headers_are_forwarded_unchanged():
         None,
         {},
         {"version": 1, "protocolVersion": "2026-07-28", "message": {}},
-        _request(["tools/list"]),
-        _request(""),
-        _request("bad\nmethod"),
+        _request(message=[]),
         _request(version=2),
     ),
 )
@@ -301,20 +306,18 @@ def test_invalid_boundary_fails_before_network(payload):
     assert session.requests == []
 
 
-@pytest.mark.parametrize(
-    "task_id", ("bad\nheader", "é", "x" * 129)
-)
-def test_unsafe_task_id_is_forwarded_only_in_json_and_never_as_mcp_name(
-    task_id,
-):
+def test_task_fields_are_opaque_and_never_become_headers():
     app = _load_function_app()
-    payload = _request("tasks/get", params={"taskId": task_id, "opaque": True})
+    payload = _request(
+        message={"params": {"taskId": "task\nis opaque"}, "Mcp-Name": "opaque"}
+    )
     _, session = _invoke(
         app,
         payload,
-        [_Response({"jsonrpc": "2.0", "id": "sdk-id", "result": {}})],
+        [_Response({"ack": True})],
     )
     assert "Mcp-Name" not in session.requests[0]["headers"]
+    assert "Mcp-Method" not in session.requests[0]["headers"]
     assert json.loads(session.requests[0]["data"]) == payload["message"]
 
 
@@ -387,25 +390,21 @@ def test_upstream_result_and_error_contents_are_opaque(field, value):
     assert output == {"version": 1, "message": message}
 
 
-def test_sse_selects_one_correlated_raw_response():
+def test_sse_returns_last_bounded_generic_object():
     app = _load_function_app()
     raw = (
-        b'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n'
-        b'data: {"jsonrpc":"2.0","id":"sdk-id","result":{"opaque":true}}\n\n'
+        b'data: {"arbitrary":"intermediate"}\n\n'
+        b'data: {"opaque":{"final":true}}\n\n'
     )
     output, _ = _invoke(
         app,
         _request(),
         [_Response(raw=raw, content_type="text/event-stream")],
     )
-    assert output["message"] == {
-        "jsonrpc": "2.0",
-        "id": "sdk-id",
-        "result": {"opaque": True},
-    }
+    assert output["message"] == {"opaque": {"final": True}}
 
 
-def test_sse_notifications_cannot_bypass_generic_depth_or_shape(monkeypatch):
+def test_sse_events_cannot_bypass_generic_depth(monkeypatch):
     app = _load_function_app()
     monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 4)
     deep = (
@@ -421,33 +420,26 @@ def test_sse_notifications_cannot_bypass_generic_depth_or_shape(monkeypatch):
         )
 
     monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 64)
-    malformed = (
-        b'data: {"jsonrpc":"2.0","method":"notifications/progress",'
-        b'"params":{},"result":{}}\n\n'
-        b'data: {"jsonrpc":"2.0","id":"sdk-id","result":{}}\n\n'
+    extended = (
+        b'data: {"extension":{"arbitrary":true}}\n\n'
+        b'data: {"final":{"opaque":true}}\n\n'
     )
-    with pytest.raises(app.FabricMcpResponseError):
-        _invoke(
-            app,
-            _request(),
-            [_Response(raw=malformed, content_type="text/event-stream")],
-        )
+    output, _ = _invoke(
+        app,
+        _request(message={"notification": True}),
+        [_Response(raw=extended, content_type="text/event-stream")],
+    )
+    assert output["message"] == {"final": {"opaque": True}}
 
 
-@pytest.mark.parametrize("response_id", (1, "other", None))
-def test_response_id_matches_exact_type_and_value(response_id):
+@pytest.mark.parametrize(
+    "message",
+    ({"id": 1}, {"id": "other"}, {"notification": True}, {"extension": []}),
+)
+def test_response_objects_are_not_correlated_or_interpreted(message):
     app = _load_function_app()
-    session = _Session(
-        (_Response({"jsonrpc": "2.0", "id": response_id, "result": {}}),)
-    )
-    with pytest.raises(app.FabricMcpResponseError):
-        asyncio.run(
-            app._invoke_fabric_mcp(
-                _request(request_id="1"),
-                lambda: "token",
-                session_provider=lambda: session,
-            )
-        )
+    output, session = _invoke(app, _request(request_id="1"), [_Response(message)])
+    assert output == {"version": 1, "message": message}
     assert len(session.requests) == 1
 
 

@@ -25,8 +25,6 @@ _FABRIC_MCP_MAX_HEADER_VALUE_LENGTH = 128
 _FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH = 128
 _FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
 _FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "headers", "message")
-_FABRIC_MCP_REQUEST_FIELDS = frozenset(("jsonrpc", "id", "method", "params"))
-_FABRIC_MCP_SAFE_INTEGER_MAX = (1 << 53) - 1
 _FABRIC_MCP_RESERVED_HEADERS = frozenset(
     (
         "accept",
@@ -177,8 +175,7 @@ def _validate_mcp_json(value, maximum_depth, fail):
             stack.append((item, depth + 1, False))
 
 
-def _encode_mcp_json(value, maximum_depth, fail):
-    _validate_mcp_json(value, maximum_depth, fail)
+def _dump_mcp_json(value, fail):
     try:
         return json.dumps(
             value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
@@ -187,17 +184,9 @@ def _encode_mcp_json(value, maximum_depth, fail):
         fail()
 
 
-def _valid_mcp_id(value):
-    return (
-        type(value) is str
-        and bool(value)
-        or type(value) is int
-        and abs(value) <= _FABRIC_MCP_SAFE_INTEGER_MAX
-    )
-
-
-def _same_mcp_id(left, right):
-    return type(left) is type(right) and left == right
+def _encode_mcp_json(value, maximum_depth, fail):
+    _validate_mcp_json(value, maximum_depth, fail)
+    return _dump_mcp_json(value, fail)
 
 
 def _safe_mcp_protocol_version(value):
@@ -294,51 +283,37 @@ def _safe_mcp_application_headers(headers):
     return True
 
 
-def _safe_mcp_task_id(value):
-    return _safe_mcp_header_value(value)
-
-
 def _parse_mcp_request(payload):
     if type(payload) is not dict:
         _fail_mcp_request()
-    items = tuple(payload.items())
-    if tuple(key for key, _ in items) != _FABRIC_MCP_INPUT_FIELDS:
+    if (
+        len(payload) != len(_FABRIC_MCP_INPUT_FIELDS)
+        or frozenset(payload) != frozenset(_FABRIC_MCP_INPUT_FIELDS)
+    ):
         _fail_mcp_request()
-    version, protocol_version, headers, message = (item for _, item in items)
+    version = payload["version"]
+    protocol_version = payload["protocolVersion"]
+    headers = payload["headers"]
+    message = payload["message"]
     if (
         type(version) is not int
         or version != 1
         or not _safe_mcp_protocol_version(protocol_version)
         or not _safe_mcp_application_headers(headers)
         or type(message) is not dict
-        or len(message) != 4
-        or frozenset(message) != _FABRIC_MCP_REQUEST_FIELDS
-        or message.get("jsonrpc") != "2.0"
-        or not _valid_mcp_id(message.get("id"))
-        or not _safe_mcp_header_value(message.get("method"))
-        or type(message.get("params")) is not dict
     ):
         _fail_mcp_request()
-
-    candidate_task_id = message["params"].get("taskId")
-    task_id = (
-        candidate_task_id if _safe_mcp_task_id(candidate_task_id) else None
-    )
 
     envelope = _encode_mcp_json(
         payload, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_request
     )
     if len(envelope) > _FABRIC_MCP_MAX_BYTES:
         _fail_mcp_bounds()
-    message_bytes = _encode_mcp_json(
-        message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_request
-    )
+    message_bytes = _dump_mcp_json(message, _fail_mcp_request)
     return (
         protocol_version,
-        dict(headers),
-        message,
+        headers,
         message_bytes,
-        task_id,
         len(envelope),
     )
 
@@ -398,32 +373,19 @@ def _parse_mcp_sse(raw):
     return messages
 
 
-def _is_mcp_notification(message):
-    return (
-        type(message) is dict
-        and frozenset(message) == frozenset(("jsonrpc", "method", "params"))
-        and message.get("jsonrpc") == "2.0"
-        and type(message.get("method")) is str
-        and type(message.get("params")) is dict
-    )
-
-
-def _parse_mcp_response(raw, content_type, request_id):
+def _parse_mcp_response(raw, content_type):
     media_type = content_type.lower().split(";", 1)[0].strip()
+    message_validated = False
     if media_type == "text/event-stream":
         events = _parse_mcp_sse(raw)
         for event in events:
             _validate_mcp_json(
                 event, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_bounds
             )
-        messages = [
-            message
-            for message in events
-            if not _is_mcp_notification(message)
-        ]
-        if len(messages) != 1:
+        if not events:
             _fail_mcp_response()
-        message = messages[0]
+        message = events[-1]
+        message_validated = True
     elif media_type == _JSON_MEDIA_TYPE:
         try:
             message = _load_mcp_json(raw.decode("utf-8", errors="strict"))
@@ -438,22 +400,12 @@ def _parse_mcp_response(raw, content_type, request_id):
     else:
         _fail_mcp_response()
 
-    keys = frozenset(message) if type(message) is dict else frozenset()
-    if (
-        type(message) is not dict
-        or len(message) != 3
-        or message.get("jsonrpc") != "2.0"
-        or not _same_mcp_id(message.get("id"), request_id)
-        or keys
-        not in (
-            frozenset(("jsonrpc", "id", "result")),
-            frozenset(("jsonrpc", "id", "error")),
-        )
-    ):
+    if type(message) is not dict:
         _fail_mcp_response()
-    _validate_mcp_json(
-        message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_response
-    )
+    if not message_validated:
+        _validate_mcp_json(
+            message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_response
+        )
     return message
 
 
@@ -519,13 +471,10 @@ def _load_mcp_endpoint():
     return _FABRIC_MCP_ENDPOINT
 
 
-def _log_mcp(method, outcome, started, request_bytes, response_bytes):
+def _log_mcp(outcome, started, request_bytes, response_bytes):
     _fabric_mcp_logger.info(
         "Fabric MCP operation",
         extra={
-            "fabric_mcp_method": (
-                "provided" if method != "unknown" else "unknown"
-            ),
             "fabric_mcp_outcome": outcome,
             "fabric_mcp_duration_ms": max(
                 0, int((time.monotonic() - started) * 1000)
@@ -545,17 +494,13 @@ async def _invoke_fabric_mcp(
 ):
     started = time.monotonic()
     request_bytes = 0
-    method = "unknown"
     try:
         (
             protocol_version,
             application_headers,
-            message,
             message_bytes,
-            task_id,
             request_bytes,
         ) = _parse_mcp_request(payload)
-        method = message["method"]
         try:
             token = token_provider()
             if inspect.isawaitable(token):
@@ -588,10 +533,7 @@ async def _invoke_fabric_mcp(
             "Content-Type": _JSON_MEDIA_TYPE,
             "Accept": "application/json, text/event-stream",
             "Mcp-Protocol-Version": protocol_version,
-            "Mcp-Method": method,
         }
-        if task_id is not None:
-            headers["Mcp-Name"] = task_id
 
         async def send_once():
             response = await session.post(
@@ -611,9 +553,7 @@ async def _invoke_fabric_mcp(
                 raise FabricMcpResponseError(
                     _FABRIC_MCP_UPSTREAM_ERROR
                 ) from None
-            response_message = _parse_mcp_response(
-                raw, content_type, message["id"]
-            )
+            response_message = _parse_mcp_response(raw, content_type)
             output = {"version": 1, "message": response_message}
             if (
                 len(
@@ -630,24 +570,23 @@ async def _invoke_fabric_mcp(
             send_once(), timeout=_FABRIC_MCP_TIMEOUT_SECONDS
         )
     except asyncio.CancelledError:
-        _log_mcp(method, "cancelled", started, request_bytes, 0)
+        _log_mcp("cancelled", started, request_bytes, 0)
         raise
     except asyncio.TimeoutError:
-        _log_mcp(method, "timeout", started, request_bytes, 0)
+        _log_mcp("timeout", started, request_bytes, 0)
         raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
     except (aiohttp.ClientError, FabricMcpResponseError):
-        _log_mcp(method, "upstream", started, request_bytes, 0)
+        _log_mcp("upstream", started, request_bytes, 0)
         raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
     except (FabricMcpRequestError, FabricMcpConfigurationError):
-        _log_mcp(method, "boundary", started, request_bytes, 0)
+        _log_mcp("boundary", started, request_bytes, 0)
         raise
     except Exception:
-        _log_mcp(method, "upstream", started, request_bytes, 0)
+        _log_mcp("upstream", started, request_bytes, 0)
         raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
 
     _log_mcp(
-        method,
-        "upstream-error" if "error" in output["message"] else "success",
+        "success",
         started,
         request_bytes,
         response_bytes,
