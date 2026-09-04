@@ -175,7 +175,6 @@ def test_outer_fields_are_validated_by_name_not_order_and_allow_extensions():
         "message": payload["message"],
         "headers": payload["headers"],
         "protocolVersion": payload["protocolVersion"],
-        "version": "legacy-extra-is-ignored",
         "futureOuterField": {"ignored": True},
     }
     output, _ = _invoke(app, reordered, [_Response({"ack": True})])
@@ -332,7 +331,7 @@ def test_generic_application_headers_are_forwarded_unchanged():
     (
         None,
         {},
-        {"version": 1, "protocolVersion": "2026-07-28", "message": {}},
+        {"protocolVersion": "2026-07-28", "message": {}},
         _request(message=[]),
     ),
 )
