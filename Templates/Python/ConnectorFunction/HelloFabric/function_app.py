@@ -16,9 +16,6 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-_FABRIC_MCP_METHODS = frozenset(
-    ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
-)
 _FABRIC_MCP_ENDPOINT = "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
 _FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
 _FABRIC_MCP_MAX_DEPTH = 64
@@ -298,15 +295,7 @@ def _safe_mcp_application_headers(headers):
 
 
 def _safe_mcp_task_id(value):
-    return (
-        type(value) is str
-        and bool(value)
-        and value.strip() == value
-        and not any(
-            ord(character) < 0x20 or ord(character) == 0x7F
-            for character in value
-        )
-    )
+    return _safe_mcp_header_value(value)
 
 
 def _parse_mcp_request(payload):
@@ -326,17 +315,15 @@ def _parse_mcp_request(payload):
         or frozenset(message) != _FABRIC_MCP_REQUEST_FIELDS
         or message.get("jsonrpc") != "2.0"
         or not _valid_mcp_id(message.get("id"))
-        or type(message.get("method")) is not str
-        or message["method"] not in _FABRIC_MCP_METHODS
+        or not _safe_mcp_header_value(message.get("method"))
         or type(message.get("params")) is not dict
     ):
         _fail_mcp_request()
 
-    task_id = None
-    if message["method"] in ("tasks/get", "tasks/cancel"):
-        task_id = message["params"].get("taskId")
-        if not _safe_mcp_task_id(task_id):
-            _fail_mcp_request()
+    candidate_task_id = message["params"].get("taskId")
+    task_id = (
+        candidate_task_id if _safe_mcp_task_id(candidate_task_id) else None
+    )
 
     envelope = _encode_mcp_json(
         payload, _FABRIC_MCP_MAX_DEPTH, _fail_mcp_request
@@ -537,7 +524,7 @@ def _log_mcp(method, outcome, started, request_bytes, response_bytes):
         "Fabric MCP operation",
         extra={
             "fabric_mcp_method": (
-                method if method in _FABRIC_MCP_METHODS else "unknown"
+                "provided" if method != "unknown" else "unknown"
             ),
             "fabric_mcp_outcome": outcome,
             "fabric_mcp_duration_ms": max(

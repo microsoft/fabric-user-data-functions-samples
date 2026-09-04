@@ -118,10 +118,7 @@ def test_raw_contract_constants_and_removed_semantics():
     app = _load_function_app()
     assert not hasattr(app, "_FABRIC_MCP_PROTOCOL_VERSION")
     assert app._FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH == 128
-    assert app._FABRIC_MCP_METHODS == frozenset(
-        {"server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel"}
-    )
-    assert "tasks/result" not in app._FABRIC_MCP_METHODS
+    assert not hasattr(app, "_FABRIC_MCP_METHODS")
     assert app._FABRIC_MCP_ENDPOINT == (
         "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
@@ -141,14 +138,14 @@ def test_raw_contract_constants_and_removed_semantics():
         assert not hasattr(app, removed)
 
 
-def test_all_five_requests_and_raw_results_pass_through():
+def test_known_unknown_extension_and_tasks_result_methods_pass_through():
     app = _load_function_app()
     cases = (
         ("server/discover", {"_meta": {"sdk": {"opaque": True}}}),
-        ("tools/list", {"cursor": "opaque", "_meta": {"sdk": True}}),
         ("tools/call", {"name": "tool", "arguments": {"nested": [1]}}),
-        ("tasks/get", {"taskId": "task-1", "_meta": {"sdk": True}}),
-        ("tasks/cancel", {"taskId": "task-2", "_meta": {"sdk": True}}),
+        ("tasks/result", {"taskId": "task-1", "_meta": {"sdk": True}}),
+        ("vendor.example/extension", {"opaque": True}),
+        ("future/method", {}),
     )
     responses = [
         _Response(
@@ -173,7 +170,7 @@ def test_all_five_requests_and_raw_results_pass_through():
             "sdkOwnsSemantics": True,
         }
         assert json.loads(session.requests[index]["data"]) == payload["message"]
-    assert len(session.requests) == 5
+    assert len(session.requests) == len(cases)
 
 
 @pytest.mark.parametrize("protocol_version", ("2026-07-28", "2027-01-15"))
@@ -182,7 +179,7 @@ def test_protocol_version_and_server_owned_headers_pass_through(protocol_version
     output, session = _invoke(
         app,
         _request(
-            "tasks/get",
+            "vendor.example/extension",
             "get",
             {"taskId": "server-task"},
             protocol_version=protocol_version,
@@ -199,7 +196,7 @@ def test_protocol_version_and_server_owned_headers_pass_through(protocol_version
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "Mcp-Protocol-Version": protocol_version,
-        "Mcp-Method": "tasks/get",
+        "Mcp-Method": "vendor.example/extension",
         "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
         "Mcp-Name": "server-task",
     }
@@ -286,11 +283,9 @@ def test_generic_application_headers_are_forwarded_unchanged():
         None,
         {},
         {"version": 1, "protocolVersion": "2026-07-28", "message": {}},
-        _request("tasks/result"),
-        _request("initialize"),
         _request(["tools/list"]),
-        _request("tasks/get"),
-        _request("tasks/cancel", params={"taskId": "bad\nname"}),
+        _request(""),
+        _request("bad\nmethod"),
         _request(version=2),
     ),
 )
@@ -304,6 +299,23 @@ def test_invalid_boundary_fails_before_network(payload):
             )
         )
     assert session.requests == []
+
+
+@pytest.mark.parametrize(
+    "task_id", ("bad\nheader", "é", "x" * 129)
+)
+def test_unsafe_task_id_is_forwarded_only_in_json_and_never_as_mcp_name(
+    task_id,
+):
+    app = _load_function_app()
+    payload = _request("tasks/get", params={"taskId": task_id, "opaque": True})
+    _, session = _invoke(
+        app,
+        payload,
+        [_Response({"jsonrpc": "2.0", "id": "sdk-id", "result": {}})],
+    )
+    assert "Mcp-Name" not in session.requests[0]["headers"]
+    assert json.loads(session.requests[0]["data"]) == payload["message"]
 
 
 @pytest.mark.parametrize(
