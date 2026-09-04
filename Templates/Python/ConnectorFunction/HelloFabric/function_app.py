@@ -72,7 +72,7 @@ async def _get_session() -> aiohttp.ClientSession:
     # Slow path: create once, guarded so concurrent first-invokes don't race.
     async with _session_lock:
         if _session is None or _session.closed:
-            # No total/read timeout: a streamed response can take a while to
+            # No total/read timeout: a streamed DAX response can take a while to
             # drain, and we forward bytes as they arrive rather than time out.
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
             connector = aiohttp.TCPConnector(
@@ -82,37 +82,6 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
-
-
-class _ResponseBodyIterator:
-    """Own an acquired response until its streaming body is closed."""
-
-    def __init__(self, response):
-        self._response = response
-        self._iterator = response.content.iter_any().__aiter__()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        try:
-            return await self._iterator.__anext__()
-        except StopAsyncIteration:
-            await self.aclose()
-            raise
-        except BaseException:
-            await self.aclose()
-            raise
-
-    async def aclose(self):
-        if self._response is None:
-            return
-        response = self._response
-        self._response = None
-        response.release()
-        close_iterator = getattr(self._iterator, "aclose", None)
-        if close_iterator is not None:
-            await close_iterator()
 
 
 class FabricMcpRequestError(ValueError):
@@ -631,16 +600,25 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     if resp.status != 200:
         # Surface the upstream error verbatim and don't open a stream.
         detail = await resp.text()   # fully drains the body -> connection returns to pool
-        resp.release()               # release the RESPONSE, never the shared session
+        await resp.release()         # release the RESPONSE, never the shared session
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", "application/json"),
             status_code=resp.status,
         )
 
-    return fn.StreamResponse(
-        _ResponseBodyIterator(resp), media_type=_ARROW_MEDIA_TYPE
-    )
+    async def relay():
+        try:
+            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        finally:
+            # Release the response so its connection returns to the pool (or is
+            # closed if the client disconnected mid-stream). Do NOT close the
+            # shared session here.
+            await resp.release()
+
+    return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
 
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
@@ -701,7 +679,7 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     if resp.status != 200:
         # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.
         detail = await resp.text()
-        resp.release()
+        await resp.release()
         return fn.StreamResponse(
             iter([detail.encode("utf-8")]),
             media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
@@ -717,6 +695,15 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     # was set from the SDK-supplied clientRequestId above, so the SDK can
     # correlate without reading the body; `x-ms-activity-id` is not relayed
     # (accepted loss, same as the semantic-model path).
-    return fn.StreamResponse(
-        _ResponseBodyIterator(resp), media_type=_JSON_MEDIA_TYPE
-    )
+    async def relay():
+        try:
+            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        finally:
+            # Release the response so its connection returns to the pool (or is
+            # closed if the client disconnected mid-stream). Do NOT close the
+            # shared session here.
+            await resp.release()
+
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)

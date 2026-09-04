@@ -86,7 +86,7 @@ class _FakeResponse:
         self.text_called = True
         return ""
 
-    def release(self):
+    async def release(self):
         self.released = True
 
 
