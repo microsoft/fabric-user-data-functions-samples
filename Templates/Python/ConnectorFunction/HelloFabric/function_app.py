@@ -57,14 +57,13 @@ async def _get_session() -> aiohttp.ClientSession:
     # Slow path: create once, guarded so concurrent first-invokes don't race.
     async with _session_lock:
         if _session is None or _session.closed:
-            # No total/read timeout: streamed responses can take a while to drain.
-            timeout = aiohttp.ClientTimeout(
-                total=None, sock_connect=30, sock_read=None
-            )
+            # No total/read timeout: a streamed response can take a while to
+            # drain, and we forward bytes as they arrive rather than time out.
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
             connector = aiohttp.TCPConnector(
-                limit=100,
-                keepalive_timeout=60,
-                ttl_dns_cache=300,
+                limit=100,            # max pooled connections
+                keepalive_timeout=60, # keep idle conns warm for reuse
+                ttl_dns_cache=300,    # cache DNS so we don't re-resolve each call
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
