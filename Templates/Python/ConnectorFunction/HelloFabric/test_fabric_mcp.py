@@ -132,8 +132,6 @@ def test_raw_contract_constants_and_removed_semantics():
     assert not hasattr(app, "_FABRIC_MCP_VARIANTS")
     assert not hasattr(app, "_FABRIC_MCP_ALLOWED_VARIANTS")
     assert app._FABRIC_MCP_MAX_BYTES == 5_242_880
-    assert not hasattr(app, "_FABRIC_MCP_MAX_DEPTH")
-    assert not hasattr(app, "_validate_mcp_json")
     assert app._FABRIC_MCP_TIMEOUT_SECONDS == 300
     for removed in (
         "_merge_fabric_mcp_request_meta",
@@ -167,6 +165,16 @@ def test_arbitrary_objects_notifications_and_extensions_pass_through():
         assert output["message"] == {"opaqueResponse": index}
         assert json.loads(session.requests[index]["data"]) == payload["message"]
     assert len(session.requests) == len(messages)
+
+
+def test_deeply_nested_opaque_message_is_accepted_within_byte_limit():
+    app = _load_function_app()
+    message = {"leaf": True}
+    for _ in range(200):
+        message = {"nested": message}
+    output, session = _invoke(app, _request(message=message), [_Response({"ok": True})])
+    assert output == {"message": {"ok": True}}
+    assert json.loads(session.requests[0]["data"]) == message
 
 
 def test_outer_fields_are_validated_by_name_not_order_and_allow_extensions():
@@ -271,8 +279,17 @@ def test_x_variants_is_required_allowlisted_and_forwarded_unchanged():
             "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
             "aUtHoRiZaTiOn": "secret",
         },
+        {"X-Authorization": "secret"},
+        {"x-AUTH-user": "identity"},
         {"Host": "attacker.example"},
         {":authority": "attacker.example"},
+        {"Forwarded": "for=192.0.2.1"},
+        {"X-Forwarded-Host": "attacker.example"},
+        {"x-forwarded-for": "192.0.2.1"},
+        {"X-Forwarded-Proto": "http"},
+        {"X-Original-URL": "/admin"},
+        {"X-HTTP-Method-Override": "DELETE"},
+        {"X-MS-CLIENT-PRINCIPAL": "identity"},
         {"Content-Length": "1"},
         {"Connection": "close"},
         {"Transfer-Encoding": "chunked"},

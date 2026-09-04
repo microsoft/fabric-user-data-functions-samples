@@ -30,6 +30,7 @@ _FABRIC_MCP_RESERVED_HEADERS = frozenset(
         "content-length",
         "content-type",
         "cookie",
+        "forwarded",
         "host",
         "keep-alive",
         "proxy-authorization",
@@ -39,6 +40,12 @@ _FABRIC_MCP_RESERVED_HEADERS = frozenset(
         "trailer",
         "transfer-encoding",
         "upgrade",
+        "via",
+        "x-auth-user",
+        "x-authorization",
+        "x-http-method-override",
+        "x-ms-client-principal",
+        "x-original-url",
     )
 )
 _FABRIC_MCP_REQUEST_ERROR = "Invalid Fabric MCP request."
@@ -167,6 +174,9 @@ def _reserved_mcp_header(value):
         lowered in _FABRIC_MCP_RESERVED_HEADERS
         or lowered.startswith("mcp-")
         or lowered.startswith("proxy-")
+        or lowered.startswith("x-forwarded-")
+        or lowered.startswith("x-original-")
+        or lowered.startswith("x-ms-client-principal")
         or credential_component
         or any(
             marker in compact
