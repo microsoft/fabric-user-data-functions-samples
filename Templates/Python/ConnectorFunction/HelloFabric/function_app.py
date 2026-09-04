@@ -3,12 +3,10 @@ import aiohttp
 import asyncio
 import inspect
 import json
-import logging
 import os
-import time
 import uuid
 from typing import Optional
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import urlparse
 
 udf = fn.UserDataFunctions()
 
@@ -16,44 +14,6 @@ _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
 _FABRIC_MCP_ENDPOINT = "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
-_FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
-_FABRIC_MCP_MAX_HEADERS = 32
-_FABRIC_MCP_MAX_HEADER_NAME_LENGTH = 128
-_FABRIC_MCP_MAX_HEADER_VALUE_LENGTH = 128
-_FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH = 128
-_FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
-_FABRIC_MCP_RESERVED_HEADERS = frozenset(
-    (
-        "accept",
-        "authorization",
-        "connection",
-        "content-length",
-        "content-type",
-        "cookie",
-        "forwarded",
-        "host",
-        "keep-alive",
-        "proxy-authorization",
-        "proxy-connection",
-        "set-cookie",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-        "via",
-        "x-auth-user",
-        "x-authorization",
-        "x-http-method-override",
-        "x-ms-client-principal",
-        "x-original-url",
-    )
-)
-_FABRIC_MCP_REQUEST_ERROR = "Invalid Fabric MCP request."
-_FABRIC_MCP_RESPONSE_ERROR = "Invalid Fabric MCP response."
-_FABRIC_MCP_BOUNDS_ERROR = "Fabric MCP content exceeds server limits."
-_FABRIC_MCP_CONFIGURATION_ERROR = "Fabric MCP server configuration is unavailable."
-_FABRIC_MCP_UPSTREAM_ERROR = "Fabric MCP upstream request failed."
-_fabric_mcp_logger = logging.getLogger(__name__)
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -93,434 +53,49 @@ class FabricMcpRequestError(ValueError):
     pass
 
 
-class FabricMcpResponseError(RuntimeError):
-    pass
-
-
-class FabricMcpBoundsError(FabricMcpRequestError):
-    pass
-
-
-class FabricMcpConfigurationError(RuntimeError):
-    pass
-
-
-def _fail_mcp_request():
-    raise FabricMcpRequestError(_FABRIC_MCP_REQUEST_ERROR) from None
-
-
-def _fail_mcp_response():
-    raise FabricMcpResponseError(_FABRIC_MCP_RESPONSE_ERROR) from None
-
-
-def _fail_mcp_bounds():
-    raise FabricMcpBoundsError(_FABRIC_MCP_BOUNDS_ERROR) from None
-
-
-def _encode_mcp_json(value, fail):
-    try:
-        return json.dumps(
-            value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
-        ).encode("utf-8")
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        fail()
-
-
-def _safe_mcp_protocol_version(value):
-    return (
-        type(value) is str
-        and 0 < len(value) <= _FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH
-        and value.isascii()
-        and value.strip() == value
-        and not any(
-            ord(character) < 0x20 or ord(character) == 0x7F
-            for character in value
-        )
-    )
-
-
-def _safe_mcp_header_name(value):
-    token_characters = "!#$%&'*+-.^_`|~"
-    return (
-        type(value) is str
-        and 0 < len(value) <= _FABRIC_MCP_MAX_HEADER_NAME_LENGTH
-        and value.isascii()
-        and all(
-            character.isalnum() or character in token_characters
-            for character in value
-        )
-    )
-
-
-def _reserved_mcp_header(value):
-    lowered = value.lower()
-    components = []
-    component = []
-    for character in lowered:
-        if character.isalnum():
-            component.append(character)
-        elif component:
-            components.append("".join(component))
-            component = []
-    if component:
-        components.append("".join(component))
-    compact = "".join(components)
-    credential_component = any(
-        item in ("credential", "credentials", "key", "token")
-        or item.startswith(("credential", "key", "token"))
-        for item in components
-    )
-    return (
-        lowered in _FABRIC_MCP_RESERVED_HEADERS
-        or lowered.startswith("mcp-")
-        or lowered.startswith("proxy-")
-        or lowered.startswith("x-forwarded-")
-        or lowered.startswith("x-original-")
-        or lowered.startswith("x-ms-client-principal")
-        or credential_component
-        or any(
-            marker in compact
-            for marker in (
-                "apikey",
-                "accesskey",
-                "accesstoken",
-                "credential",
-                "secretkey",
-                "subscriptionkey",
-                "token",
-            )
-        )
-    )
-
-
-def _safe_mcp_header_value(value):
-    return (
-        type(value) is str
-        and 0 < len(value) <= _FABRIC_MCP_MAX_HEADER_VALUE_LENGTH
-        and value.isascii()
-        and value.strip() == value
-        and not any(
-            ord(character) < 0x20 or ord(character) == 0x7F
-            for character in value
-        )
-    )
-
-
-def _safe_mcp_application_headers(headers):
-    if type(headers) is not dict or len(headers) > _FABRIC_MCP_MAX_HEADERS:
-        return False
-    names = set()
-    for name, value in headers.items():
-        lowered = name.lower() if type(name) is str else ""
-        if (
-            lowered in names
-            or not _safe_mcp_header_name(name)
-            or _reserved_mcp_header(name)
-            or not _safe_mcp_header_value(value)
-        ):
-            return False
-        names.add(lowered)
-    return True
-
-
-def _parse_mcp_request(payload):
-    if type(payload) is not dict:
-        _fail_mcp_request()
-    protocol_version = payload.get("protocolVersion")
-    headers = payload.get("headers")
-    message = payload.get("message")
-    if (
-        not _safe_mcp_protocol_version(protocol_version)
-        or not _safe_mcp_application_headers(headers)
-        or type(message) is not dict
-    ):
-        _fail_mcp_request()
-
-    envelope = _encode_mcp_json(payload, _fail_mcp_request)
-    if len(envelope) > _FABRIC_MCP_MAX_BYTES:
-        _fail_mcp_bounds()
-    message_bytes = _encode_mcp_json(message, _fail_mcp_request)
-    return (
-        protocol_version,
-        headers,
-        message_bytes,
-        len(envelope),
-    )
-
-
-def _load_mcp_json(raw):
-    def reject_duplicates(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate member")
-            result[key] = value
-        return result
-
-    def reject_constant(_value):
-        raise ValueError("non-finite number")
-
-    def parse_finite_float(value):
-        parsed = float(value)
-        if parsed in (float("inf"), float("-inf")):
-            raise ValueError("non-finite number")
-        return parsed
-
-    return json.loads(
-        raw,
-        object_pairs_hook=reject_duplicates,
-        parse_constant=reject_constant,
-        parse_float=parse_finite_float,
-    )
-
-
-def _parse_mcp_sse(raw):
-    try:
-        text = raw.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        _fail_mcp_response()
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    if not text.endswith("\n\n"):
-        _fail_mcp_response()
-
-    messages = []
-    data = []
-    for line in text.split("\n"):
-        if not line:
-            if data:
-                try:
-                    message = _load_mcp_json("\n".join(data))
-                except (
-                    json.JSONDecodeError,
-                    TypeError,
-                    ValueError,
-                    RecursionError,
-                ):
-                    _fail_mcp_response()
-                if type(message) is not dict:
-                    _fail_mcp_response()
-                messages.append(message)
-                data = []
-        elif line.startswith(":"):
-            continue
-        elif line.startswith("data:"):
-            data.append(line[5:].lstrip(" "))
-        elif line.startswith(("event:", "id:", "retry:")):
-            continue
-        else:
-            _fail_mcp_response()
-    if data:
-        _fail_mcp_response()
-    return messages
-
-
-def _parse_mcp_response(raw, content_type):
-    media_type = content_type.lower().split(";", 1)[0].strip()
-    if media_type == "text/event-stream":
-        events = _parse_mcp_sse(raw)
-        if not events:
-            _fail_mcp_response()
-        message = events[-1]
-    elif media_type == _JSON_MEDIA_TYPE:
-        try:
-            message = _load_mcp_json(raw.decode("utf-8", errors="strict"))
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-            RecursionError,
-        ):
-            _fail_mcp_response()
-    else:
-        _fail_mcp_response()
-
-    if type(message) is not dict:
-        _fail_mcp_response()
-    return message
-
-
-async def _read_mcp_response(response):
-    try:
-        iterator = response.content.iter_any().__aiter__()
-    except Exception:
-        try:
-            response.release()
-        except Exception:
-            response.close()
-        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
-
-    chunks = []
-    total = 0
-    failed = False
-    try:
-        async for chunk in iterator:
-            chunk = chunk if type(chunk) is bytes else bytes(chunk)
-            total += len(chunk)
-            if total > _FABRIC_MCP_MAX_BYTES:
-                _fail_mcp_bounds()
-            chunks.append(chunk)
-    except BaseException:
-        failed = True
-        raise
-    finally:
-        close_error = None
-        try:
-            response.release()
-        except Exception as error:
-            close_error = error
-            try:
-                response.close()
-            except Exception:
-                pass
-        close_iterator = getattr(iterator, "aclose", None)
-        if close_iterator is not None:
-            try:
-                await close_iterator()
-            except Exception as error:
-                close_error = close_error or error
-                try:
-                    response.close()
-                except Exception:
-                    pass
-        if close_error is not None and not failed:
-            raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
-    return b"".join(chunks)
-
-
 def _load_mcp_endpoint():
-    parsed = urlsplit(_FABRIC_MCP_ENDPOINT)
-    if (
-        "FABRIC_MCP_ENDPOINT" in os.environ
-        or "FABRIC_MCP_RING" in os.environ
-        or parsed.scheme != "https"
-        or parsed.geturl() != _FABRIC_MCP_ENDPOINT
-    ):
-        raise FabricMcpConfigurationError(
-            _FABRIC_MCP_CONFIGURATION_ERROR
-        ) from None
+    if "FABRIC_MCP_ENDPOINT" in os.environ or "FABRIC_MCP_RING" in os.environ:
+        raise FabricMcpRequestError("Invalid Fabric MCP endpoint configuration.")
     return _FABRIC_MCP_ENDPOINT
 
 
-def _log_mcp(outcome, started, request_bytes, response_bytes):
-    _fabric_mcp_logger.info(
-        "Fabric MCP operation",
-        extra={
-            "fabric_mcp_outcome": outcome,
-            "fabric_mcp_duration_ms": max(
-                0, int((time.monotonic() - started) * 1000)
-            ),
-            "fabric_mcp_request_bytes": max(
-                0, min(request_bytes, _FABRIC_MCP_MAX_BYTES)
-            ),
-            "fabric_mcp_response_bytes": max(
-                0, min(response_bytes, _FABRIC_MCP_MAX_BYTES)
-            ),
-        },
+async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):
+    token = token_provider()
+    if inspect.isawaitable(token):
+        token = await token
+    if type(token) is not str or not token or "\r" in token or "\n" in token:
+        raise FabricMcpRequestError("Invalid Fabric MCP access token.")
+
+    session = session_provider()
+    if inspect.isawaitable(session):
+        session = await session
+
+    message = payload["message"]
+    headers = {
+        name: value
+        for name, value in payload["headers"].items()
+        if name.lower() != "authorization"
+    }
+    header_names = {name.lower() for name in headers}
+    for name, value in (
+        ("Content-Type", _JSON_MEDIA_TYPE),
+        ("Accept", "application/json, text/event-stream"),
+        ("MCP-Protocol-Version", payload["protocolVersion"]),
+    ):
+        if name.lower() not in header_names:
+            headers[name] = value
+    headers["Authorization"] = f"Bearer {token}"
+
+    response = await session.post(
+        _load_mcp_endpoint(),
+        data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+        allow_redirects=False,
     )
-
-
-async def _invoke_fabric_mcp(
-    payload, token_provider, session_provider=_get_session
-):
-    started = time.monotonic()
-    request_bytes = 0
-    try:
-        (
-            protocol_version,
-            application_headers,
-            message_bytes,
-            request_bytes,
-        ) = _parse_mcp_request(payload)
-        try:
-            token = token_provider()
-            if inspect.isawaitable(token):
-                token = await token
-        except Exception:
-            raise FabricMcpConfigurationError(
-                _FABRIC_MCP_CONFIGURATION_ERROR
-            ) from None
-        if (
-            type(token) is not str
-            or not token
-            or "\r" in token
-            or "\n" in token
-        ):
-            raise FabricMcpConfigurationError(
-                _FABRIC_MCP_CONFIGURATION_ERROR
-            ) from None
-        try:
-            session = session_provider()
-            if inspect.isawaitable(session):
-                session = await session
-        except Exception:
-            raise FabricMcpConfigurationError(
-                _FABRIC_MCP_CONFIGURATION_ERROR
-            ) from None
-
-        headers = {
-            **application_headers,
-            "Authorization": f"Bearer {token}",
-            "Content-Type": _JSON_MEDIA_TYPE,
-            "Accept": "application/json, text/event-stream",
-            "Mcp-Protocol-Version": protocol_version,
-        }
-
-        async def send_once():
-            response = await session.post(
-                _load_mcp_endpoint(),
-                data=message_bytes,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=_FABRIC_MCP_TIMEOUT_SECONDS, sock_connect=30
-                ),
-                allow_redirects=False,
-            )
-            content_type = response.headers.get(
-                "Content-Type", _JSON_MEDIA_TYPE
-            )
-            raw = await _read_mcp_response(response)
-            if response.status < 200 or response.status >= 300:
-                raise FabricMcpResponseError(
-                    _FABRIC_MCP_UPSTREAM_ERROR
-                ) from None
-            response_message = _parse_mcp_response(raw, content_type)
-            output = {"message": response_message}
-            if (
-                len(
-                    _encode_mcp_json(output, _fail_mcp_bounds)
-                )
-                > _FABRIC_MCP_MAX_BYTES
-            ):
-                _fail_mcp_bounds()
-            return output, len(raw)
-
-        output, response_bytes = await asyncio.wait_for(
-            send_once(), timeout=_FABRIC_MCP_TIMEOUT_SECONDS
-        )
-    except asyncio.CancelledError:
-        _log_mcp("cancelled", started, request_bytes, 0)
-        raise
-    except asyncio.TimeoutError:
-        _log_mcp("timeout", started, request_bytes, 0)
-        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
-    except (aiohttp.ClientError, FabricMcpResponseError):
-        _log_mcp("upstream", started, request_bytes, 0)
-        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
-    except (FabricMcpRequestError, FabricMcpConfigurationError):
-        _log_mcp("boundary", started, request_bytes, 0)
-        raise
-    except Exception:
-        _log_mcp("upstream", started, request_bytes, 0)
-        raise FabricMcpResponseError(_FABRIC_MCP_UPSTREAM_ERROR) from None
-
-    _log_mcp(
-        "success",
-        started,
-        request_bytes,
-        response_bytes,
-    )
-    return output
+    raw = await response.text(encoding="utf-8")
+    if response.status < 200 or response.status >= 300:
+        raise RuntimeError(f"Fabric MCP upstream returned HTTP {response.status}.")
+    return {"message": raw}
 
 
 @udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
