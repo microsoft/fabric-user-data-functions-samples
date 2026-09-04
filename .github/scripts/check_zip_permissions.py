@@ -25,12 +25,20 @@ Exits non-zero (and prints offending members) when a bad archive is found.
 import sys
 import glob
 import zipfile
+from pathlib import Path
 
 # group-read (0o040) and other-read (0o004) must both be set
 REQUIRED_READ = 0o044
 
 # Path segments that must never appear inside a shipped archive.
 FORBIDDEN_SEGMENTS = {".github", ".git"}
+CONNECTOR_TEMPLATE_DIR = Path(
+    "Templates/Python/ConnectorFunction/HelloFabric"
+)
+CONNECTOR_MEMBERS = {
+    "function_app.py": CONNECTOR_TEMPLATE_DIR / "function_app.py",
+    "fabric_lib/functions.metadata": CONNECTOR_TEMPLATE_DIR / "functions.metadata",
+}
 
 
 def check_zip(path):
@@ -65,6 +73,24 @@ def check_zip(path):
     return problems
 
 
+def check_connector_parity(path):
+    archive_path = Path(path)
+    if archive_path.parent != CONNECTOR_TEMPLATE_DIR:
+        return []
+    problems = []
+    with zipfile.ZipFile(archive_path) as archive:
+        for member, source in CONNECTOR_MEMBERS.items():
+            expected = source.read_bytes().replace(b"\r\n", b"\n")
+            try:
+                actual = archive.read(member).replace(b"\r\n", b"\n")
+            except KeyError:
+                problems.append(f"{path} :: missing {member}")
+                continue
+            if actual != expected:
+                problems.append(f"{path} :: {member} does not match {source}")
+    return problems
+
+
 def main(argv):
     zips = argv or sorted(glob.glob("**/*.zip", recursive=True))
     if not zips:
@@ -73,6 +99,7 @@ def main(argv):
     problems = []
     for path in zips:
         problems.extend(check_zip(path))
+        problems.extend(check_connector_parity(path))
     if problems:
         print("Bad zip members found:")
         for p in problems:
