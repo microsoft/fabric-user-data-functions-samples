@@ -132,9 +132,8 @@ def test_raw_contract_constants_and_removed_semantics():
         assert not hasattr(app, removed)
 
 
-def test_all_five_requests_and_raw_results_pass_through(monkeypatch):
+def test_all_five_requests_and_raw_results_pass_through():
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     cases = (
         ("server/discover", {"_meta": {"sdk": {"opaque": True}}}),
         ("tools/list", {"cursor": "opaque", "_meta": {"sdk": True}}),
@@ -169,11 +168,8 @@ def test_all_five_requests_and_raw_results_pass_through(monkeypatch):
 
 
 @pytest.mark.parametrize("protocol_version", ("2026-07-28", "2027-01-15"))
-def test_protocol_version_and_server_owned_headers_pass_through(
-    monkeypatch, protocol_version
-):
+def test_protocol_version_and_server_owned_headers_pass_through(protocol_version):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     output, session = _invoke(
         app,
         _request(
@@ -214,9 +210,8 @@ def test_protocol_version_and_server_owned_headers_pass_through(
         _request(version=2),
     ),
 )
-def test_invalid_boundary_fails_before_network(monkeypatch, payload):
+def test_invalid_boundary_fails_before_network(payload):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     session = _Session(())
     with pytest.raises(app.FabricMcpRequestError):
         asyncio.run(
@@ -231,11 +226,8 @@ def test_invalid_boundary_fails_before_network(monkeypatch, payload):
     "protocol_version",
     ("", " bad", "bad ", "bad\rvalue", "bad\nvalue", "bad\tvalue", "bad\x7fvalue", "é", "x" * 129),
 )
-def test_unsafe_protocol_version_fails_before_network(
-    monkeypatch, protocol_version
-):
+def test_unsafe_protocol_version_fails_before_network(protocol_version):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     session = _Session(())
     with pytest.raises(app.FabricMcpRequestError):
         asyncio.run(
@@ -248,9 +240,8 @@ def test_unsafe_protocol_version_fails_before_network(
     assert session.requests == []
 
 
-def test_task_and_jsonrpc_error_are_not_transformed(monkeypatch):
+def test_task_and_jsonrpc_error_are_not_transformed():
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     task = {
         "jsonrpc": "2.0",
         "id": "task",
@@ -293,19 +284,15 @@ def test_task_and_jsonrpc_error_are_not_transformed(monkeypatch):
         ("error", {"custom": ["opaque"], "_meta": {"sdk": True}}),
     ),
 )
-def test_upstream_result_and_error_contents_are_opaque(
-    monkeypatch, field, value
-):
+def test_upstream_result_and_error_contents_are_opaque(field, value):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     message = {"jsonrpc": "2.0", "id": "sdk-id", field: value}
     output, _ = _invoke(app, _request(), [_Response(message)])
     assert output == {"version": 1, "message": message}
 
 
-def test_sse_selects_one_correlated_raw_response(monkeypatch):
+def test_sse_selects_one_correlated_raw_response():
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     raw = (
         b'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n'
         b'data: {"jsonrpc":"2.0","id":"sdk-id","result":{"opaque":true}}\n\n'
@@ -324,7 +311,6 @@ def test_sse_selects_one_correlated_raw_response(monkeypatch):
 
 def test_sse_notifications_cannot_bypass_generic_depth_or_shape(monkeypatch):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     monkeypatch.setattr(app, "_FABRIC_MCP_MAX_DEPTH", 4)
     deep = (
         b'data: {"jsonrpc":"2.0","method":"notifications/progress",'
@@ -353,9 +339,8 @@ def test_sse_notifications_cannot_bypass_generic_depth_or_shape(monkeypatch):
 
 
 @pytest.mark.parametrize("response_id", (1, "other", None))
-def test_response_id_matches_exact_type_and_value(monkeypatch, response_id):
+def test_response_id_matches_exact_type_and_value(response_id):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     session = _Session(
         (_Response({"jsonrpc": "2.0", "id": response_id, "result": {}}),)
     )
@@ -372,7 +357,6 @@ def test_response_id_matches_exact_type_and_value(monkeypatch, response_id):
 
 def test_bounds_depth_http_and_endpoint_fail_closed(monkeypatch):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     monkeypatch.setattr(app, "_FABRIC_MCP_MAX_BYTES", 64)
     response = _Response(raw=b"x" * 65)
     with pytest.raises(app.FabricMcpBoundsError):
@@ -392,9 +376,8 @@ def test_bounds_depth_http_and_endpoint_fail_closed(monkeypatch):
         app._load_mcp_endpoint()
 
 
-def test_cancellation_and_release_failure_cleanup(monkeypatch):
+def test_cancellation_and_release_failure_cleanup():
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     blocked = _Response({})
     blocked.content = _Content(block=True)
     session = _Session((blocked,))
@@ -427,9 +410,8 @@ def test_cancellation_and_release_failure_cleanup(monkeypatch):
     assert failed.content.closed == 1
 
 
-def test_logs_and_errors_exclude_token_and_payload(monkeypatch):
+def test_logs_and_errors_exclude_token_and_payload():
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     records = []
 
     class Capture(logging.Handler):

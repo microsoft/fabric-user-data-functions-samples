@@ -42,7 +42,6 @@ def _token():
 
 def test_daily_harness_uses_raw_sse_and_private_token(monkeypatch):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     monkeypatch.setattr(app, "_FABRIC_MCP_ENDPOINT", _DAILY_ENDPOINT)
     response = _Response(
         raw=(
@@ -71,7 +70,6 @@ def test_daily_raw_discovery_and_tools(monkeypatch):
     if token is None:
         pytest.skip("Daily token is unavailable")
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_PROFILE", "fabriciq")
     monkeypatch.setattr(app, "_FABRIC_MCP_ENDPOINT", _DAILY_ENDPOINT)
 
     async def check():

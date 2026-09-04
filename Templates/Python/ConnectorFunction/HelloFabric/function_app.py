@@ -411,8 +411,7 @@ async def _read_mcp_response(response):
 def _load_mcp_endpoint():
     parsed = urlsplit(_FABRIC_MCP_ENDPOINT)
     if (
-        os.environ.get("FABRIC_MCP_PROFILE") != "fabriciq"
-        or "FABRIC_MCP_ENDPOINT" in os.environ
+        "FABRIC_MCP_ENDPOINT" in os.environ
         or "FABRIC_MCP_RING" in os.environ
         or parsed.scheme != "https"
         or parsed.geturl() != _FABRIC_MCP_ENDPOINT
