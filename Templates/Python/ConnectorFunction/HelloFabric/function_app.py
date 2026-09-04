@@ -20,14 +20,35 @@ _FABRIC_MCP_METHODS = frozenset(
     ("server/discover", "tools/list", "tools/call", "tasks/get", "tasks/cancel")
 )
 _FABRIC_MCP_ENDPOINT = "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
-_FABRIC_MCP_VARIANTS = "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
 _FABRIC_MCP_MAX_BYTES = 5 * 1024 * 1024
 _FABRIC_MCP_MAX_DEPTH = 64
+_FABRIC_MCP_MAX_HEADERS = 32
+_FABRIC_MCP_MAX_HEADER_NAME_LENGTH = 128
+_FABRIC_MCP_MAX_HEADER_VALUE_LENGTH = 128
 _FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH = 128
 _FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
-_FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "message")
+_FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "headers", "message")
 _FABRIC_MCP_REQUEST_FIELDS = frozenset(("jsonrpc", "id", "method", "params"))
 _FABRIC_MCP_SAFE_INTEGER_MAX = (1 << 53) - 1
+_FABRIC_MCP_RESERVED_HEADERS = frozenset(
+    (
+        "accept",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "cookie",
+        "host",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    )
+)
 _FABRIC_MCP_REQUEST_ERROR = "Invalid Fabric MCP request."
 _FABRIC_MCP_RESPONSE_ERROR = "Invalid Fabric MCP response."
 _FABRIC_MCP_BOUNDS_ERROR = "Fabric MCP content exceeds server limits."
@@ -195,6 +216,87 @@ def _safe_mcp_protocol_version(value):
     )
 
 
+def _safe_mcp_header_name(value):
+    token_characters = "!#$%&'*+-.^_`|~"
+    return (
+        type(value) is str
+        and 0 < len(value) <= _FABRIC_MCP_MAX_HEADER_NAME_LENGTH
+        and value.isascii()
+        and all(
+            character.isalnum() or character in token_characters
+            for character in value
+        )
+    )
+
+
+def _reserved_mcp_header(value):
+    lowered = value.lower()
+    components = []
+    component = []
+    for character in lowered:
+        if character.isalnum():
+            component.append(character)
+        elif component:
+            components.append("".join(component))
+            component = []
+    if component:
+        components.append("".join(component))
+    compact = "".join(components)
+    credential_component = any(
+        item in ("credential", "credentials", "key", "token")
+        or item.startswith(("credential", "key", "token"))
+        for item in components
+    )
+    return (
+        lowered in _FABRIC_MCP_RESERVED_HEADERS
+        or lowered.startswith("mcp-")
+        or lowered.startswith("proxy-")
+        or credential_component
+        or any(
+            marker in compact
+            for marker in (
+                "apikey",
+                "accesskey",
+                "accesstoken",
+                "credential",
+                "secretkey",
+                "subscriptionkey",
+                "token",
+            )
+        )
+    )
+
+
+def _safe_mcp_header_value(value):
+    return (
+        type(value) is str
+        and 0 < len(value) <= _FABRIC_MCP_MAX_HEADER_VALUE_LENGTH
+        and value.isascii()
+        and value.strip() == value
+        and not any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    )
+
+
+def _safe_mcp_application_headers(headers):
+    if type(headers) is not dict or len(headers) > _FABRIC_MCP_MAX_HEADERS:
+        return False
+    names = set()
+    for name, value in headers.items():
+        lowered = name.lower() if type(name) is str else ""
+        if (
+            lowered in names
+            or not _safe_mcp_header_name(name)
+            or _reserved_mcp_header(name)
+            or not _safe_mcp_header_value(value)
+        ):
+            return False
+        names.add(lowered)
+    return True
+
+
 def _safe_mcp_task_id(value):
     return (
         type(value) is str
@@ -213,11 +315,12 @@ def _parse_mcp_request(payload):
     items = tuple(payload.items())
     if tuple(key for key, _ in items) != _FABRIC_MCP_INPUT_FIELDS:
         _fail_mcp_request()
-    version, protocol_version, message = (item for _, item in items)
+    version, protocol_version, headers, message = (item for _, item in items)
     if (
         type(version) is not int
         or version != 1
         or not _safe_mcp_protocol_version(protocol_version)
+        or not _safe_mcp_application_headers(headers)
         or type(message) is not dict
         or len(message) != 4
         or frozenset(message) != _FABRIC_MCP_REQUEST_FIELDS
@@ -243,7 +346,14 @@ def _parse_mcp_request(payload):
     message_bytes = _encode_mcp_json(
         message, _FABRIC_MCP_MAX_DEPTH - 1, _fail_mcp_request
     )
-    return protocol_version, message, message_bytes, task_id, len(envelope)
+    return (
+        protocol_version,
+        dict(headers),
+        message,
+        message_bytes,
+        task_id,
+        len(envelope),
+    )
 
 
 def _load_mcp_json(raw):
@@ -452,6 +562,7 @@ async def _invoke_fabric_mcp(
     try:
         (
             protocol_version,
+            application_headers,
             message,
             message_bytes,
             task_id,
@@ -485,12 +596,12 @@ async def _invoke_fabric_mcp(
             ) from None
 
         headers = {
+            **application_headers,
             "Authorization": f"Bearer {token}",
             "Content-Type": _JSON_MEDIA_TYPE,
             "Accept": "application/json, text/event-stream",
             "Mcp-Protocol-Version": protocol_version,
             "Mcp-Method": method,
-            "X-Variants": _FABRIC_MCP_VARIANTS,
         }
         if task_id is not None:
             headers["Mcp-Name"] = task_id

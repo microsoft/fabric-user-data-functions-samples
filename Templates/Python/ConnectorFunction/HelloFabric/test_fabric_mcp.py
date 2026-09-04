@@ -81,10 +81,20 @@ def _request(
     params=None,
     protocol_version="2026-07-28",
     version=1,
+    headers=None,
 ):
     return {
         "version": version,
         "protocolVersion": protocol_version,
+        "headers": (
+            {
+                "X-Variants": (
+                    "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
+                )
+            }
+            if headers is None
+            else headers
+        ),
         "message": {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -115,9 +125,8 @@ def test_raw_contract_constants_and_removed_semantics():
     assert app._FABRIC_MCP_ENDPOINT == (
         "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
-    assert app._FABRIC_MCP_VARIANTS == (
-        "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
-    )
+    assert not hasattr(app, "_FABRIC_MCP_VARIANTS")
+    assert not hasattr(app, "_FABRIC_MCP_ALLOWED_VARIANTS")
     assert app._FABRIC_MCP_MAX_BYTES == 5_242_880
     assert app._FABRIC_MCP_MAX_DEPTH == 64
     assert app._FABRIC_MCP_TIMEOUT_SECONDS == 300
@@ -194,6 +203,81 @@ def test_protocol_version_and_server_owned_headers_pass_through(protocol_version
         "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
         "Mcp-Name": "server-task",
     }
+
+
+def test_x_variants_is_required_allowlisted_and_forwarded_unchanged():
+    app = _load_function_app()
+    variants = "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect"
+    output, session = _invoke(
+        app,
+        _request(headers={"X-Variants": variants}),
+        [_Response({"jsonrpc": "2.0", "id": "sdk-id", "result": {}})],
+    )
+    assert output["version"] == 1
+    assert session.requests[0]["headers"]["X-Variants"] == variants
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        {
+            "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
+            "aUtHoRiZaTiOn": "secret",
+        },
+        {"Host": "attacker.example"},
+        {":authority": "attacker.example"},
+        {"Content-Length": "1"},
+        {"Connection": "close"},
+        {"Transfer-Encoding": "chunked"},
+        {"Cookie": "secret"},
+        {"X-Api-Key": "secret"},
+        {"X-Api_Key": "secret"},
+        {"X-ApiKey-V2": "secret"},
+        {"X-Access-Token": "secret"},
+        {"X-Access_Token": "secret"},
+        {"X-AccessToken-Id": "secret"},
+        {"X.Credentials": "secret"},
+        {"X-CredentialId": "secret"},
+        {"mCp-Method": "tools/call"},
+        {"Proxy-Custom": "value"},
+        {"X-Test": "one", "x-test": "two"},
+        {"Bad Name": "value"},
+        {"X-Test": ""},
+        {"X-Test": "bad\rvalue"},
+        {"X-Test": "bad\nvalue"},
+        {"X-Test": "bad\tvalue"},
+        {"X-Test": "é"},
+        {"X-Test": "x" * 129},
+        {f"X-{index}": "value" for index in range(33)},
+    ),
+)
+def test_application_headers_reject_reserved_unsafe_or_excessive_values(headers):
+    app = _load_function_app()
+    session = _Session(())
+    with pytest.raises(app.FabricMcpRequestError):
+        asyncio.run(
+            app._invoke_fabric_mcp(
+                _request(headers=headers),
+                lambda: "token",
+                session_provider=lambda: session,
+            )
+        )
+    assert session.requests == []
+
+
+def test_generic_application_headers_are_forwarded_unchanged():
+    app = _load_function_app()
+    application_headers = {
+        "X-Variants": "Fabric.Routing.M365.V1,Fabric.DisableMsitRedirect",
+        "X-Client-Feature": "alpha,beta",
+    }
+    _, session = _invoke(
+        app,
+        _request(headers=application_headers),
+        [_Response({"jsonrpc": "2.0", "id": "sdk-id", "result": {}})],
+    )
+    for name, value in application_headers.items():
+        assert session.requests[0]["headers"][name] == value
 
 
 @pytest.mark.parametrize(
