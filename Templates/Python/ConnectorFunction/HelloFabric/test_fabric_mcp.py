@@ -80,12 +80,10 @@ def _request(
     request_id="sdk-id",
     params=None,
     protocol_version="2026-07-28",
-    version=1,
     headers=None,
     message=None,
 ):
     return {
-        "version": version,
         "protocolVersion": protocol_version,
         "headers": (
             {
@@ -176,16 +174,16 @@ def test_outer_fields_are_validated_by_name_not_order_and_allow_extensions():
     reordered = {
         "message": payload["message"],
         "headers": payload["headers"],
-        "version": payload["version"],
         "protocolVersion": payload["protocolVersion"],
+        "version": "legacy-extra-is-ignored",
         "futureOuterField": {"ignored": True},
     }
     output, _ = _invoke(app, reordered, [_Response({"ack": True})])
-    assert output == {"version": 1, "message": {"ack": True}}
+    assert output == {"message": {"ack": True}}
 
 
 @pytest.mark.parametrize(
-    "field", ("version", "protocolVersion", "headers", "message")
+    "field", ("protocolVersion", "headers", "message")
 )
 def test_missing_required_outer_field_is_rejected(field):
     app = _load_function_app()
@@ -204,8 +202,6 @@ def test_missing_required_outer_field_is_rejected(field):
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("version", "1"),
-        ("version", 2),
         ("protocolVersion", 1),
         ("headers", []),
         ("message", []),
@@ -238,7 +234,11 @@ def test_protocol_version_and_server_owned_headers_pass_through(protocol_version
         ),
         [_Response({"jsonrpc": "2.0", "id": "get", "result": {}})],
     )
-    assert output["version"] == 1
+    assert output["message"] == {
+        "jsonrpc": "2.0",
+        "id": "get",
+        "result": {},
+    }
     request = session.requests[0]
     assert request["url"] == app._FABRIC_MCP_ENDPOINT
     assert request["allow_redirects"] is False
@@ -260,7 +260,7 @@ def test_x_variants_is_required_allowlisted_and_forwarded_unchanged():
         _request(headers={"X-Variants": variants}),
         [_Response({"jsonrpc": "2.0", "id": "sdk-id", "result": {}})],
     )
-    assert output["version"] == 1
+    assert output["message"]["id"] == "sdk-id"
     assert session.requests[0]["headers"]["X-Variants"] == variants
 
 
@@ -334,7 +334,6 @@ def test_generic_application_headers_are_forwarded_unchanged():
         {},
         {"version": 1, "protocolVersion": "2026-07-28", "message": {}},
         _request(message=[]),
-        _request(version=2),
     ),
 )
 def test_invalid_boundary_fails_before_network(payload):
@@ -414,9 +413,9 @@ def test_task_and_jsonrpc_error_are_not_transformed():
             session_provider=lambda: session,
         )
     )
-    assert task_output == {"version": 1, "message": task}
+    assert task_output == {"message": task}
     assert "pollIntervalMs" not in task_output["message"]["result"]
-    assert error_output == {"version": 1, "message": error}
+    assert error_output == {"message": error}
 
 
 @pytest.mark.parametrize(
@@ -430,7 +429,7 @@ def test_upstream_result_and_error_contents_are_opaque(field, value):
     app = _load_function_app()
     message = {"jsonrpc": "2.0", "id": "sdk-id", field: value}
     output, _ = _invoke(app, _request(), [_Response(message)])
-    assert output == {"version": 1, "message": message}
+    assert output == {"message": message}
 
 
 def test_sse_returns_last_bounded_generic_object():
@@ -500,7 +499,7 @@ def test_sse_events_cannot_bypass_generic_depth(monkeypatch):
 def test_response_objects_are_not_correlated_or_interpreted(message):
     app = _load_function_app()
     output, session = _invoke(app, _request(request_id="1"), [_Response(message)])
-    assert output == {"version": 1, "message": message}
+    assert output == {"message": message}
     assert len(session.requests) == 1
 
 
@@ -602,12 +601,12 @@ def test_managed_wrapper_uses_fabric_item_obo(monkeypatch):
     async def fake_invoke(payload, token_provider, session_provider=app._get_session):
         captured["payload"] = payload
         captured["token"] = token_provider()
-        return {"version": 1, "message": {}}
+        return {"message": {}}
 
     monkeypatch.setattr(app, "_invoke_fabric_mcp", fake_invoke)
     payload = _request()
     output = asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem()))
-    assert output["version"] == 1
+    assert output == {"message": {}}
     assert captured == {"payload": payload, "token": "obo-token"}
 
 

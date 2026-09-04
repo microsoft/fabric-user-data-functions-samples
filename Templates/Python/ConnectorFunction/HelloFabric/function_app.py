@@ -285,14 +285,11 @@ def _safe_mcp_application_headers(headers):
 def _parse_mcp_request(payload):
     if type(payload) is not dict:
         _fail_mcp_request()
-    version = payload.get("version")
     protocol_version = payload.get("protocolVersion")
     headers = payload.get("headers")
     message = payload.get("message")
     if (
-        type(version) is not int
-        or version != 1
-        or not _safe_mcp_protocol_version(protocol_version)
+        not _safe_mcp_protocol_version(protocol_version)
         or not _safe_mcp_application_headers(headers)
         or type(message) is not dict
     ):
@@ -545,7 +542,7 @@ async def _invoke_fabric_mcp(
                     _FABRIC_MCP_UPSTREAM_ERROR
                 ) from None
             response_message = _parse_mcp_response(raw, content_type)
-            output = {"version": 1, "message": response_message}
+            output = {"message": response_message}
             if (
                 len(
                     _encode_mcp_json(
