@@ -24,7 +24,6 @@ _FABRIC_MCP_MAX_HEADER_NAME_LENGTH = 128
 _FABRIC_MCP_MAX_HEADER_VALUE_LENGTH = 128
 _FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH = 128
 _FABRIC_MCP_TIMEOUT_SECONDS = 5 * 60
-_FABRIC_MCP_INPUT_FIELDS = ("version", "protocolVersion", "headers", "message")
 _FABRIC_MCP_RESERVED_HEADERS = frozenset(
     (
         "accept",
@@ -286,15 +285,10 @@ def _safe_mcp_application_headers(headers):
 def _parse_mcp_request(payload):
     if type(payload) is not dict:
         _fail_mcp_request()
-    if (
-        len(payload) != len(_FABRIC_MCP_INPUT_FIELDS)
-        or frozenset(payload) != frozenset(_FABRIC_MCP_INPUT_FIELDS)
-    ):
-        _fail_mcp_request()
-    version = payload["version"]
-    protocol_version = payload["protocolVersion"]
-    headers = payload["headers"]
-    message = payload["message"]
+    version = payload.get("version")
+    protocol_version = payload.get("protocolVersion")
+    headers = payload.get("headers")
+    message = payload.get("message")
     if (
         type(version) is not int
         or version != 1
@@ -341,14 +335,11 @@ def _parse_mcp_sse(raw):
 
     messages = []
     data = []
-    event_name = None
     for line in text.split("\n"):
         if not line:
             if data:
-                if event_name not in (None, "message"):
-                    _fail_mcp_response()
                 try:
-                    messages.append(_load_mcp_json("\n".join(data)))
+                    message = _load_mcp_json("\n".join(data))
                 except (
                     json.JSONDecodeError,
                     TypeError,
@@ -356,19 +347,19 @@ def _parse_mcp_sse(raw):
                     RecursionError,
                 ):
                     _fail_mcp_response()
+                if type(message) is not dict:
+                    _fail_mcp_response()
+                messages.append(message)
                 data = []
-                event_name = None
-            elif event_name is not None:
-                _fail_mcp_response()
         elif line.startswith(":"):
             continue
-        elif line.startswith("event:") and event_name is None:
-            event_name = line[6:].lstrip(" ")
         elif line.startswith("data:"):
             data.append(line[5:].lstrip(" "))
+        elif line.startswith(("event:", "id:", "retry:")):
+            continue
         else:
             _fail_mcp_response()
-    if data or event_name is not None:
+    if data:
         _fail_mcp_response()
     return messages
 

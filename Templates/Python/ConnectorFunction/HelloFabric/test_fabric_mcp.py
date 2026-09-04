@@ -124,6 +124,7 @@ def test_raw_contract_constants_and_removed_semantics():
     assert not hasattr(app, "_FABRIC_MCP_PROTOCOL_VERSION")
     assert app._FABRIC_MCP_MAX_PROTOCOL_VERSION_LENGTH == 128
     assert not hasattr(app, "_FABRIC_MCP_METHODS")
+    assert not hasattr(app, "_FABRIC_MCP_INPUT_FIELDS")
     assert not hasattr(app, "_FABRIC_MCP_REQUEST_FIELDS")
     assert not hasattr(app, "_valid_mcp_id")
     assert not hasattr(app, "_safe_mcp_task_id")
@@ -169,7 +170,7 @@ def test_arbitrary_objects_notifications_and_extensions_pass_through():
     assert len(session.requests) == len(messages)
 
 
-def test_outer_fields_are_validated_by_name_not_order():
+def test_outer_fields_are_validated_by_name_not_order_and_allow_extensions():
     app = _load_function_app()
     payload = _request(message={"notification": True})
     reordered = {
@@ -177,9 +178,51 @@ def test_outer_fields_are_validated_by_name_not_order():
         "headers": payload["headers"],
         "version": payload["version"],
         "protocolVersion": payload["protocolVersion"],
+        "futureOuterField": {"ignored": True},
     }
     output, _ = _invoke(app, reordered, [_Response({"ack": True})])
     assert output == {"version": 1, "message": {"ack": True}}
+
+
+@pytest.mark.parametrize(
+    "field", ("version", "protocolVersion", "headers", "message")
+)
+def test_missing_required_outer_field_is_rejected(field):
+    app = _load_function_app()
+    payload = _request(message={"opaque": True})
+    del payload[field]
+    session = _Session(())
+    with pytest.raises(app.FabricMcpRequestError):
+        asyncio.run(
+            app._invoke_fabric_mcp(
+                payload, lambda: "token", session_provider=lambda: session
+            )
+        )
+    assert session.requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("version", "1"),
+        ("version", 2),
+        ("protocolVersion", 1),
+        ("headers", []),
+        ("message", []),
+    ),
+)
+def test_invalid_required_outer_field_is_rejected(field, value):
+    app = _load_function_app()
+    payload = _request(message={"opaque": True})
+    payload[field] = value
+    session = _Session(())
+    with pytest.raises(app.FabricMcpRequestError):
+        asyncio.run(
+            app._invoke_fabric_mcp(
+                payload, lambda: "token", session_provider=lambda: session
+            )
+        )
+    assert session.requests == []
 
 
 @pytest.mark.parametrize("protocol_version", ("2026-07-28", "2027-01-15"))
@@ -393,7 +436,9 @@ def test_upstream_result_and_error_contents_are_opaque(field, value):
 def test_sse_returns_last_bounded_generic_object():
     app = _load_function_app()
     raw = (
+        b'event: custom-intermediate\n'
         b'data: {"arbitrary":"intermediate"}\n\n'
+        b'event: another-custom-name\n'
         b'data: {"opaque":{"final":true}}\n\n'
     )
     output, _ = _invoke(
@@ -402,6 +447,22 @@ def test_sse_returns_last_bounded_generic_object():
         [_Response(raw=raw, content_type="text/event-stream")],
     )
     assert output["message"] == {"opaque": {"final": True}}
+
+
+@pytest.mark.parametrize("payload", ("[]", "null", '"scalar"', "1", "true"))
+def test_sse_rejects_non_object_data_events(payload):
+    app = _load_function_app()
+    raw = (
+        f"event: custom\n"
+        f"data: {payload}\n\n"
+        f'data: {{"final":true}}\n\n'
+    ).encode()
+    with pytest.raises(app.FabricMcpResponseError):
+        _invoke(
+            app,
+            _request(message={"opaque": True}),
+            [_Response(raw=raw, content_type="text/event-stream")],
+        )
 
 
 def test_sse_events_cannot_bypass_generic_depth(monkeypatch):
