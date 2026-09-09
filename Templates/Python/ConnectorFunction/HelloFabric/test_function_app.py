@@ -1,5 +1,5 @@
 """
-Standalone streaming tests for the `rayfin_kusto_v1` connector function.
+Standalone streaming and registration tests for the Eventhouse connector.
 
 These verify the byte-pump contract without the Fabric runtime: a minimal
 `fabric.functions` stub is injected so `function_app` imports, and the shared
@@ -17,9 +17,13 @@ aiohttp to be importable (function_app imports it at module load).
 
 import asyncio
 import importlib
+import json
 import os
 import sys
 import types
+import uuid
+import zipfile
+from pathlib import Path
 
 
 def _install_fabric_stub():
@@ -112,7 +116,7 @@ class _FakeKustoClient:
         return _FakeCredential()
 
 
-def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
+def _payload(client_request_id="KPC.rayfin_eventhouse_v1;test-id"):
     return {
         "input": {
             "queryServiceUri": "https://cluster.kusto.fabric.microsoft.com",
@@ -123,7 +127,7 @@ def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
     }
 
 
-def _command_payload(client_request_id="KPC.rayfin_kusto_v1;cmd-id"):
+def _command_payload(client_request_id="KPC.rayfin_eventhouse_v1;cmd-id"):
     return {
         "operation": "executeCommand",
         "input": {
@@ -145,7 +149,7 @@ async def _invoke(chunks, payload):
 
     mod._get_session = _fake_get_session  # type: ignore[attr-defined]
 
-    result = await mod.rayfin_kusto_v1(payload, _FakeKustoClient())
+    result = await mod.rayfin_eventhouse_v1(payload, _FakeKustoClient())
 
     body = []
     async for chunk in result.body:
@@ -170,12 +174,12 @@ async def _check_streams_multiple_chunks_without_buffering():
 async def _check_forwards_client_request_id_header():
     chunks = [b'{"Tables":[]}']
     _mod, _result, _body, _response, session = await _invoke(
-        chunks, _payload("KPC.rayfin_kusto_v1;abc-123")
+        chunks, _payload("KPC.rayfin_eventhouse_v1;abc-123")
     )
     assert session.captured_headers is not None
     assert (
         session.captured_headers.get("x-ms-client-request-id")
-        == "KPC.rayfin_kusto_v1;abc-123"
+        == "KPC.rayfin_eventhouse_v1;abc-123"
     ), "SDK-supplied clientRequestId must be forwarded as the header"
     # And the query endpoint (not mgmt) is used for executeQuery.
     assert session.captured_url.endswith("/v1/rest/query")
@@ -186,7 +190,7 @@ async def _check_execute_command_routes_to_mgmt_and_streams():
     # the v1 {Tables} body as a pure byte pump, exactly like executeQuery.
     chunks = [b'{"Tables":[', b'{"TableName":"T","Rows":[["x"]]}', b"]}"]
     _mod, _result, body, response, session = await _invoke(
-        chunks, _command_payload("KPC.rayfin_kusto_v1;cmd-1")
+        chunks, _command_payload("KPC.rayfin_eventhouse_v1;cmd-1")
     )
     assert session.captured_url.endswith(
         "/v1/rest/mgmt"
@@ -195,7 +199,7 @@ async def _check_execute_command_routes_to_mgmt_and_streams():
     assert response.text_called is False, "executeCommand must not call resp.text()"
     assert (
         session.captured_headers.get("x-ms-client-request-id")
-        == "KPC.rayfin_kusto_v1;cmd-1"
+        == "KPC.rayfin_eventhouse_v1;cmd-1"
     ), "clientRequestId is forwarded for executeCommand too"
 
 
@@ -211,6 +215,59 @@ def test_execute_command_routes_to_mgmt_and_streams():
     asyncio.run(_check_execute_command_routes_to_mgmt_and_streams())
 
 
+async def _check_generates_eventhouse_request_id():
+    _mod, _result, _body, _response, session = await _invoke(
+        [b'{"Tables":[]}'], _payload(None)
+    )
+    request_id = session.captured_headers["x-ms-client-request-id"]
+    prefix, identifier = request_id.split(";", 1)
+    assert prefix == "KPC.rayfin_eventhouse_v1"
+    assert uuid.UUID(identifier).version == 4
+
+
+def test_generates_eventhouse_request_id():
+    asyncio.run(_check_generates_eventhouse_request_id())
+
+
+def test_eventhouse_registration_has_no_legacy_alias():
+    mod = _load_function_app()
+    assert callable(mod.rayfin_eventhouse_v1)
+    assert not hasattr(mod, "rayfin_kusto_v1")
+
+    metadata = json.loads(
+        Path(__file__).with_name("functions.metadata").read_text(encoding="utf-8")
+    )
+    names = [entry["name"] for entry in metadata]
+    assert names.count("rayfin_eventhouse_v1") == 1
+    assert "rayfin_kusto_v1" not in names
+    entry = next(
+        item for item in metadata if item["name"] == "rayfin_eventhouse_v1"
+    )
+    assert entry["scriptFile"] == "function_app.py"
+    http_binding = next(
+        binding for binding in entry["bindings"] if binding["type"] == "httpTrigger"
+    )
+    assert http_binding["route"] == "rayfin_eventhouse_v1"
+    assert {
+        "name": "kustoClient",
+        "direction": "In",
+        "type": "FabricItem",
+        "audienceType": "Kusto",
+    } in entry["bindings"]
+
+
+def test_archives_match_function_source_and_metadata():
+    directory = Path(__file__).parent
+    expected = {
+        "function_app.py": (directory / "function_app.py").read_bytes(),
+        "fabric_lib/functions.metadata": (directory / "functions.metadata").read_bytes(),
+    }
+    for filename in ("Deploy.zip", "SourceCode.zip"):
+        with zipfile.ZipFile(directory / filename) as archive:
+            for member, content in expected.items():
+                assert archive.read(member) == content, f"{filename}: {member} differs"
+
+
 if __name__ == "__main__":
     test_streams_multiple_chunks_without_buffering()
     print("  ok: streams multiple chunks without buffering")
@@ -218,4 +275,10 @@ if __name__ == "__main__":
     print("  ok: forwards clientRequestId as x-ms-client-request-id header")
     test_execute_command_routes_to_mgmt_and_streams()
     print("  ok: executeCommand routes to /v1/rest/mgmt and streams")
+    test_generates_eventhouse_request_id()
+    print("  ok: default request ID uses Eventhouse and a UUID")
+    test_eventhouse_registration_has_no_legacy_alias()
+    print("  ok: Eventhouse registration has no removed-name alias")
+    test_archives_match_function_source_and_metadata()
+    print("  ok: both archives match the function source and metadata")
     print("ALL UDF STREAMING TESTS PASSED")

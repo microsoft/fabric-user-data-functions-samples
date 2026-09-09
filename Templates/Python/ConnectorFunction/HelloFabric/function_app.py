@@ -107,7 +107,7 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
-async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
+async def rayfin_eventhouse_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
     # The SDK carries the operation name alongside the input. `executeQuery` runs a
     # KQL query against /v1/rest/query; `executeCommand` runs a Kusto management
     # (control) command — text starting with a leading dot, e.g. `.show databases` —
@@ -135,7 +135,7 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
 
     client_request_id = (
         input_data.get("clientRequestId")
-        or f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+        or f"KPC.rayfin_eventhouse_v1;{uuid.uuid4()}"
     )
 
     # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
@@ -170,15 +170,6 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
             status_code=resp.status,
         )
 
-    # True streaming: relay the Kusto v1 response body chunk-by-chunk without
-    # buffering, parsing, or re-serializing it — a pure byte pump, mirroring
-    # rayfin_semantic_model_v1. The v1 {Tables} document is transformed to the
-    # Rayfin connector output shape client-side in the SDK
-    # (packages/typescript-sdk/connector-kusto/src), so the UDF keeps constant
-    # memory and TTFB stays ~= Kusto's TTFB. The `x-ms-client-request-id` header
-    # was set from the SDK-supplied clientRequestId above, so the SDK can
-    # correlate without reading the body; `x-ms-activity-id` is not relayed
-    # (accepted loss, same as the semantic-model path).
     async def relay():
         try:
             # iter_any() yields each TCP read as soon as it lands -> lowest latency.
