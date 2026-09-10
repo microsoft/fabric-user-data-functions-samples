@@ -10,8 +10,7 @@ from test_function_app import _load_function_app
 
 @pytest.fixture(autouse=True)
 def _clear_endpoint_settings(monkeypatch):
-    for name in ("FABRIC_API_BASE", "FABRIC_MCP_ENDPOINT", "FABRIC_MCP_RING"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("FABRIC_API_BASE", raising=False)
     importlib.reload(_load_function_app())
 
 
@@ -65,7 +64,8 @@ def _invoke(app, payload, responses, token="obo-token"):
 
 def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
     app = _load_function_app()
-    assert app._load_mcp_endpoint() == (
+    _, session = _invoke(app, _request(), [_Response("response")])
+    assert session.requests[0]["url"] == (
         "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     for removed in (
@@ -111,18 +111,21 @@ def test_empty_managed_base_is_not_replaced_with_prod(monkeypatch):
     monkeypatch.setenv("FABRIC_API_BASE", "")
     app = importlib.reload(_load_function_app())
     assert app._FABRIC_API_BASE == ""
-    assert app._load_mcp_endpoint() == "/v1/mcp/fabriciq"
+    _, session = _invoke(app, _request(), [_Response("response")])
+    assert session.requests[0]["url"] == "/v1/mcp/fabriciq"
 
 
 def test_managed_base_is_captured_at_module_load(monkeypatch):
     monkeypatch.setenv("FABRIC_API_BASE", "https://msitapi.fabric.microsoft.com")
     app = importlib.reload(_load_function_app())
     monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
-    assert app._load_mcp_endpoint() == (
+    _, session = _invoke(app, _request(), [_Response("response")])
+    assert session.requests[0]["url"] == (
         "https://msitapi.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     importlib.reload(app)
-    assert app._load_mcp_endpoint() == (
+    _, reloaded_session = _invoke(app, _request(), [_Response("response")])
+    assert reloaded_session.requests[0]["url"] == (
         "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
     )
 
@@ -224,20 +227,16 @@ def test_large_request_has_no_relay_owned_size_limit():
     assert len(session.requests[0]["data"]) > 5 * 1024 * 1024
 
 
-@pytest.mark.parametrize("setting", ("FABRIC_MCP_ENDPOINT", "FABRIC_MCP_RING"))
-def test_endpoint_override_is_rejected_before_network(monkeypatch, setting):
-    app = _load_function_app()
+def test_only_managed_fabric_base_selects_the_destination(monkeypatch):
     monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
-    monkeypatch.setenv(setting, "https://attacker.example")
-    session = _Session(())
-    with pytest.raises(app.FabricMcpRequestError) as error:
-        asyncio.run(
-            app._invoke_fabric_mcp(
-                _request(), lambda: "obo-token", session_provider=lambda: session
-            )
-        )
-    assert str(error.value) == "Invalid Fabric MCP endpoint configuration."
-    assert session.requests == []
+    monkeypatch.setenv("FABRIC_MCP_ENDPOINT", "https://unrelated.example")
+    monkeypatch.setenv("FABRIC_MCP_RING", "unrelated")
+    app = importlib.reload(_load_function_app())
+    output, session = _invoke(app, _request(), [_Response("opaque response")])
+    assert output == {"message": "opaque response"}
+    assert session.requests[0]["url"] == (
+        "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
+    )
 
 
 def test_non_2xx_reports_only_status():

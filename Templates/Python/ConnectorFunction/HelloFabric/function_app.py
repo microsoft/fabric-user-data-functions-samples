@@ -53,12 +53,6 @@ class FabricMcpRequestError(ValueError):
     pass
 
 
-def _load_mcp_endpoint():
-    if "FABRIC_MCP_ENDPOINT" in os.environ or "FABRIC_MCP_RING" in os.environ:
-        raise FabricMcpRequestError("Invalid Fabric MCP endpoint configuration.")
-    return f"{_FABRIC_API_BASE}/v1/mcp/fabriciq"
-
-
 async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):
     token = token_provider()
     if inspect.isawaitable(token):
@@ -87,7 +81,7 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
     headers["Authorization"] = f"Bearer {token}"
 
     response = await session.post(
-        _load_mcp_endpoint(),
+        f"{_FABRIC_API_BASE}/v1/mcp/fabriciq",
         data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
         headers=headers,
         allow_redirects=False,
