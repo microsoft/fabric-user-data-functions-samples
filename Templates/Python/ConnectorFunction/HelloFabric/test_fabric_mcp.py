@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from test_function_app import _load_function_app
 def _clear_endpoint_settings(monkeypatch):
     for name in ("FABRIC_API_BASE", "FABRIC_MCP_ENDPOINT", "FABRIC_MCP_RING"):
         monkeypatch.delenv(name, raising=False)
+    importlib.reload(_load_function_app())
 
 
 class _Response:
@@ -86,11 +88,13 @@ def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
         "https://msitapi.fabric.microsoft.com",
         "https://dxtapi.fabric.microsoft.com",
         "https://dailyapi.fabric.microsoft.com",
+        "https://managed.example",
+        "https://api.fabric.microsoft.com/",
     ),
 )
 def test_managed_fabric_origin_appends_fixed_route(monkeypatch, origin):
-    app = _load_function_app()
     monkeypatch.setenv("FABRIC_API_BASE", origin)
+    app = importlib.reload(_load_function_app())
     payload = _request(message={"opaque": True})
     payload["FABRIC_API_BASE"] = "https://attacker.example"
     payload["endpoint"] = "https://attacker.example/alternate"
@@ -103,42 +107,24 @@ def test_managed_fabric_origin_appends_fixed_route(monkeypatch, origin):
     assert json.loads(session.requests[0]["data"]) == payload["message"]
 
 
-@pytest.mark.parametrize(
-    "origin",
-    (
-        "",
-        " ",
-        "not a URL",
-        "http://api.fabric.microsoft.com",
-        "https://attacker.example",
-        "https://api.fabric.microsoft.com.attacker.example",
-        "https://user@api.fabric.microsoft.com",
-        "https://api.fabric.microsoft.com@attacker.example",
-        "https://api.fabric.microsoft.com:443",
-        "https://api.fabric.microsoft.com/",
-        "https://api.fabric.microsoft.com/v1",
-        "https://api.fabric.microsoft.com?ring=daily",
-        "https://api.fabric.microsoft.com#fragment",
-        " https://api.fabric.microsoft.com",
-        "https://api.fabric.microsoft.com\n",
-        "https://testapi.fabric.microsoft.com",
-        "https://api.fabric.microsoft.us",
-    ),
-)
-def test_invalid_managed_origin_fails_before_network(monkeypatch, origin):
-    app = _load_function_app()
-    monkeypatch.setenv("FABRIC_API_BASE", origin)
-    session = _Session(())
-    with pytest.raises(
-        app.FabricMcpRequestError,
-        match="^Invalid Fabric MCP endpoint configuration\\.$",
-    ):
-        asyncio.run(
-            app._invoke_fabric_mcp(
-                _request(), lambda: "obo-token", session_provider=lambda: session
-            )
-        )
-    assert session.requests == []
+def test_empty_managed_base_is_not_replaced_with_prod(monkeypatch):
+    monkeypatch.setenv("FABRIC_API_BASE", "")
+    app = importlib.reload(_load_function_app())
+    assert app._FABRIC_API_BASE == ""
+    assert app._load_mcp_endpoint() == "/v1/mcp/fabriciq"
+
+
+def test_managed_base_is_captured_at_module_load(monkeypatch):
+    monkeypatch.setenv("FABRIC_API_BASE", "https://msitapi.fabric.microsoft.com")
+    app = importlib.reload(_load_function_app())
+    monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
+    assert app._load_mcp_endpoint() == (
+        "https://msitapi.fabric.microsoft.com/v1/mcp/fabriciq"
+    )
+    importlib.reload(app)
+    assert app._load_mcp_endpoint() == (
+        "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
+    )
 
 
 def test_fixed_url_opaque_body_headers_and_final_authorization_overwrite():

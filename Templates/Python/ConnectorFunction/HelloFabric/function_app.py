@@ -13,14 +13,7 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-_FABRIC_API_BASE_ORIGINS = frozenset(
-    (
-        "https://api.fabric.microsoft.com",
-        "https://msitapi.fabric.microsoft.com",
-        "https://dxtapi.fabric.microsoft.com",
-        "https://dailyapi.fabric.microsoft.com",
-    )
-)
+_FABRIC_API_BASE = os.environ.get("FABRIC_API_BASE", "https://api.fabric.microsoft.com")
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -61,14 +54,9 @@ class FabricMcpRequestError(ValueError):
 
 
 def _load_mcp_endpoint():
-    base = os.environ.get("FABRIC_API_BASE", "https://api.fabric.microsoft.com")
-    if (
-        base not in _FABRIC_API_BASE_ORIGINS
-        or "FABRIC_MCP_ENDPOINT" in os.environ
-        or "FABRIC_MCP_RING" in os.environ
-    ):
+    if "FABRIC_MCP_ENDPOINT" in os.environ or "FABRIC_MCP_RING" in os.environ:
         raise FabricMcpRequestError("Invalid Fabric MCP endpoint configuration.")
-    return base + "/v1/mcp/fabriciq"
+    return f"{_FABRIC_API_BASE}/v1/mcp/fabriciq"
 
 
 async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):

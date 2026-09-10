@@ -8,7 +8,7 @@ _DAILY_ENDPOINT = "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
 
 def test_daily_harness_relays_opaque_text_and_private_token(monkeypatch):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
+    monkeypatch.setattr(app, "_FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
     upstream = 'data: {"opaque":true}\n\n'
     output, session = _invoke(
         app,
