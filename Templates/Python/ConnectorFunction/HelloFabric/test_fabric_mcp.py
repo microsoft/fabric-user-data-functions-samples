@@ -7,6 +7,12 @@ import pytest
 from test_function_app import _load_function_app
 
 
+@pytest.fixture(autouse=True)
+def _clear_endpoint_settings(monkeypatch):
+    for name in ("FABRIC_API_BASE", "FABRIC_MCP_ENDPOINT", "FABRIC_MCP_RING"):
+        monkeypatch.delenv(name, raising=False)
+
+
 class _Response:
     def __init__(self, text, status=200):
         self.status = status
@@ -57,7 +63,7 @@ def _invoke(app, payload, responses, token="obo-token"):
 
 def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
     app = _load_function_app()
-    assert app._FABRIC_MCP_ENDPOINT == (
+    assert app._load_mcp_endpoint() == (
         "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     for removed in (
@@ -71,6 +77,68 @@ def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
         "FabricMcpBoundsError",
     ):
         assert not hasattr(app, removed)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://api.fabric.microsoft.com",
+        "https://msitapi.fabric.microsoft.com",
+        "https://dxtapi.fabric.microsoft.com",
+        "https://dailyapi.fabric.microsoft.com",
+    ),
+)
+def test_managed_fabric_origin_appends_fixed_route(monkeypatch, origin):
+    app = _load_function_app()
+    monkeypatch.setenv("FABRIC_API_BASE", origin)
+    payload = _request(message={"opaque": True})
+    payload["FABRIC_API_BASE"] = "https://attacker.example"
+    payload["endpoint"] = "https://attacker.example/alternate"
+    output, session = _invoke(app, payload, [_Response("opaque response")])
+    assert output == {"message": "opaque response"}
+    assert len(session.requests) == 1
+    assert session.requests[0]["url"] == origin + "/v1/mcp/fabriciq"
+    assert session.requests[0]["allow_redirects"] is False
+    assert session.requests[0]["headers"]["Authorization"] == "Bearer obo-token"
+    assert json.loads(session.requests[0]["data"]) == payload["message"]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "",
+        " ",
+        "not a URL",
+        "http://api.fabric.microsoft.com",
+        "https://attacker.example",
+        "https://api.fabric.microsoft.com.attacker.example",
+        "https://user@api.fabric.microsoft.com",
+        "https://api.fabric.microsoft.com@attacker.example",
+        "https://api.fabric.microsoft.com:443",
+        "https://api.fabric.microsoft.com/",
+        "https://api.fabric.microsoft.com/v1",
+        "https://api.fabric.microsoft.com?ring=daily",
+        "https://api.fabric.microsoft.com#fragment",
+        " https://api.fabric.microsoft.com",
+        "https://api.fabric.microsoft.com\n",
+        "https://testapi.fabric.microsoft.com",
+        "https://api.fabric.microsoft.us",
+    ),
+)
+def test_invalid_managed_origin_fails_before_network(monkeypatch, origin):
+    app = _load_function_app()
+    monkeypatch.setenv("FABRIC_API_BASE", origin)
+    session = _Session(())
+    with pytest.raises(
+        app.FabricMcpRequestError,
+        match="^Invalid Fabric MCP endpoint configuration\\.$",
+    ):
+        asyncio.run(
+            app._invoke_fabric_mcp(
+                _request(), lambda: "obo-token", session_provider=lambda: session
+            )
+        )
+    assert session.requests == []
 
 
 def test_fixed_url_opaque_body_headers_and_final_authorization_overwrite():
@@ -97,7 +165,7 @@ def test_fixed_url_opaque_body_headers_and_final_authorization_overwrite():
     assert output == {"message": "opaque upstream response"}
     assert len(session.requests) == 1
     request = session.requests[0]
-    assert request["url"] == app._FABRIC_MCP_ENDPOINT
+    assert request["url"] == "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     assert request["allow_redirects"] is False
     assert "timeout" not in request
     assert json.loads(request["data"]) == message
@@ -170,9 +238,11 @@ def test_large_request_has_no_relay_owned_size_limit():
     assert len(session.requests[0]["data"]) > 5 * 1024 * 1024
 
 
-def test_endpoint_override_is_rejected_before_network(monkeypatch):
+@pytest.mark.parametrize("setting", ("FABRIC_MCP_ENDPOINT", "FABRIC_MCP_RING"))
+def test_endpoint_override_is_rejected_before_network(monkeypatch, setting):
     app = _load_function_app()
-    monkeypatch.setenv("FABRIC_MCP_ENDPOINT", "https://attacker.example")
+    monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
+    monkeypatch.setenv(setting, "https://attacker.example")
     session = _Session(())
     with pytest.raises(app.FabricMcpRequestError) as error:
         asyncio.run(
