@@ -93,14 +93,18 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
 
 
 @udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
-@udf.function()
+@udf.streaming_function()
 async def rayfin_fabric_mcp_v1(
     payload: dict, fabricIqClient: fn.FabricItem
-) -> dict:
+) -> fn.StreamResponse:
     def token_provider():
         return fabricIqClient.get_access_token().get_token().token
 
-    return await _invoke_fabric_mcp(payload, token_provider)
+    result = await _invoke_fabric_mcp(payload, token_provider)
+    return fn.StreamResponse(
+        iter([json.dumps(result, separators=(",", ":")).encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+    )
 
 
 @udf.streaming_function()

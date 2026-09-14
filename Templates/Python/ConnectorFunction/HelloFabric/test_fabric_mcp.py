@@ -284,9 +284,9 @@ def test_managed_wrapper_uses_fabric_item_obo(monkeypatch):
 
     monkeypatch.setattr(app, "_invoke_fabric_mcp", fake_invoke)
     payload = _request()
-    assert asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem())) == {
-        "message": "response"
-    }
+    response = asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem()))
+    assert response.media_type == "application/json"
+    assert b"".join(response.body) == b'{"message":"response"}'
     assert captured == {"payload": payload, "token": "obo-token"}
 
 
@@ -298,6 +298,7 @@ def test_metadata_declares_only_payload_and_fabric_item():
     assert function["fabricProperties"]["fabricFunctionParameters"] == [
         {"name": "payload", "dataType": "dict"}
     ]
+    assert function["fabricProperties"]["fabricFunctionReturnType"] == "StreamResponse"
     assert function["bindings"][1] == {
         "name": "fabricIqClient",
         "direction": "In",
