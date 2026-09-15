@@ -1,6 +1,7 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import logging
 import os
 from typing import Optional
 from urllib.parse import urlparse
@@ -101,3 +102,140 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
             await resp.release()
 
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
+
+
+# ---------------------------------------------------------------------------
+# rayfin_appinsights_v1 - Application Insights / Log Analytics query adapter
+# ---------------------------------------------------------------------------
+# Unlike rayfin_semantic_model_v1 (which forwards the caller's *delegated* token
+# to Power BI), this operation reads telemetry using the connector function's own
+# *system-assigned managed identity*. The BaaS workload grants that identity a
+# Log Analytics read role (e.g. "Log Analytics Reader" / "Monitoring Reader") on
+# the target App Insights resource at provisioning time. No caller token is
+# accepted or forwarded here: the browser never holds a query credential, which
+# is the whole point of the platform-owned connector in the RFC. Emit stays
+# direct from the client; only *reads* are brokered through this MSI.
+
+# Cached across warm invocations. DefaultAzureCredential probes IMDS on the first
+# token acquisition; we never close the client (closing disposes the MI token
+# cache and forces a fresh probe on the next call).
+_logs_client = None            # azure.monitor.query.aio.LogsQueryClient
+_logs_client_lock = asyncio.Lock()
+
+
+async def _get_logs_client():
+    global _logs_client
+    if _logs_client is not None:
+        return _logs_client
+    async with _logs_client_lock:
+        if _logs_client is None:
+            # Deferred imports: the portal-generated requirements.txt is not
+            # guaranteed to carry these wheels, and a module-scope import would
+            # take down the whole function app on cold start if they're absent.
+            from azure.identity.aio import DefaultAzureCredential
+            from azure.monitor.query.aio import LogsQueryClient
+            _logs_client = LogsQueryClient(DefaultAzureCredential())
+    return _logs_client
+
+
+def _parse_timespan(timespan: Optional[str]):
+    """Map the RFC ``timespan`` input to what azure-monitor-query expects.
+
+    Accepts either ``None`` (the query supplies its own time filter) or an
+    ISO-8601 *duration* such as ``PT1H``, ``PT30M`` or ``P1D``, which the SDK
+    interprets as ``now - duration .. now``. Absolute start/end ranges are
+    intentionally out of scope for the POC.
+    """
+    if not timespan:
+        return None
+    import re
+    from datetime import timedelta
+
+    m = re.fullmatch(
+        r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", timespan
+    )
+    if not m or timespan in ("P", "PT"):
+        raise ValueError(
+            "timespan must be an ISO-8601 duration like PT1H, PT30M or P1D"
+        )
+    days, hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
+    return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+
+
+@udf.streaming_function()
+async def rayfin_appinsights_v1(payload: dict) -> fn.StreamResponse:
+    import json
+
+    from azure.core.exceptions import HttpResponseError
+    from azure.monitor.query import LogsQueryStatus
+
+    operation = payload.get("operation") or "query"
+    input_data = payload.get("input", {}) or {}
+
+    if operation != "query":
+        raise ValueError(f"unsupported operation '{operation}'; expected 'query'")
+
+    kql = input_data.get("kql") or input_data.get("query")
+    if not kql:
+        raise ValueError("input.kql is required")
+
+    # Log Analytics workspace id (the customer/workspace GUID the Azure Monitor
+    # query API expects - NOT a Fabric/Power BI workspace id). This is a
+    # *server-owned* field: BaaS strips any caller-supplied value and injects the
+    # workspace bound to the app's App Insights resource (one per app, from the
+    # TIPS pool). The adapter must never accept a caller-controlled workspace id -
+    # that would let a caller redirect the query at any workspace this connector's
+    # MSI can read. Reuses the connector's existing `workspaceId` target, so no
+    # BaaS invoke-body change is needed (just point the connector config at the
+    # Log Analytics workspace GUID).
+    workspace_id = input_data.get("workspaceId")
+    if not workspace_id:
+        raise ValueError("input.workspaceId is required (injected by BaaS)")
+
+    max_rows = input_data.get("maxRows")
+    timespan = _parse_timespan(input_data.get("timespan"))
+
+    client = await _get_logs_client()
+
+    try:
+        result = await client.query_workspace(
+            workspace_id, query=kql, timespan=timespan
+        )
+    except HttpResponseError as exc:
+        # Leak-safe: log operation + status only. Never str(exc) - the exception
+        # text can echo the KQL and resource identifiers back to the caller.
+        status = getattr(exc, "status_code", None)
+        logging.error("rayfin_appinsights_v1 query failed status=%s", status)
+        body = json.dumps(
+            {"error": {"code": "QueryFailed", "message": "Application Insights query failed"}}
+        )
+        return fn.StreamResponse(
+            iter([body.encode("utf-8")]),
+            media_type="application/json",
+            status_code=status or 502,
+        )
+
+    if result.status == LogsQueryStatus.PARTIAL:
+        logging.warning("rayfin_appinsights_v1 partial result")
+        tables = result.partial_data or []
+    else:
+        tables = result.tables or []
+
+    rows_out = []
+    truncated = False
+    for table in tables:
+        cols = list(table.columns)
+        for row in table.rows:
+            rows_out.append({col: val for col, val in zip(cols, row)})
+            if max_rows and len(rows_out) >= max_rows:
+                truncated = True
+                break
+        if truncated:
+            break
+
+    # default=str so datetime / timedelta / Decimal values from Kusto serialize.
+    body = json.dumps(
+        {"rows": rows_out, "count": len(rows_out), "truncated": truncated},
+        default=str,
+    )
+    return fn.StreamResponse(iter([body.encode("utf-8")]), media_type="application/json")
