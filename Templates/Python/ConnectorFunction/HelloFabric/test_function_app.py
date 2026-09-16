@@ -9,7 +9,9 @@ chunks. The tests assert that the 200 path:
   * relays MORE THAN ONE chunk for a multi-chunk result (true streaming),
   * never buffers or parses the body (`resp.text()` is never called), and
   * forwards the SDK-supplied clientRequestId as the `x-ms-client-request-id`
-    request header.
+    request header, and
+  * never calls `json.loads` / `json.dumps` (asserted with a stdlib tripwire,
+    not merely inferred from the absence of a buffering call).
 
 Run directly (`python3 test_function_app.py`) or under pytest. Only requires
 aiohttp to be importable (function_app imports it at module load).
@@ -199,6 +201,42 @@ async def _check_execute_command_routes_to_mgmt_and_streams():
     ), "clientRequestId is forwarded for executeCommand too"
 
 
+async def _check_no_json_parsing_on_200_path():
+    # Yadi's step-6 ask, asserted directly rather than inferred: the 200 path
+    # must never parse or re-serialize the body. A tripwire replaces the stdlib
+    # `json.loads` / `json.dumps` for the duration of the relay and records any
+    # call, so an accidental reintroduction of the buffer-and-rebuild pattern
+    # fails here instead of silently costing ~4x peak memory.
+    import json as _json
+
+    calls = []
+    real_loads, real_dumps = _json.loads, _json.dumps
+
+    def _trip_loads(*args, **kwargs):
+        calls.append("json.loads")
+        return real_loads(*args, **kwargs)
+
+    def _trip_dumps(*args, **kwargs):
+        calls.append("json.dumps")
+        return real_dumps(*args, **kwargs)
+
+    _json.loads, _json.dumps = _trip_loads, _trip_dumps
+    try:
+        chunks = [b'{"Tables":[', b'{"TableName":"T","Rows":[[1]]}', b"]}"]
+        mod, _result, body, _response, _session = await _invoke(chunks, _payload())
+    finally:
+        _json.loads, _json.dumps = real_loads, real_dumps
+
+    assert not calls, f"200 path must not parse/serialize JSON, saw {calls}"
+    # The bytes still reached the caller, so the tripwire measured a real relay.
+    assert b"".join(body) == b"".join(chunks), "relayed bytes must match Kusto's"
+    # Belt and braces: the module no longer imports json at all, so there is no
+    # buffering path left to reintroduce by accident.
+    assert not hasattr(
+        mod, "json"
+    ), "function_app must not import json (no buffering path remains)"
+
+
 def test_streams_multiple_chunks_without_buffering():
     asyncio.run(_check_streams_multiple_chunks_without_buffering())
 
@@ -211,6 +249,10 @@ def test_execute_command_routes_to_mgmt_and_streams():
     asyncio.run(_check_execute_command_routes_to_mgmt_and_streams())
 
 
+def test_no_json_parsing_on_200_path():
+    asyncio.run(_check_no_json_parsing_on_200_path())
+
+
 if __name__ == "__main__":
     test_streams_multiple_chunks_without_buffering()
     print("  ok: streams multiple chunks without buffering")
@@ -218,4 +260,6 @@ if __name__ == "__main__":
     print("  ok: forwards clientRequestId as x-ms-client-request-id header")
     test_execute_command_routes_to_mgmt_and_streams()
     print("  ok: executeCommand routes to /v1/rest/mgmt and streams")
+    test_no_json_parsing_on_200_path()
+    print("  ok: no json.loads / json.dumps runs on the 200 path")
     print("ALL UDF STREAMING TESTS PASSED")
