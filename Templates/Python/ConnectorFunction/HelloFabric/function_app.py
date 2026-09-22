@@ -80,16 +80,30 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
             headers[name] = value
     headers["Authorization"] = f"Bearer {token}"
 
-    response = await session.post(
-        f"{_FABRIC_API_BASE}/v1/mcp/fabriciq",
-        data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
-        headers=headers,
-        allow_redirects=False,
-    )
-    raw = await response.text(encoding="utf-8")
-    if response.status < 200 or response.status >= 300:
-        raise RuntimeError(f"Fabric MCP upstream returned HTTP {response.status}.")
-    return {"message": raw}
+    try:
+        response = await session.post(
+            f"{_FABRIC_API_BASE}/v1/mcp/fabriciq",
+            data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            allow_redirects=False,
+        )
+        try:
+            raw = await response.text(encoding="utf-8")
+            response_headers = {}
+            seen_names = set()
+            for name, value in response.headers.items():
+                if name.lower() not in seen_names:
+                    response_headers[name] = value
+                    seen_names.add(name.lower())
+            return {
+                "status": response.status,
+                "headers": response_headers,
+                "message": raw,
+            }
+        finally:
+            response.release()
+    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError):
+        raise RuntimeError("Fabric MCP upstream transport failed.") from None
 
 
 @udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")

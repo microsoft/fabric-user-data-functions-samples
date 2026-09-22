@@ -16,6 +16,6 @@ def test_daily_harness_relays_opaque_text_and_private_token(monkeypatch):
         [_Response(upstream)],
         "private-token",
     )
-    assert output == {"message": upstream}
+    assert output == {"status": 200, "headers": {}, "message": upstream}
     assert session.requests[0]["url"] == _DAILY_ENDPOINT
     assert "private-token" not in repr(output)
