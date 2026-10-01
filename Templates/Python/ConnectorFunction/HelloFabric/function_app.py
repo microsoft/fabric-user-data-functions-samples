@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -12,6 +14,18 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://powerbiapi.analysis-df.windows.net/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+_LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1/workspaces"
+_LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
+_MAXIMUM_TELEMETRY_QUERY_LENGTH = 16 * 1024
+_MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
+_MAXIMUM_TELEMETRY_ROWS = 10000
+_TELEMETRY_TIMESPAN_PATTERN = re.compile(
+    r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
+)
+_WORKSPACE_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -25,6 +39,9 @@ _RAYFIN_ARTIFACT_OBJECT_ID_HEADER = "X-Rayfin-ArtifactObjectId"
 # loop on first use; never closed per-invoke.
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
+_telemetry_token: Optional[str] = None
+_telemetry_token_expires_at = 0.0
+_telemetry_token_lock = asyncio.Lock()
 
 
 async def _get_session() -> aiohttp.ClientSession:
@@ -45,6 +62,146 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+def _validate_telemetry_timespan(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    match = _TELEMETRY_TIMESPAN_PATTERN.fullmatch(value)
+    if not match:
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    days, hours, minutes, seconds = (
+        int(component or 0) for component in match.groups()
+    )
+    duration_seconds = (
+        days * 24 * 60 * 60 + hours * 60 * 60 + minutes * 60 + seconds
+    )
+    if duration_seconds <= 0 or duration_seconds > _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS:
+        raise ValueError("timespan must be greater than zero and at most 30 days")
+    return value
+
+
+async def _get_telemetry_access_token() -> str:
+    global _telemetry_token, _telemetry_token_expires_at
+
+    now = time.time()
+    if _telemetry_token and now < _telemetry_token_expires_at - 60:
+        return _telemetry_token
+
+    async with _telemetry_token_lock:
+        now = time.time()
+        if _telemetry_token and now < _telemetry_token_expires_at - 60:
+            return _telemetry_token
+
+        identity_endpoint = os.environ.get("IDENTITY_ENDPOINT")
+        identity_header = os.environ.get("IDENTITY_HEADER")
+        if not identity_endpoint or not identity_header:
+            raise RuntimeError("Managed identity is unavailable")
+
+        session = await _get_session()
+        response = await session.get(
+            identity_endpoint,
+            params={
+                "resource": _LOG_ANALYTICS_RESOURCE,
+                "api-version": "2019-08-01",
+            },
+            headers={"X-IDENTITY-HEADER": identity_header},
+        )
+        try:
+            if response.status != 200:
+                await response.read()
+                raise RuntimeError("Managed identity token acquisition failed")
+            token_response = await response.json()
+        finally:
+            response.release()
+
+        if not isinstance(token_response, dict):
+            raise RuntimeError("Managed identity returned an invalid token")
+        access_token = token_response.get("access_token")
+        try:
+            expires_on = float(token_response.get("expires_on", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Managed identity returned an invalid token") from exc
+        if not access_token or expires_on <= now:
+            raise RuntimeError("Managed identity returned an invalid token")
+
+        _telemetry_token = access_token
+        _telemetry_token_expires_at = expires_on
+        return access_token
+
+
+@udf.streaming_function()
+async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
+    if not isinstance(payload, dict) or payload.get("operation") != "query":
+        raise ValueError("operation must be query")
+
+    input_data = payload.get("input")
+    if not isinstance(input_data, dict):
+        raise ValueError("input is required")
+
+    query = input_data.get("kql")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("kql is required")
+    if len(query) > _MAXIMUM_TELEMETRY_QUERY_LENGTH:
+        raise ValueError(
+            f"kql cannot exceed {_MAXIMUM_TELEMETRY_QUERY_LENGTH} characters"
+        )
+
+    workspace_id = input_data.get("workspaceId")
+    if (
+        not isinstance(workspace_id, str)
+        or not _WORKSPACE_ID_PATTERN.fullmatch(workspace_id)
+    ):
+        raise ValueError("workspaceId must be a valid GUID")
+
+    timespan = _validate_telemetry_timespan(input_data.get("timespan"))
+
+    maximum_rows = input_data.get("maxRows", _MAXIMUM_TELEMETRY_ROWS)
+    if (
+        not isinstance(maximum_rows, int)
+        or isinstance(maximum_rows, bool)
+        or maximum_rows < 1
+        or maximum_rows > _MAXIMUM_TELEMETRY_ROWS
+    ):
+        raise ValueError(
+            f"maxRows must be between 1 and {_MAXIMUM_TELEMETRY_ROWS}"
+        )
+
+    access_token = await _get_telemetry_access_token()
+    url = f"{_LOG_ANALYTICS_BASE}/{workspace_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": _JSON_MEDIA_TYPE,
+        "Accept": _JSON_MEDIA_TYPE,
+    }
+    bounded_query = f"{query.rstrip()}\n| take {maximum_rows}"
+    body = {"query": bounded_query}
+    if timespan:
+        body["timespan"] = timespan
+
+    session = await _get_session()
+    response = await session.post(url, json=body, headers=headers)
+    if response.status != 200:
+        detail = await response.text()
+        response.release()
+        return fn.StreamResponse(
+            iter([detail.encode("utf-8")]),
+            media_type=response.headers.get("Content-Type", _JSON_MEDIA_TYPE),
+            status_code=response.status,
+        )
+
+    async def relay():
+        try:
+            async for chunk in response.content.iter_any():
+                yield chunk
+        finally:
+            response.release()
+
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
 
 
 @udf.streaming_function()
