@@ -71,7 +71,7 @@ https://powerbiapi.analysis-df.windows.net
 Production, daily, DXT, MSIT, and OneBox-specific origins are not accepted by this test-branch adapter.
 OneBox deployment is not established: its effective connector-template branch and endpoint routing must be confirmed separately.
 No inheritance from the TEST rollout or automatic substitution of a OneBox endpoint is assumed.
-This template does not change the approved onebox/test-only rollout.
+This template does not modify FeatureManagement configuration or broaden any rollout.
 
 The adapter constructs the data-plane URL itself:
 
@@ -90,13 +90,13 @@ This reuses TCP connections, not user credentials, cookies, default headers, or 
 An MCP session header returned by initialization is reused only within that invocation.
 There is no persistent task, conversation, or user cache.
 
-**Deployment requirement:** validate the runtime's `Fabric` generic binding and delegated token forwarding in the intended test environment.
+**TEST deployment requirement:** validate the runtime's `Fabric` generic binding and delegated token forwarding in the intended TEST environment.
 Public generic-connection documentation describes owner identity; it does not prove production on-behalf-of behavior for this connector.
 The host must supply the authorized user's Fabric token, a published agent, and server-owned routing.
 The TEST branch default is usable without deployment environment injection.
-Authorized TEST resources are still required to validate the live MCP route and generic binding; DXT/MSIT smoke results are not TEST deployment proof.
-Tenant SSO policy and delegated authorization also require runtime validation.
-These local tests do not establish live deployment, capacity/tenant prerequisites, or production authorization.
+The controlled Daily validation below exercised real Fabric sign-in, the generic binding, and delegated connector invocation.
+It does not establish that the unchanged TEST archives, TEST/PPE credential audience, or TEST MCP route work.
+Authorized TEST resources are still required for that environment-specific validation; neither Daily E2E nor earlier DXT/MSIT protocol smoke substitutes for it.
 
 ## Protocol and failures
 
@@ -106,6 +106,9 @@ Discovery requires exactly one tool, no continuation cursor, and one unambiguous
 Optional properties are not guessed or populated.
 Task augmentation requires both server capability `tasks.requests.tools.call` and tool `execution.taskSupport` of `optional` or `required`.
 Otherwise the call returns the immediate answer; a required-task tool without server task capability fails explicitly.
+Callers must handle both task and immediate-answer results.
+In the October 7 Daily validation, calls without an explicit `ttl` completed inline; setting `ttl: 300000` exercised task creation, polling, result retrieval, and cancellation.
+That is an observed test setting, not a new required input or a guarantee that every server will return a task.
 
 JSON and SSE responses are decoded by matching the JSON-RPC request ID, ignoring notifications and unrelated IDs.
 SSE parsing supports split UTF-8, multiline data, and LF/CRLF/CR frame endings.
@@ -130,6 +133,59 @@ MCP errors remain raw, so callers must not blindly retry `tools/call` failures e
 The SDK owns polling and explicit `cancelTask`; cancelling an in-flight HTTP request releases resources but does not claim the server task stopped.
 Server sessions are not deleted at invocation end, because task lifetime must not be shortened.
 Cross-invocation task lookup therefore requires the service to associate tasks with the authorized principal rather than a retained client session.
+
+## Controlled Daily validation (October 7, 2026)
+
+A manually published Daily adaptation was exercised through a deployed Fabric app using the published Rayfin CLI and SDK packages at `1.36.0-alpha.1917`.
+The app used the typed connector and real Fabric sign-in; no app-specific proxy, token stub, or direct MCP question bypassed the connector.
+Backend telemetry confirmed the Data Agent flight evaluated to true for the approved app workspace and invocations used delegated-user authentication.
+The host-contract release and backend descriptor prerequisites are merged and were exercised by that deployed runtime.
+
+This was not an unchanged deployment of the TEST archives in this branch.
+The Daily copy used the fixed Daily origin in both the base URL and exact-origin allowlist, and retained the generated Daily UDF's existing peer adapters.
+All 11 adapter functions/classes match this implementation after normalizing the environment-specific error wording.
+The successful publication's exported source and library settings were read back and verified.
+
+| Check | Observed result |
+| --- | --- |
+| Fabric sign-in and `getInfo` | Agent name, description, MCP protocol, tool schema, and task capabilities returned through the app |
+| `ask` and conversation history | An answer rendered; a follow-up sent two prior turns and returned the expected table name |
+| `startTask`, `getTask`, `getTaskResult` | With explicit five-minute TTL, task progress moved from working to completed and the final result rendered |
+| `cancelTask` | App cancellation returned `DATA_AGENT_TASK_CANCELLED`; a separate read-only MCP status check confirmed the server task was cancelled |
+| Data-backed question | After the agent owner corrected the connected data source, a fresh-history aggregate question returned a numeric count through the unchanged app and adapter |
+
+The aggregate response also included a generated-file notice, so it was not literally count-only.
+No customer records were displayed; the generated file was not opened or downloaded.
+The returned count was not independently compared against the database.
+Second-identity behavior, RLS/OLS, cancellation before a task ID is available, and broader release readiness remain outside this validation.
+
+### Dependencies and the remaining SDK compatibility check
+
+The successful Daily publication used these public-library settings:
+
+| Library | Published setting |
+| --- | --- |
+| `fabric-user-data-functions` | `1.0rc` (Portal selector; the exact resolved SDK version was not established) |
+| `requests` | `2.33.1` |
+| `aiohttp` | `3.14.1` |
+| `asyncio` | `4.0.0` |
+| `azurefunctions-extensions-http-fastapi` | `1.0.1` |
+| `azure-connectors` | `0.5.0b1` |
+
+Both PR archives already contain all five non-SDK dependency pins above, and their source and function metadata match the adjacent files.
+Their SDK requirement remains `fabric-user-data-functions ~= 1.0`, which is not the same setting as the successful Daily publication's `1.0rc` selector.
+Several library settings changed together before the successful publication; the E2E result does not isolate the RC selector as necessary.
+
+**Before treating the TEST package as merge-ready, resolve this compatibility difference:** validate the exact packaged SDK requirement with the required Fabric generic binding and streaming APIs in TEST, or establish the supported compatible SDK setting and regenerate the archives through Fabric's Library Management packaging process.
+Do not change the shared SDK requirement speculatively based only on the Daily result.
+The Fabric UDF SDK is automatically supplied; do not add a duplicate library entry.
+
+### Remaining delivery checks
+
+This branch remains TEST-only, and CLI authoring remains held.
+Delivery to `connector-function-daily` requires a separate environment-matched template change; do not replace this branch's TEST origin with Daily.
+After the target template is available, validate a fresh app's automatic `rayfin up` provisioning without manual UDF edits or library additions.
+The controlled manual publication does not prove that automatic packaging/provisioning path or the upgrade behavior of existing installations.
 
 ## Local verification and packaging
 
@@ -161,3 +217,4 @@ The response contract follows the Data Agent SDK rather than the chat-completion
 - [Data Agent MCP endpoint and prerequisites](https://learn.microsoft.com/fabric/data-science/data-agent-mcp-server)
 - [UDF programming model](https://learn.microsoft.com/fabric/data-engineering/user-data-functions/python-programming-model)
 - [FabricItem credential API](https://learn.microsoft.com/python/api/fabric-user-data-functions/fabric.functions.fabricitem)
+- [Manage UDF libraries](https://learn.microsoft.com/fabric/data-engineering/user-data-functions/how-to-manage-libraries)
