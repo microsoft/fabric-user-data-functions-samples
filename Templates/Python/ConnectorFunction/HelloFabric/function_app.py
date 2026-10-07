@@ -16,7 +16,7 @@ _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
 _LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1/workspaces"
 _LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
-_MAXIMUM_TELEMETRY_QUERY_LENGTH = 16 * 1024
+_MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
 _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
 _MAXIMUM_TELEMETRY_ROWS = 10000
 _TELEMETRY_TIMESPAN_PATTERN = re.compile(
@@ -178,7 +178,11 @@ async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
         "Content-Type": _JSON_MEDIA_TYPE,
         "Accept": _JSON_MEDIA_TYPE,
     }
-    bounded_query = f"{query.rstrip()}\n| take {maximum_rows}"
+    query_text = query.rstrip()
+    if query_text.endswith(";"):
+        query_text = query_text[:-1].rstrip()
+
+    bounded_query = f"{query_text}\n| take {maximum_rows}"
     body = {"query": bounded_query}
     if timespan:
         body["timespan"] = timespan

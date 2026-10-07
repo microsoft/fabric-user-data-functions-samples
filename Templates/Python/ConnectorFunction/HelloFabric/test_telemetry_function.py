@@ -190,6 +190,18 @@ async def _check_enforces_timespan_and_row_limit():
     }
 
 
+async def _check_removes_trailing_query_semicolon():
+    _function_app, _result, _body, _response, _token_response, session = (
+        await _invoke(
+            [b'{"tables":[]}'],
+            _payload(kql="AppTraces | project TimeGenerated, Message;  \r\n"),
+        )
+    )
+    assert session.captured_json["query"] == (
+        "AppTraces | project TimeGenerated, Message\n| take 1000"
+    )
+
+
 async def _check_forwards_upstream_error():
     error_body = json.dumps({"error": {"code": "Forbidden"}})
     _function_app, result, body, response, _token_response, _session = (
@@ -209,6 +221,7 @@ async def _check_rejects_invalid_input():
         _payload(timespan="P31D"),
         _payload(maxRows=10001),
         _payload(kql=""),
+        _payload(kql="x" * (8 * 1024 + 1)),
     ]
     for payload in invalid_payloads:
         try:
@@ -226,6 +239,10 @@ def test_enforces_timespan_and_row_limit():
     asyncio.run(_check_enforces_timespan_and_row_limit())
 
 
+def test_removes_trailing_query_semicolon():
+    asyncio.run(_check_removes_trailing_query_semicolon())
+
+
 def test_forwards_upstream_error():
     asyncio.run(_check_forwards_upstream_error())
 
@@ -237,6 +254,7 @@ def test_rejects_invalid_input():
 if __name__ == "__main__":
     test_uses_managed_identity_and_server_workspace()
     test_enforces_timespan_and_row_limit()
+    test_removes_trailing_query_semicolon()
     test_forwards_upstream_error()
     test_rejects_invalid_input()
     print("ALL TELEMETRY TESTS PASSED")
