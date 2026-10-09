@@ -8,6 +8,8 @@ import uuid
 import json
 import logging
 import os
+import re
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -16,6 +18,18 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://powerbiapi.analysis-df.windows.net/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+_LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1/workspaces"
+_LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
+_MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
+_MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
+_MAXIMUM_TELEMETRY_ROWS = 10000
+_TELEMETRY_TIMESPAN_PATTERN = re.compile(
+    r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
+)
+_WORKSPACE_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -29,6 +43,9 @@ _RAYFIN_ARTIFACT_OBJECT_ID_HEADER = "X-Rayfin-ArtifactObjectId"
 # loop on first use; never closed per-invoke.
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
+_telemetry_token: Optional[str] = None
+_telemetry_token_expires_at = 0.0
+_telemetry_token_lock = asyncio.Lock()
 
 
 async def _get_session() -> aiohttp.ClientSession:
@@ -49,6 +66,150 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+def _validate_telemetry_timespan(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    match = _TELEMETRY_TIMESPAN_PATTERN.fullmatch(value)
+    if not match:
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    days, hours, minutes, seconds = (
+        int(component or 0) for component in match.groups()
+    )
+    duration_seconds = (
+        days * 24 * 60 * 60 + hours * 60 * 60 + minutes * 60 + seconds
+    )
+    if duration_seconds <= 0 or duration_seconds > _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS:
+        raise ValueError("timespan must be greater than zero and at most 30 days")
+    return value
+
+
+async def _get_telemetry_access_token() -> str:
+    global _telemetry_token, _telemetry_token_expires_at
+
+    now = time.time()
+    if _telemetry_token and now < _telemetry_token_expires_at - 60:
+        return _telemetry_token
+
+    async with _telemetry_token_lock:
+        now = time.time()
+        if _telemetry_token and now < _telemetry_token_expires_at - 60:
+            return _telemetry_token
+
+        identity_endpoint = os.environ.get("IDENTITY_ENDPOINT")
+        identity_header = os.environ.get("IDENTITY_HEADER")
+        if not identity_endpoint or not identity_header:
+            raise RuntimeError("Managed identity is unavailable")
+
+        session = await _get_session()
+        response = await session.get(
+            identity_endpoint,
+            params={
+                "resource": _LOG_ANALYTICS_RESOURCE,
+                "api-version": "2019-08-01",
+            },
+            headers={"X-IDENTITY-HEADER": identity_header},
+        )
+        try:
+            if response.status != 200:
+                await response.read()
+                raise RuntimeError("Managed identity token acquisition failed")
+            token_response = await response.json()
+        finally:
+            response.release()
+
+        if not isinstance(token_response, dict):
+            raise RuntimeError("Managed identity returned an invalid token")
+        access_token = token_response.get("access_token")
+        try:
+            expires_on = float(token_response.get("expires_on", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Managed identity returned an invalid token") from exc
+        if not access_token or expires_on <= now:
+            raise RuntimeError("Managed identity returned an invalid token")
+
+        _telemetry_token = access_token
+        _telemetry_token_expires_at = expires_on
+        return access_token
+
+
+@udf.streaming_function()
+async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
+    if not isinstance(payload, dict) or payload.get("operation") != "query":
+        raise ValueError("operation must be query")
+
+    input_data = payload.get("input")
+    if not isinstance(input_data, dict):
+        raise ValueError("input is required")
+
+    query = input_data.get("kql")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("kql is required")
+    if len(query) > _MAXIMUM_TELEMETRY_QUERY_LENGTH:
+        raise ValueError(
+            f"kql cannot exceed {_MAXIMUM_TELEMETRY_QUERY_LENGTH} characters"
+        )
+
+    workspace_id = input_data.get("workspaceId")
+    if (
+        not isinstance(workspace_id, str)
+        or not _WORKSPACE_ID_PATTERN.fullmatch(workspace_id)
+    ):
+        raise ValueError("workspaceId must be a valid GUID")
+
+    timespan = _validate_telemetry_timespan(input_data.get("timespan"))
+
+    maximum_rows = input_data.get("maxRows", _MAXIMUM_TELEMETRY_ROWS)
+    if (
+        not isinstance(maximum_rows, int)
+        or isinstance(maximum_rows, bool)
+        or maximum_rows < 1
+        or maximum_rows > _MAXIMUM_TELEMETRY_ROWS
+    ):
+        raise ValueError(
+            f"maxRows must be between 1 and {_MAXIMUM_TELEMETRY_ROWS}"
+        )
+
+    access_token = await _get_telemetry_access_token()
+    url = f"{_LOG_ANALYTICS_BASE}/{workspace_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": _JSON_MEDIA_TYPE,
+        "Accept": _JSON_MEDIA_TYPE,
+    }
+    query_text = query.rstrip()
+    if query_text.endswith(";"):
+        query_text = query_text[:-1].rstrip()
+
+    bounded_query = f"{query_text}\n| take {maximum_rows}"
+    body = {"query": bounded_query}
+    if timespan:
+        body["timespan"] = timespan
+
+    session = await _get_session()
+    response = await session.post(url, json=body, headers=headers)
+    if response.status != 200:
+        detail = await response.text()
+        response.release()
+        return fn.StreamResponse(
+            iter([detail.encode("utf-8")]),
+            media_type=response.headers.get("Content-Type", _JSON_MEDIA_TYPE),
+            status_code=response.status,
+        )
+
+    async def relay():
+        try:
+            async for chunk in response.content.iter_any():
+                yield chunk
+        finally:
+            response.release()
+
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
 
 
 @udf.streaming_function()
@@ -110,90 +271,33 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
 
 
-# connector-function-v1 targets TEST, like this branch's POWERBI_API_BASE default.
-_FABRIC_API_BASE = "https://powerbiapi.analysis-df.windows.net"
-_DATA_AGENT_ORIGINS = frozenset({
-    "https://powerbiapi.analysis-df.windows.net",
-})
-_DATA_AGENT_OPERATIONS = {
-    "getInfo": {"refresh"},
-    "startTask": {"question", "history", "ttl"},
-    "getTask": {"taskId"},
-    "getTaskResult": {"taskId"},
-    "cancelTask": {"taskId"},
-}
-_DATA_AGENT_PROTOCOL = "2025-06-18"
-_DATA_AGENT_TIMEOUT_SECONDS = 240
-_DATA_AGENT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-_DATA_AGENT_LINE_END = re.compile(r"\r\n|\r|\n")
-# JSON escapes ASCII controls; also keep Unicode line separators inside a turn.
-_DATA_AGENT_TRANSCRIPT_LINE_BREAKS = {0x85: r"\u0085", 0x2028: r"\u2028", 0x2029: r"\u2029"}
+# Connector-neutral MCP streamable-HTTP transport. Keep in this file until
+# ConnectorFunction deployment supports multiple Python source files.
+_MCP_PROTOCOL = "2025-06-18"
+# Leave 5 seconds for session cleanup, below UDF's 240s and BaaS's 300s deadline.
+_MCP_TIMEOUT_SECONDS = 230
+_MCP_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_MCP_LINE_END = re.compile(r"\r\n|\r|\n")
 
 
-class _DataAgentError(Exception):
-    def __init__(self, code, message, **details):
-        super().__init__(message)
-        self.detail = {"code": code, "message": message, **details}
+class _McpError(Exception):
+    def __init__(self, status, body, headers):
+        super().__init__(f"MCP transport failed ({status}).")
+        self.status, self.body, self.headers = status, body, headers
 
 
-def _data_agent_input(payload):
-    invalid = "DATA_AGENT_INVALID_QUESTION"
-    if not isinstance(payload, dict):
-        raise _DataAgentError(invalid, "payload must be an object.")
-    operation = payload.get("operation")
-    if not isinstance(operation, str) or operation not in _DATA_AGENT_OPERATIONS:
-        raise _DataAgentError("DATA_AGENT_OPERATION_NOT_SUPPORTED", "Unsupported Data Agent operation.")
-    data = payload.get("input")
-    if set(payload) - {"operation", "input"} or not isinstance(data, dict):
-        raise _DataAgentError(invalid, "Expected operation and an input object only.")
-    allowed = _DATA_AGENT_OPERATIONS[operation] | {"workspaceId", "itemId", "clientRequestId"}
-    if set(data) - allowed:
-        raise _DataAgentError(invalid, "Unexpected input fields; routing and authentication overrides are not accepted.")
-    for name in ("workspaceId", "itemId"):
-        value = data.get(name)
-        if not isinstance(value, str) or not re.fullmatch(
-                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value):
-            raise _DataAgentError(invalid, "workspaceId and itemId must be GUIDs.")
-    if "clientRequestId" in data and not _data_agent_header(data["clientRequestId"], 256):
-        raise _DataAgentError(invalid, "clientRequestId must contain 1-256 visible ASCII characters.")
-    if "refresh" in data and not isinstance(data["refresh"], bool):
-        raise _DataAgentError(invalid, "refresh must be a boolean.")
-    if operation == "startTask":
-        question = data.get("question")
-        if not isinstance(question, str) or not question.strip():
-            raise _DataAgentError(invalid, "A non-empty question is required.")
-        history = data.get("history", [])
-        if not isinstance(history, list):
-            raise _DataAgentError(invalid, "history must be a list of user/assistant turns.")
-        for turn in history:
-            if (not isinstance(turn, dict) or set(turn) != {"role", "content"}
-                    or turn["role"] not in ("user", "assistant")
-                    or not isinstance(turn["content"], str)):
-                raise _DataAgentError(invalid, "Each history turn requires a user/assistant role and string content.")
-        if "ttl" in data and (type(data["ttl"]) is not int or not 0 < data["ttl"] <= 9007199254740991):
-            raise _DataAgentError(invalid, "ttl must be a positive safe integer in milliseconds.")
-    elif operation != "getInfo":
-        if not isinstance(data.get("taskId"), str) or not data["taskId"].strip():
-            raise _DataAgentError(invalid, "A non-empty taskId is required.")
-    return operation, data
+def _mcp_failure(status, message):
+    return _McpError(status, json.dumps({"message": message}).encode("utf-8"),
+                     {"Content-Type": _JSON_MEDIA_TYPE})
 
 
-def _data_agent_header(value, limit):
+def _mcp_header(value, limit):
     return isinstance(value, str) and 0 < len(value) <= limit and all(0x21 <= ord(c) <= 0x7E for c in value)
 
 
-def _data_agent_endpoint(data):
-    # Exact origin membership also rejects ports, paths, credentials, query,
-    # fragments and URL-parser normalization tricks before any token is read.
-    if _FABRIC_API_BASE not in _DATA_AGENT_ORIGINS:
-        raise _DataAgentError("DATA_AGENT_UNAVAILABLE", "Data Agent endpoint must use the fixed TEST HTTPS origin.")
-    return (f"{_FABRIC_API_BASE}/v1/mcp/workspaces/{data['workspaceId']}"
-            f"/dataagents/{data['itemId']}/agent")
-
-
-def _data_agent_json(document):
+def _mcp_json(document):
     def invalid_constant(_value):
-        raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned non-finite JSON.")
+        raise _mcp_failure(502, "MCP returned non-finite JSON.")
 
     def finite_float(value):
         number = float(value)
@@ -204,10 +308,10 @@ def _data_agent_json(document):
     try:
         return json.loads(document, parse_constant=invalid_constant, parse_float=finite_float)
     except (ValueError, UnicodeError, RecursionError) as exc:
-        raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned malformed JSON.") from exc
+        raise _mcp_failure(502, "MCP returned malformed JSON.") from exc
 
 
-async def _data_agent_documents(response):
+async def _mcp_documents(response):
     """Decode JSON or SSE incrementally, bounded across all notification frames."""
     media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
     is_sse = media_type == "text/event-stream"
@@ -219,7 +323,7 @@ async def _data_agent_documents(response):
     def take_line(line):
         if not line:
             if data_lines:
-                document = _data_agent_json("\n".join(data_lines))
+                document = _mcp_json("\n".join(data_lines))
                 data_lines.clear()
                 return document
         elif line.startswith("data:"):
@@ -231,11 +335,11 @@ async def _data_agent_documents(response):
 
     async for chunk in response.content.iter_any():
         size += len(chunk)
-        if size > _DATA_AGENT_MAX_RESPONSE_BYTES:
-            raise _DataAgentError("DATA_AGENT_RESULT_TOO_LARGE", "MCP response exceeded the 16 MiB limit.")
+        if size > _MCP_MAX_RESPONSE_BYTES:
+            raise _mcp_failure(413, "MCP response exceeded the 16 MiB limit.")
         pending += decoder.decode(chunk)
         if is_sse:
-            while match := _DATA_AGENT_LINE_END.search(pending):
+            while match := _MCP_LINE_END.search(pending):
                 if match.group() == "\r" and match.end() == len(pending):
                     break
                 line, pending = pending[:match.start()], pending[match.end():]
@@ -245,7 +349,7 @@ async def _data_agent_documents(response):
     pending += decoder.decode(b"", final=True)
     if is_sse:
         # A final CR is a complete line ending; unterminated events are not.
-        while match := _DATA_AGENT_LINE_END.search(pending):
+        while match := _MCP_LINE_END.search(pending):
             document = take_line(pending[:match.start()])
             if document is not None:
                 yield document
@@ -253,31 +357,12 @@ async def _data_agent_documents(response):
     elif pending.strip():
         if (media_type == "application/json" or media_type.endswith("+json")
                 or pending.lstrip().startswith(("{", "["))):
-            yield _data_agent_json(pending)
+            yield _mcp_json(pending)
         elif response.status != 202:
-            raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned an unsupported content type.")
+            raise _mcp_failure(502, "MCP returned an unsupported content type.")
 
 
-def _data_agent_http_error(response):
-    status = response.status
-    suffix = {
-        400: "INVALID_QUESTION", 401: "FORBIDDEN", 403: "FORBIDDEN", 404: "NOT_FOUND",
-        408: "TIMEOUT", 413: "RESULT_TOO_LARGE", 422: "INVALID_QUESTION",
-        429: "THROTTLED", 504: "TIMEOUT",
-    }.get(status, "UNAVAILABLE" if status >= 500 else "INVALID_RESPONSE")
-    details = {"httpStatus": status}
-    for name in ("x-ms-request-id", "request-id", "x-ms-activity-id"):
-        value = response.headers.get(name)
-        if _data_agent_header(value, 256):
-            details["correlationId"] = value
-            break
-    retry_after = response.headers.get("Retry-After", "")
-    if re.fullmatch(r"[0-9]{1,9}", retry_after):
-        details["retryAfterSeconds"] = int(retry_after)
-    return _DataAgentError("DATA_AGENT_" + suffix, f"MCP HTTP request failed ({status}).", **details)
-
-
-async def _data_agent_post(session, endpoint, headers, method, params, request_id):
+async def _mcp_post(session, endpoint, headers, method, params, request_id):
     message = {"jsonrpc": "2.0", "method": method}
     if params is not None:
         message["params"] = params
@@ -285,192 +370,184 @@ async def _data_agent_post(session, endpoint, headers, method, params, request_i
         message["id"] = request_id
     response = await session.post(
         endpoint, json=message, headers=headers, allow_redirects=False,
-        timeout=aiohttp.ClientTimeout(total=_DATA_AGENT_TIMEOUT_SECONDS, sock_connect=30),
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=210),
     )
     try:
-        http_error = _data_agent_http_error(response) if not 200 <= response.status < 300 else None
+        if 300 <= response.status < 400:
+            raise _mcp_failure(502, "MCP redirects are not supported.")
+        if not 200 <= response.status < 300:
+            body = bytearray()
+            async for chunk in response.content.iter_any():
+                body.extend(chunk)
+                if len(body) > _MCP_MAX_RESPONSE_BYTES:
+                    raise _mcp_failure(413, "MCP error response exceeded the 16 MiB limit.")
+            # The HTTP client decodes content encoding. Never forward framing,
+            # hop-by-hop headers, session state, or credentials to the caller.
+            excluded = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+                        "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+                        "content-encoding", "authorization", "set-cookie", "mcp-session-id"}
+            excluded.update(part.strip().lower() for part in response.headers.get("Connection", "").split(","))
+            relayed = {name: value for name, value in response.headers.items() if name.lower() not in excluded}
+            raise _McpError(response.status, bytes(body), relayed)
         saw_document = False
-        try:
-            async for document in _data_agent_documents(response):
-                saw_document = True
-                if not isinstance(document, dict) or document.get("jsonrpc") != "2.0":
-                    raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned an invalid JSON-RPC message.")
-                if "method" in document:
-                    continue
-                if "id" not in document or document["id"] != request_id:
-                    continue
-                if (("result" in document) == ("error" in document)
-                        or not isinstance(document.get("result", document.get("error")), dict)):
-                    raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned an invalid JSON-RPC response.")
-                if "error" in document and (
-                        type(document["error"].get("code")) is not int
-                        or not isinstance(document["error"].get("message"), str)):
-                    raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned a malformed JSON-RPC error.")
-                if http_error and "error" not in document:
-                    raise http_error
-                if method == "initialize" and "result" in document:
-                    session_id = response.headers.get("Mcp-Session-Id")
-                    if session_id is not None:
-                        if not _data_agent_header(session_id, 4096):
-                            raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP returned an invalid session header.")
-                        headers["Mcp-Session-Id"] = session_id
-                return document
-        except (_DataAgentError, UnicodeError) as exc:
-            if http_error:
-                raise http_error from exc
-            raise
-        if http_error:
-            raise http_error
+        async for document in _mcp_documents(response):
+            saw_document = True
+            if not isinstance(document, dict) or document.get("jsonrpc") != "2.0":
+                raise _mcp_failure(502, "MCP returned an invalid JSON-RPC message.")
+            if "method" in document or "id" not in document or document["id"] != request_id:
+                continue
+            if (("result" in document) == ("error" in document)
+                    or not isinstance(document.get("result", document.get("error")), dict)):
+                raise _mcp_failure(502, "MCP returned an invalid JSON-RPC response.")
+            if "error" in document and (type(document["error"].get("code")) is not int
+                                       or not isinstance(document["error"].get("message"), str)):
+                raise _mcp_failure(502, "MCP returned a malformed JSON-RPC error.")
+            if method == "initialize" and "result" in document:
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id is not None:
+                    if not _mcp_header(session_id, 4096):
+                        raise _mcp_failure(502, "MCP returned an invalid session header.")
+                    headers["Mcp-Session-Id"] = session_id
+            return document
         if request_id is None and response.status in (202, 204) and not saw_document:
             return None
-        raise _DataAgentError("DATA_AGENT_INVALID_RESPONSE", "MCP response did not contain the matching request id.")
+        raise _mcp_failure(502, "MCP response did not contain the matching request id.")
     finally:
         response.release()
 
 
-def _data_agent_tool(tools, initialize):
-    mismatch = "DATA_AGENT_PROTOCOL_MISMATCH"
-    entries = tools.get("tools")
-    if not isinstance(entries, list) or len(entries) != 1 or tools.get("nextCursor"):
-        raise _DataAgentError(mismatch, "Expected one published Data Agent tool without pagination.")
-    tool = entries[0]
-    if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"].strip():
-        raise _DataAgentError(mismatch, "Data Agent tool name is missing.")
-    schema = tool.get("inputSchema")
-    if not isinstance(schema, dict) or schema.get("type") != "object":
-        raise _DataAgentError(mismatch, "Data Agent tool inputSchema must be an object schema.")
-    properties, required = schema.get("properties"), schema.get("required")
-    if (not isinstance(properties, dict) or not isinstance(required, list) or len(required) != 1
-            or not isinstance(required[0], str) or required[0] not in properties
-            or not all(isinstance(prop, dict) for prop in properties.values())
-            or properties[required[0]].get("type") != "string"
-            or any(key in schema for key in ("$ref", "allOf", "anyOf", "oneOf"))):
-        raise _DataAgentError(mismatch, "Data Agent tool must have one unambiguous required string question property.")
-    tasks = initialize["capabilities"].get("tasks", {})
-    if not isinstance(tasks, dict):
-        raise _DataAgentError(mismatch, "MCP tasks capabilities must be an object.")
-    requests = tasks.get("requests", {})
-    request_tools = requests.get("tools", {}) if isinstance(requests, dict) else None
-    if not isinstance(request_tools, dict):
-        raise _DataAgentError(mismatch, "MCP task request capabilities are malformed.")
-    if "call" in request_tools and not isinstance(request_tools["call"], dict):
-        raise _DataAgentError(mismatch, "MCP tools/call task capability is malformed.")
-    task_call = isinstance(request_tools.get("call"), dict)
-    execution = tool.get("execution", {})
-    if not isinstance(execution, dict) or execution.get("taskSupport") not in (None, "optional", "required", "forbidden"):
-        raise _DataAgentError(mismatch, "Data Agent taskSupport is malformed.")
-    support = execution.get("taskSupport")
-    if support == "required" and not task_call:
-        raise _DataAgentError(mismatch, "Data Agent requires tasks without advertising tools/call task support.")
-    return tool["name"], required[0], task_call and support in ("optional", "required")
-
-
-async def _data_agent_invoke(session, endpoint, headers, operation, data):
+async def _mcp_exchange(session, endpoint, headers, method, params):
     async def post(method, params, notification=False):
-        return await _data_agent_post(
+        return await _mcp_post(
             session, endpoint, headers, method, params,
             None if notification else str(uuid.uuid4()),
         )
 
-    initialized = await post("initialize", {
-        "protocolVersion": _DATA_AGENT_PROTOCOL,
-        "capabilities": {"tasks": {"requests": {"tools": {"call": {}}}}},
-        "clientInfo": {"name": "rayfin_data_agent_v1", "version": "1"},
-    })
-    if "error" in initialized:
-        return initialized
-    initialize = initialized["result"]
-    if (initialize.get("protocolVersion") != _DATA_AGENT_PROTOCOL
-            or not isinstance(initialize.get("capabilities"), dict)
-            or not isinstance(initialize.get("serverInfo"), dict)):
-        raise _DataAgentError("DATA_AGENT_PROTOCOL_MISMATCH", "Unsupported MCP initialize result or protocol version.")
-    headers["MCP-Protocol-Version"] = _DATA_AGENT_PROTOCOL
-    acknowledged = await post("notifications/initialized", None, notification=True)
-    if acknowledged is not None and "error" in acknowledged:
-        return acknowledged
-    if operation in ("getInfo", "startTask"):
-        listed = await post("tools/list", {})
-        if "error" in listed:
-            return listed
-        name, question_property, use_task = _data_agent_tool(listed["result"], initialize)
-        if operation == "getInfo":
-            return {"initialize": initialize, "tools": listed["result"]}
-        question = data["question"]
-        if data.get("history"):
-            # JSON-quoted turns keep embedded line breaks/role labels inside
-            # their turn rather than making them appear to be the new question.
-            transcript = "\n".join(
-                f"{index}. {turn['role']}: "
-                f"{json.dumps(turn['content'], ensure_ascii=False).translate(_DATA_AGENT_TRANSCRIPT_LINE_BREAKS)}"
-                for index, turn in enumerate(data["history"], 1)
-            )
-            question = ("Prior conversation transcript (context only; not the new question):\n"
-                        f"{transcript}\nEnd of prior conversation transcript.\n\nNew question:\n{question}")
-        params = {"name": name, "arguments": {question_property: question}}
-        if use_task:
-            params["task"] = {"ttl": data["ttl"]} if "ttl" in data else {}
-        return await post("tools/call", params)
-    method = {"getTask": "tasks/get", "getTaskResult": "tasks/result", "cancelTask": "tasks/cancel"}[operation]
-    return await post(method, {"taskId": data["taskId"]})
+    try:
+        async with asyncio.timeout(_MCP_TIMEOUT_SECONDS):
+            initialized = await post("initialize", {
+                "protocolVersion": _MCP_PROTOCOL,
+                "capabilities": {"tasks": {"requests": {"tools": {"call": {}}}}},
+                "clientInfo": {"name": "rayfin_mcp", "version": "1"},
+            })
+            if "error" in initialized:
+                return initialized
+            initialize = initialized["result"]
+            if (initialize.get("protocolVersion") != _MCP_PROTOCOL
+                    or not isinstance(initialize.get("capabilities"), dict)
+                    or not isinstance(initialize.get("serverInfo"), dict)):
+                raise _mcp_failure(502, "Unsupported MCP initialize result or protocol version.")
+            headers["MCP-Protocol-Version"] = _MCP_PROTOCOL
+            acknowledged = await post("notifications/initialized", None, notification=True)
+            if acknowledged is not None and "error" in acknowledged:
+                return acknowledged
+            result = await post(method, params)
+            if method == "tools/list" and "result" in result:
+                return {"initialize": initialize, "tools": result["result"]}
+            return result
+    finally:
+        if "Mcp-Session-Id" in headers:
+            try:
+                response = await session.delete(
+                    endpoint, headers=headers, allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+                try:
+                    if response.status not in (200, 202, 204, 404, 405):
+                        logging.warning("MCP session cleanup failed with HTTP %s.", response.status)
+                finally:
+                    response.release()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                logging.warning("MCP session cleanup failed; preserving the invocation outcome.")
+
+
+_DATA_AGENT_ORIGINS = frozenset({
+    "https://powerbiapi.analysis-df.windows.net",
+    "https://dailyapi.fabric.microsoft.com",
+    "https://dxtapi.fabric.microsoft.com",
+    "https://msitapi.fabric.microsoft.com",
+    "https://api.fabric.microsoft.com",
+})
+
+
+def _data_agent_endpoint(data):
+    for name in ("workspaceId", "itemId"):
+        if not isinstance(data.get(name), str) or not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", data[name]):
+            raise _mcp_failure(400, "workspaceId and itemId must be GUIDs.")
+    try:
+        parsed = urlparse(_POWERBI_BASE)
+    except ValueError as exc:
+        raise _mcp_failure(503, "POWERBI_API_BASE must use an allowed Fabric HTTPS origin.") from exc
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if (origin not in _DATA_AGENT_ORIGINS or not _mcp_header(_POWERBI_BASE, 2048)
+            or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
+        raise _mcp_failure(503, "POWERBI_API_BASE must use an allowed Fabric HTTPS origin.")
+    return f"{origin}/v1/mcp/workspaces/{data['workspaceId']}/dataagents/{data['itemId']}/agent"
 
 
 @udf.generic_connection(argName="fabricClient", audienceType="Fabric")
 @udf.streaming_function()
 async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn.StreamResponse:
-    operation = "invalid"
-    correlation_id = str(uuid.uuid4())
-    error = None
+    logging.info("rayfin_data_agent_v1: invocation started")
     try:
-        operation, data = _data_agent_input(payload)
+        if not isinstance(payload, dict) or not isinstance(payload.get("input"), dict):
+            raise _mcp_failure(400, "Expected an input object.")
+        operation, data = payload.get("operation"), payload["input"]
+        if "history" in data:
+            raise _mcp_failure(400, "history is no longer accepted on the wire; upgrade the Data Agent SDK.")
         endpoint = _data_agent_endpoint(data)
-        correlation_id = data.get("clientRequestId", correlation_id)
-        logging.info("rayfin_data_agent_v1: operation %s started", operation)
+        if operation == "getInfo":
+            method, params = "tools/list", {}
+        elif operation == "startTask":
+            if (any(not isinstance(data.get(key), str) or not data[key].strip()
+                    for key in ("toolName", "questionProperty", "question"))
+                    or type(data.get("useTask")) is not bool):
+                raise _mcp_failure(400, "startTask requires SDK-selected toolName, questionProperty, question and useTask; upgrade the SDK.")
+            method, params = "tools/call", {"name": data["toolName"], "arguments": {data["questionProperty"]: data["question"]}}
+            if data["useTask"]:
+                params["task"] = {"ttl": data["ttl"]} if "ttl" in data else {}
+        else:
+            method = {"getTask": "tasks/get", "getTaskResult": "tasks/result",
+                      "cancelTask": "tasks/cancel"}.get(operation) if isinstance(operation, str) else None
+            if method is None or not isinstance(data.get("taskId"), str) or not data["taskId"].strip():
+                raise _mcp_failure(400, "Expected a supported task operation and a non-empty taskId.")
+            params = {"taskId": data["taskId"]}
+        correlation_id = data.get("clientRequestId", str(uuid.uuid4()))
+        if not _mcp_header(correlation_id, 256):
+            raise _mcp_failure(400, "clientRequestId must contain 1-256 visible ASCII characters.")
         access_token = fabricClient.get_access_token().get_token().token
-        if not _data_agent_header(access_token, 65536):
-            raise _DataAgentError("DATA_AGENT_FORBIDDEN", "Fabric connection did not provide an access token.")
+        if not _mcp_header(access_token, 65536):
+            raise _mcp_failure(401, "Fabric connection did not provide an access token.")
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": _JSON_MEDIA_TYPE,
             "Accept": "application/json, text/event-stream",
             "x-ms-client-request-id": correlation_id,
         }
-        async with asyncio.timeout(_DATA_AGENT_TIMEOUT_SECONDS):
-            shared = await _get_session()
-            # Pool connections, never cookies/default headers/MCP sessions.
-            # Closing this invocation's session does not close the shared pool.
-            async with aiohttp.ClientSession(
-                    connector=shared.connector, connector_owner=False,
-                    cookie_jar=aiohttp.DummyCookieJar()) as session:
-                result = await _data_agent_invoke(session, endpoint, headers, operation, data)
-    except _DataAgentError as exc:
-        error = exc.detail
+        shared = await _get_session()
+        # Pool connections, never cookies/default headers/MCP sessions.
+        async with aiohttp.ClientSession(connector=shared.connector, connector_owner=False,
+                                         cookie_jar=aiohttp.DummyCookieJar()) as session:
+            result = await _mcp_exchange(session, endpoint, headers, method, params)
+        failed = "error" in result or result.get("result", {}).get("isError") is True
+        logging.info("rayfin_data_agent_v1: %s", "upstream error" if failed else "completed")
+        return fn.StreamResponse(iter([json.dumps(result, allow_nan=False).encode("utf-8")]),
+                                 media_type=_JSON_MEDIA_TYPE, status_code=200)
+    except _McpError as exc:
+        error = exc
     except asyncio.TimeoutError:
-        error = {"code": "DATA_AGENT_TIMEOUT", "message": "Data Agent request timed out."}
+        error = _mcp_failure(504, "MCP request timed out.")
     except (aiohttp.ClientPayloadError, UnicodeError):
-        error = {"code": "DATA_AGENT_INVALID_RESPONSE", "message": "MCP response could not be decoded."}
+        error = _mcp_failure(502, "MCP response could not be decoded.")
     except aiohttp.ClientError:
-        error = {"code": "DATA_AGENT_UNAVAILABLE", "message": "Data Agent transport failed."}
+        error = _mcp_failure(503, "MCP transport failed.")
     except asyncio.CancelledError:
-        logging.info("rayfin_data_agent_v1: operation %s cancelled", operation)
+        logging.info("rayfin_data_agent_v1: invocation cancelled")
         raise
-    if error is not None:
-        error.setdefault("correlationId", correlation_id)
-        # A lost tools/call response may already have created a task. Neither
-        # this adapter nor a generic retry policy should duplicate the question.
-        error["retryable"] = operation != "startTask" and error["code"] in (
-            "DATA_AGENT_THROTTLED", "DATA_AGENT_UNAVAILABLE",
-        )
-        result = {"status": "error", "output": None, "errors": [error]}
-        logging.warning("rayfin_data_agent_v1: operation %s failed", operation)
-    else:
-        outcome = "mcp_error" if "error" in result else (
-            "tool_error" if result.get("result", {}).get("isError") is True else "succeeded"
-        )
-        logging.info("rayfin_data_agent_v1: operation %s %s", operation, outcome)
-    return fn.StreamResponse(
-        iter([json.dumps(result, allow_nan=False).encode("utf-8")]),
-        media_type=_JSON_MEDIA_TYPE, status_code=200,
-    )
+    logging.warning("rayfin_data_agent_v1: invocation failed with HTTP %s", error.status)
+    return fn.StreamResponse(iter([error.body]), status_code=error.status,
+                             media_type=_JSON_MEDIA_TYPE, headers=error.headers)
 
 
 # ---------------------------------------------------------------------------
