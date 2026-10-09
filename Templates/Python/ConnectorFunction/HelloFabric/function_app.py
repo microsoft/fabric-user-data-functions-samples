@@ -1,6 +1,10 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import codecs
+import math
+import re
+import uuid
 import json
 import logging
 import os
@@ -265,6 +269,285 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
             await resp.release()
 
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
+
+
+# Connector-neutral MCP streamable-HTTP transport. Keep in this file until
+# ConnectorFunction deployment supports multiple Python source files.
+_MCP_PROTOCOL = "2025-06-18"
+# Leave 5 seconds for session cleanup, below UDF's 240s and BaaS's 300s deadline.
+_MCP_TIMEOUT_SECONDS = 230
+_MCP_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_MCP_LINE_END = re.compile(r"\r\n|\r|\n")
+
+
+class _McpError(Exception):
+    def __init__(self, status, body, headers):
+        super().__init__(f"MCP transport failed ({status}).")
+        self.status, self.body, self.headers = status, body, headers
+
+
+def _mcp_failure(status, message):
+    return _McpError(status, json.dumps({"message": message}).encode("utf-8"),
+                     {"Content-Type": _JSON_MEDIA_TYPE})
+
+
+def _mcp_header(value, limit):
+    return isinstance(value, str) and 0 < len(value) <= limit and all(0x21 <= ord(c) <= 0x7E for c in value)
+
+
+def _mcp_json(document):
+    def invalid_constant(_value):
+        raise _mcp_failure(502, "MCP returned non-finite JSON.")
+
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            invalid_constant(value)
+        return number
+
+    try:
+        return json.loads(document, parse_constant=invalid_constant, parse_float=finite_float)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise _mcp_failure(502, "MCP returned malformed JSON.") from exc
+
+
+async def _mcp_documents(response):
+    """Decode JSON or SSE incrementally, bounded across all notification frames."""
+    media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    is_sse = media_type == "text/event-stream"
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    pending = ""
+    data_lines = []
+    size = 0
+
+    def take_line(line):
+        if not line:
+            if data_lines:
+                document = _mcp_json("\n".join(data_lines))
+                data_lines.clear()
+                return document
+        elif line.startswith("data:"):
+            value = line[5:]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
+        elif line == "data":
+            data_lines.append("")
+        return None
+
+    async for chunk in response.content.iter_any():
+        size += len(chunk)
+        if size > _MCP_MAX_RESPONSE_BYTES:
+            raise _mcp_failure(413, "MCP response exceeded the 16 MiB limit.")
+        pending += decoder.decode(chunk)
+        if is_sse:
+            while match := _MCP_LINE_END.search(pending):
+                if match.group() == "\r" and match.end() == len(pending):
+                    break
+                line, pending = pending[:match.start()], pending[match.end():]
+                document = take_line(line)
+                if document is not None:
+                    yield document
+    pending += decoder.decode(b"", final=True)
+    if is_sse:
+        # A final CR is a complete line ending; unterminated events are not.
+        while match := _MCP_LINE_END.search(pending):
+            document = take_line(pending[:match.start()])
+            if document is not None:
+                yield document
+            pending = pending[match.end():]
+    elif pending.strip():
+        if (media_type == "application/json" or media_type.endswith("+json")
+                or pending.lstrip().startswith(("{", "["))):
+            yield _mcp_json(pending)
+        elif response.status != 202:
+            raise _mcp_failure(502, "MCP returned an unsupported content type.")
+
+
+async def _mcp_post(session, endpoint, headers, method, params, request_id):
+    message = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        message["params"] = params
+    if request_id is not None:
+        message["id"] = request_id
+    response = await session.post(
+        endpoint, json=message, headers=headers, allow_redirects=False,
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=210),
+    )
+    try:
+        if 300 <= response.status < 400:
+            raise _mcp_failure(502, "MCP redirects are not supported.")
+        if not 200 <= response.status < 300:
+            body = bytearray()
+            async for chunk in response.content.iter_any():
+                body.extend(chunk)
+                if len(body) > _MCP_MAX_RESPONSE_BYTES:
+                    raise _mcp_failure(413, "MCP error response exceeded the 16 MiB limit.")
+            # The HTTP client decodes content encoding. Never forward framing,
+            # hop-by-hop headers, session state, or credentials to the caller.
+            excluded = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+                        "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+                        "content-encoding", "authorization", "set-cookie", "mcp-session-id"}
+            excluded.update(part.strip().lower() for part in response.headers.get("Connection", "").split(","))
+            relayed = {name: value for name, value in response.headers.items() if name.lower() not in excluded}
+            raise _McpError(response.status, bytes(body), relayed)
+        saw_document = False
+        async for document in _mcp_documents(response):
+            saw_document = True
+            if not isinstance(document, dict) or document.get("jsonrpc") != "2.0":
+                raise _mcp_failure(502, "MCP returned an invalid JSON-RPC message.")
+            if "method" in document or "id" not in document or document["id"] != request_id:
+                continue
+            if (("result" in document) == ("error" in document)
+                    or not isinstance(document.get("result", document.get("error")), dict)):
+                raise _mcp_failure(502, "MCP returned an invalid JSON-RPC response.")
+            if "error" in document and (type(document["error"].get("code")) is not int
+                                       or not isinstance(document["error"].get("message"), str)):
+                raise _mcp_failure(502, "MCP returned a malformed JSON-RPC error.")
+            if method == "initialize" and "result" in document:
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id is not None:
+                    if not _mcp_header(session_id, 4096):
+                        raise _mcp_failure(502, "MCP returned an invalid session header.")
+                    headers["Mcp-Session-Id"] = session_id
+            return document
+        if request_id is None and response.status in (202, 204) and not saw_document:
+            return None
+        raise _mcp_failure(502, "MCP response did not contain the matching request id.")
+    finally:
+        response.release()
+
+
+async def _mcp_exchange(session, endpoint, headers, method, params):
+    async def post(method, params, notification=False):
+        return await _mcp_post(
+            session, endpoint, headers, method, params,
+            None if notification else str(uuid.uuid4()),
+        )
+
+    try:
+        async with asyncio.timeout(_MCP_TIMEOUT_SECONDS):
+            initialized = await post("initialize", {
+                "protocolVersion": _MCP_PROTOCOL,
+                "capabilities": {"tasks": {"requests": {"tools": {"call": {}}}}},
+                "clientInfo": {"name": "rayfin_mcp", "version": "1"},
+            })
+            if "error" in initialized:
+                return initialized
+            initialize = initialized["result"]
+            if (initialize.get("protocolVersion") != _MCP_PROTOCOL
+                    or not isinstance(initialize.get("capabilities"), dict)
+                    or not isinstance(initialize.get("serverInfo"), dict)):
+                raise _mcp_failure(502, "Unsupported MCP initialize result or protocol version.")
+            headers["MCP-Protocol-Version"] = _MCP_PROTOCOL
+            acknowledged = await post("notifications/initialized", None, notification=True)
+            if acknowledged is not None and "error" in acknowledged:
+                return acknowledged
+            result = await post(method, params)
+            if method == "tools/list" and "result" in result:
+                return {"initialize": initialize, "tools": result["result"]}
+            return result
+    finally:
+        if "Mcp-Session-Id" in headers:
+            try:
+                response = await session.delete(
+                    endpoint, headers=headers, allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+                try:
+                    if response.status not in (200, 202, 204, 404, 405):
+                        logging.warning("MCP session cleanup failed with HTTP %s.", response.status)
+                finally:
+                    response.release()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                logging.warning("MCP session cleanup failed; preserving the invocation outcome.")
+
+
+_DATA_AGENT_ORIGINS = frozenset({
+    "https://powerbiapi.analysis-df.windows.net",
+    "https://dailyapi.fabric.microsoft.com",
+    "https://dxtapi.fabric.microsoft.com",
+    "https://msitapi.fabric.microsoft.com",
+    "https://api.fabric.microsoft.com",
+})
+
+
+def _data_agent_endpoint(data):
+    for name in ("workspaceId", "itemId"):
+        if not isinstance(data.get(name), str) or not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", data[name]):
+            raise _mcp_failure(400, "workspaceId and itemId must be GUIDs.")
+    try:
+        parsed = urlparse(_POWERBI_BASE)
+    except ValueError as exc:
+        raise _mcp_failure(503, "POWERBI_API_BASE must use an allowed Fabric HTTPS origin.") from exc
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if (origin not in _DATA_AGENT_ORIGINS or not _mcp_header(_POWERBI_BASE, 2048)
+            or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
+        raise _mcp_failure(503, "POWERBI_API_BASE must use an allowed Fabric HTTPS origin.")
+    return f"{origin}/v1/mcp/workspaces/{data['workspaceId']}/dataagents/{data['itemId']}/agent"
+
+
+@udf.generic_connection(argName="fabricClient", audienceType="Fabric")
+@udf.streaming_function()
+async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn.StreamResponse:
+    logging.info("rayfin_data_agent_v1: invocation started")
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload.get("input"), dict):
+            raise _mcp_failure(400, "Expected an input object.")
+        operation, data = payload.get("operation"), payload["input"]
+        if "history" in data:
+            raise _mcp_failure(400, "history is no longer accepted on the wire; upgrade the Data Agent SDK.")
+        endpoint = _data_agent_endpoint(data)
+        if operation == "getInfo":
+            method, params = "tools/list", {}
+        elif operation == "startTask":
+            if (any(not isinstance(data.get(key), str) or not data[key].strip()
+                    for key in ("toolName", "questionProperty", "question"))
+                    or type(data.get("useTask")) is not bool):
+                raise _mcp_failure(400, "startTask requires SDK-selected toolName, questionProperty, question and useTask; upgrade the SDK.")
+            method, params = "tools/call", {"name": data["toolName"], "arguments": {data["questionProperty"]: data["question"]}}
+            if data["useTask"]:
+                params["task"] = {"ttl": data["ttl"]} if "ttl" in data else {}
+        else:
+            method = {"getTask": "tasks/get", "getTaskResult": "tasks/result",
+                      "cancelTask": "tasks/cancel"}.get(operation) if isinstance(operation, str) else None
+            if method is None or not isinstance(data.get("taskId"), str) or not data["taskId"].strip():
+                raise _mcp_failure(400, "Expected a supported task operation and a non-empty taskId.")
+            params = {"taskId": data["taskId"]}
+        correlation_id = data.get("clientRequestId", str(uuid.uuid4()))
+        if not _mcp_header(correlation_id, 256):
+            raise _mcp_failure(400, "clientRequestId must contain 1-256 visible ASCII characters.")
+        access_token = fabricClient.get_access_token().get_token().token
+        if not _mcp_header(access_token, 65536):
+            raise _mcp_failure(401, "Fabric connection did not provide an access token.")
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": _JSON_MEDIA_TYPE,
+            "Accept": "application/json, text/event-stream",
+            "x-ms-client-request-id": correlation_id,
+        }
+        shared = await _get_session()
+        # Pool connections, never cookies/default headers/MCP sessions.
+        async with aiohttp.ClientSession(connector=shared.connector, connector_owner=False,
+                                         cookie_jar=aiohttp.DummyCookieJar()) as session:
+            result = await _mcp_exchange(session, endpoint, headers, method, params)
+        failed = "error" in result or result.get("result", {}).get("isError") is True
+        logging.info("rayfin_data_agent_v1: %s", "upstream error" if failed else "completed")
+        return fn.StreamResponse(iter([json.dumps(result, allow_nan=False).encode("utf-8")]),
+                                 media_type=_JSON_MEDIA_TYPE, status_code=200)
+    except _McpError as exc:
+        error = exc
+    except asyncio.TimeoutError:
+        error = _mcp_failure(504, "MCP request timed out.")
+    except (aiohttp.ClientPayloadError, UnicodeError):
+        error = _mcp_failure(502, "MCP response could not be decoded.")
+    except aiohttp.ClientError:
+        error = _mcp_failure(503, "MCP transport failed.")
+    except asyncio.CancelledError:
+        logging.info("rayfin_data_agent_v1: invocation cancelled")
+        raise
+    logging.warning("rayfin_data_agent_v1: invocation failed with HTTP %s", error.status)
+    return fn.StreamResponse(iter([error.body]), status_code=error.status,
+                             media_type=_JSON_MEDIA_TYPE, headers=error.headers)
 
 
 # ---------------------------------------------------------------------------
