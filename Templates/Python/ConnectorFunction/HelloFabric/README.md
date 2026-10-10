@@ -20,11 +20,15 @@ timeout, connection failure, incomplete body, or invalid UTF-8 fails the
 invocation rather than inventing an HTTP success. The function name, binding,
 and adapter version remain unchanged.
 
-The existing input remains `{protocolVersion, headers, message}`. Only `message`
-is JSON-serialized into one POST. Request preparation is unchanged:
+The function's `payload` uses the standard BaaS wrapper
+`{operation: "executeQuery", input: {protocolVersion, headers, message}}`.
+The operation must be `executeQuery` and `input` must be an object; direct
+input and mixed wrapper/direct fields are rejected. Only `input.message`
+is JSON-serialized into one POST, without interpreting its contents.
+Request preparation is unchanged:
 missing Content-Type defaults to
 `application/json`, missing Accept to `application/json, text/event-stream`,
-and missing MCP-Protocol-Version to `payload.protocolVersion`. Header presence
+and missing MCP-Protocol-Version to `input.protocolVersion`. Header presence
 is checked case-insensitively and caller values are not overwritten.
 Only incoming Authorization is filtered; there is no new Host, framing,
 hop-by-hop, or Connection-nominated header filter.
@@ -32,13 +36,25 @@ Authorization is replaced case-insensitively with the existing Fabric binding's
 delegated token. The shared HTTP session and its timeout policy are reused;
 other ConnectorFunction entry points are unchanged.
 
-The default Fabric origin remains `https://api.fabric.microsoft.com`.
-Alternate environments must supply the managed `FABRIC_API_BASE` setting; do not hardcode an environment-specific origin in the template or its archives.
-The destination is constructed as before:
-`FABRIC_API_BASE + "/v1/mcp/fabriciq"`, with no new validation or normalization.
-A trailing slash is retained (yielding a double slash at the join), and an
-explicitly empty setting is not replaced with the default; invalid URLs fail
-in the HTTP client.
+The destination derives only from the existing server-managed `POWERBI_API_BASE`,
+read at module load. Its existing default is
+`https://dailyapi.powerbi.com/v1.0/myorg`, so an absent setting targets **Daily**,
+not Prod. `FABRIC_API_BASE` is no longer read.
+The parsed hostname selects the following origin transformation, then the fixed
+route `/v1/mcp/fabriciq` is appended:
+
+| Configured PowerBI hostname | Fabric origin |
+| --- | --- |
+| `api.powerbi.com` (Prod, MSIT, MSITBCDR, ONEBOX) | `https://api.fabric.microsoft.com` |
+| `dailyapi.powerbi.com` | `https://dailyapi.fabric.microsoft.com` |
+| `dxtapi.powerbi.com` (including BCDR) | `https://dxtapi.fabric.microsoft.com` |
+| `powerbiapi.analysis-df.windows.net` (TEST/EDOG) | `https://powerbiapi.analysis-df.windows.net` |
+
+All approved configurations use HTTPS; the implementation retains the configured
+scheme. Other configured hosts retain their parsed origin rather than inventing
+a Fabric hostname. The PowerBI path, query, and fragment are not forwarded.
+An explicitly empty setting is not replaced with the default and fails in the
+HTTP client.
 The server setting, not caller data, is the trust boundary: administrators remain
 responsible for configuring a trusted destination. The HTTP envelope change does
 not add destination or request-header validation.

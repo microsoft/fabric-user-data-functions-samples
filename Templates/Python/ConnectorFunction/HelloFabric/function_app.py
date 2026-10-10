@@ -13,7 +13,6 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-_FABRIC_API_BASE = os.environ.get("FABRIC_API_BASE", "https://api.fabric.microsoft.com")
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -80,9 +79,14 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
             headers[name] = value
     headers["Authorization"] = f"Bearer {token}"
 
+    base = urlparse(_POWERBI_BASE)
+    origin = "{0.scheme}://{0.netloc}".format(base)
+    if base.hostname in ("api.powerbi.com", "dailyapi.powerbi.com", "dxtapi.powerbi.com"):
+        origin = f"{base.scheme}://{base.hostname.split('.')[0]}.fabric.microsoft.com"
+
     try:
         response = await session.post(
-            f"{_FABRIC_API_BASE}/v1/mcp/fabriciq",
+            f"{origin}/v1/mcp/fabriciq",
             data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
             headers=headers,
             allow_redirects=False,
@@ -111,6 +115,14 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
 async def rayfin_fabric_mcp_v1(
     payload: dict, fabricIqClient: fn.FabricItem
 ) -> fn.StreamResponse:
+    if (
+        payload.get("operation") != "executeQuery"
+        or not isinstance(payload.get("input"), dict)
+        or any(key in payload for key in ("protocolVersion", "headers", "message"))
+    ):
+        raise FabricMcpRequestError("Invalid connector invocation wrapper.")
+    payload = payload["input"]
+
     def token_provider():
         return fabricIqClient.get_access_token().get_token().token
 

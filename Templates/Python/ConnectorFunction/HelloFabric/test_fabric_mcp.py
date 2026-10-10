@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ from test_function_app import _load_function_app
 
 @pytest.fixture(autouse=True)
 def _clear_endpoint_settings(monkeypatch):
-    monkeypatch.delenv("FABRIC_API_BASE", raising=False)
+    monkeypatch.delenv("POWERBI_API_BASE", raising=False)
     importlib.reload(_load_function_app())
 
 
@@ -79,7 +80,7 @@ def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
     app = _load_function_app()
     _, session = _invoke(app, _request(), [_Response("response")])
     assert session.requests[0]["url"] == (
-        "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
+        "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     for removed in (
         "_FABRIC_MCP_MAX_BYTES",
@@ -95,20 +96,23 @@ def test_direct_relay_has_only_fixed_endpoint_and_obo_policy():
 
 
 @pytest.mark.parametrize(
-    "origin",
+    "base, origin",
     (
-        "https://api.fabric.microsoft.com",
-        "https://msitapi.fabric.microsoft.com",
-        "https://dxtapi.fabric.microsoft.com",
-        "https://dailyapi.fabric.microsoft.com",
-        "https://managed.example",
-        "https://api.fabric.microsoft.com/",
+        pytest.param("https://api.powerbi.com/v1.0/myorg", "https://api.fabric.microsoft.com", id="prod-msit-msitbcdr-onebox"),
+        pytest.param("https://dailyapi.powerbi.com/v1.0/myorg", "https://dailyapi.fabric.microsoft.com", id="daily"),
+        pytest.param("https://dxtapi.powerbi.com/v1.0/myorg", "https://dxtapi.fabric.microsoft.com", id="dxt-bcdr"),
+        pytest.param("https://powerbiapi.analysis-df.windows.net/v1.0/myorg", "https://powerbiapi.analysis-df.windows.net", id="test-edog"),
+        ("https://managed.example/v1.0/myorg", "https://managed.example"),
+        ("https://managed.example/api.powerbi.com?host=api.powerbi.com", "https://managed.example"),
+        ("https://api.powerbi.com.example/v1.0/myorg", "https://api.powerbi.com.example"),
     ),
 )
-def test_managed_fabric_origin_appends_fixed_route(monkeypatch, origin):
-    monkeypatch.setenv("FABRIC_API_BASE", origin)
+def test_managed_powerbi_origin_maps_host_and_appends_fixed_route(monkeypatch, base, origin):
+    monkeypatch.setenv("POWERBI_API_BASE", base)
+    monkeypatch.setenv("FABRIC_API_BASE", "https://ignored.example")
     app = importlib.reload(_load_function_app())
     payload = _request(message={"opaque": True})
+    payload["POWERBI_API_BASE"] = "https://attacker.example"
     payload["FABRIC_API_BASE"] = "https://attacker.example"
     payload["endpoint"] = "https://attacker.example/alternate"
     output, session = _invoke(app, payload, [_Response("opaque response")])
@@ -120,17 +124,17 @@ def test_managed_fabric_origin_appends_fixed_route(monkeypatch, origin):
     assert json.loads(session.requests[0]["data"]) == payload["message"]
 
 
-def test_empty_managed_base_is_not_replaced_with_prod(monkeypatch):
-    monkeypatch.setenv("FABRIC_API_BASE", "")
+def test_empty_managed_base_is_not_replaced_with_default(monkeypatch):
+    monkeypatch.setenv("POWERBI_API_BASE", "")
     app = importlib.reload(_load_function_app())
-    assert app._FABRIC_API_BASE == ""
+    assert app._POWERBI_BASE == ""
     _, session = _invoke(app, _request(), [_Response("response")])
-    assert session.requests[0]["url"] == "/v1/mcp/fabriciq"
+    assert session.requests[0]["url"] == ":///v1/mcp/fabriciq"
 
 
 def test_empty_managed_base_fails_explicitly_in_http_client(monkeypatch):
     app = _load_function_app()
-    monkeypatch.setattr(app, "_FABRIC_API_BASE", "")
+    monkeypatch.setattr(app, "_POWERBI_BASE", "")
 
     async def run():
         async with aiohttp.ClientSession() as session:
@@ -143,12 +147,12 @@ def test_empty_managed_base_fails_explicitly_in_http_client(monkeypatch):
 
 
 def test_managed_base_is_captured_at_module_load(monkeypatch):
-    monkeypatch.setenv("FABRIC_API_BASE", "https://msitapi.fabric.microsoft.com")
+    monkeypatch.setenv("POWERBI_API_BASE", "https://api.powerbi.com/v1.0/myorg")
     app = importlib.reload(_load_function_app())
-    monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
+    monkeypatch.setenv("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
     _, session = _invoke(app, _request(), [_Response("response")])
     assert session.requests[0]["url"] == (
-        "https://msitapi.fabric.microsoft.com/v1/mcp/fabriciq"
+        "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
     )
     importlib.reload(app)
     _, reloaded_session = _invoke(app, _request(), [_Response("response")])
@@ -196,7 +200,7 @@ def test_fixed_url_opaque_body_headers_and_final_authorization_overwrite():
     }
     assert len(session.requests) == 1
     request = session.requests[0]
-    assert request["url"] == "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
+    assert request["url"] == "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
     assert request["allow_redirects"] is False
     assert "timeout" not in request
     assert json.loads(request["data"]) == message
@@ -288,7 +292,7 @@ def test_large_request_has_no_relay_owned_size_limit():
 
 
 def test_only_managed_fabric_base_selects_the_destination(monkeypatch):
-    monkeypatch.setenv("FABRIC_API_BASE", "https://dailyapi.fabric.microsoft.com")
+    monkeypatch.setenv("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
     monkeypatch.setenv("FABRIC_MCP_ENDPOINT", "https://unrelated.example")
     monkeypatch.setenv("FABRIC_MCP_RING", "unrelated")
     app = importlib.reload(_load_function_app())
@@ -443,12 +447,103 @@ def test_managed_wrapper_uses_fabric_item_obo(monkeypatch):
 
     monkeypatch.setattr(app, "_invoke_fabric_mcp", fake_invoke)
     payload = _request()
-    response = asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem()))
+    supplied = {"operation": "executeQuery", "input": payload}
+    response = asyncio.run(app.rayfin_fabric_mcp_v1(supplied, FabricItem()))
     assert response.media_type == "application/json"
     assert json.loads(b"".join(response.body)) == {
         "status": 429, "headers": {"Retry-After": "7"}, "message": "response"
     }
     assert captured == {"payload": payload, "token": "obo-token"}
+    assert captured["payload"] is payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        _request(),
+        {},
+        {"operation": "executeQuery"},
+        {"input": _request()},
+        {"operation": "executeQuery", "input": None},
+        {"operation": "executeQuery", "input": []},
+        {"operation": "executeQuery", "input": "invalid"},
+        {"operation": "executeCommand", "input": _request()},
+        {"operation": "", "input": _request()},
+        {"operation": None, "input": _request()},
+        {"operation": 1, "input": _request()},
+        *(
+            {"operation": "executeQuery", "input": _request(), field: None}
+            for field in ("protocolVersion", "headers", "message")
+        ),
+    ),
+)
+def test_nonstandard_wrapper_is_rejected_before_invocation(monkeypatch, payload):
+    app = _load_function_app()
+    calls = []
+
+    async def unexpected_invoke(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(app, "_invoke_fabric_mcp", unexpected_invoke)
+    with pytest.raises(app.FabricMcpRequestError, match="Invalid connector invocation wrapper"):
+        asyncio.run(app.rayfin_fabric_mcp_v1(payload, object()))
+    assert calls == []
+
+
+def test_actual_baas_serialized_fixture_preserves_upstream_exchange(monkeypatch):
+    # Captured from BaaS BuildInvokeBody's passing StandardMcpPayload case.
+    serialized = (
+        '{"payload":{"operation":"executeQuery","input":{"protocolVersion":"2025-11-25",'
+        '"headers":{"Mcp-Session-Id":"synthetic-session"},"message":{"jsonrpc":"2.0",'
+        '"id":"synthetic-id","method":"tools/call","params":{"name":"AskPowerBI",'
+        '"arguments":{"question":"synthetic","workspaceId":"opaque-inner-workspace",'
+        '"itemId":"opaque-inner-item"}},"x-extension":{"keep":true}}}}}'
+    )
+    assert hashlib.sha256(serialized.encode("utf-8")).hexdigest() == (
+        "faea25d08180306abfb1dae7e5b9012af6d35b10c9d12233d3672e52f003746f"
+    )
+    body = json.loads(serialized)
+    payload = body["payload"]
+    inner = payload["input"]
+    assert set(payload) == {"operation", "input"}
+    assert set(inner) == {"protocolVersion", "headers", "message"}
+    app = _load_function_app()
+    upstream = '{"jsonrpc":"2.0","id":"synthetic-id","result":{"opaque":true}}'
+    response = _Response(upstream, 202, {"Retry-After": "7", "X-Upstream": "synthetic"})
+    session = _Session([response])
+    invoke = app._invoke_fabric_mcp
+
+    async def invoke_with_session(value, token_provider):
+        assert value is inner
+        return await invoke(value, token_provider, session_provider=lambda: session)
+
+    class FabricItem:
+        def get_access_token(self):
+            return self
+
+        def get_token(self):
+            return self
+
+        token = "synthetic-obo-token"
+
+    monkeypatch.setattr(app, "_invoke_fabric_mcp", invoke_with_session)
+    output = asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem()))
+    assert output.media_type == "application/json"
+    assert json.loads(b"".join(output.body)) == {
+        "status": 202,
+        "headers": {"Retry-After": "7", "X-Upstream": "synthetic"},
+        "message": upstream,
+    }
+    assert len(session.requests) == 1
+    request = session.requests[0]
+    assert request["url"] == "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
+    assert request["allow_redirects"] is False
+    assert request["headers"]["Authorization"] == "Bearer synthetic-obo-token"
+    assert request["headers"]["Mcp-Session-Id"] == "synthetic-session"
+    assert request["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+    assert request["data"] == json.dumps(inner["message"], separators=(",", ":")).encode("utf-8")
+    assert json.dumps(body, separators=(",", ":")) == serialized
+    assert response.released
 
 
 def test_metadata_declares_only_payload_and_fabric_item():
@@ -527,7 +622,7 @@ def test_real_http_forwarding_and_buffering(status, client_headers, media_type):
             async with aiohttp.ClientSession() as client:
                 class LoopbackSession:
                     def post(self, url, **kwargs):
-                        assert url == "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
+                        assert url == "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
                         return client.post(
                             f"http://127.0.0.1:{port}/v1/mcp/fabriciq", **kwargs
                         )
@@ -646,7 +741,7 @@ def test_real_http_failure_never_returns_a_success_envelope(failure):
             ) as client:
                 class LoopbackSession:
                     def post(self, url, **kwargs):
-                        assert url == "https://api.fabric.microsoft.com/v1/mcp/fabriciq"
+                        assert url == "https://dailyapi.fabric.microsoft.com/v1/mcp/fabriciq"
                         return client.post(
                             f"http://127.0.0.1:{port}/v1/mcp/fabriciq", **kwargs
                         )
