@@ -291,14 +291,14 @@ async def _check_o365_without_token_uses_cached_msi_client():
 async def _check_o365_with_token_uses_fresh_client_and_closes():
     mod = _o365_setup()
     response = await mod.rayfin_office365users_v1(
-        _o365_payload(accessToken="Bearer abc.def")
+        _o365_payload(accessToken="abc.def")
     )
     assert response.status_code == 200
     assert b"Boss" in _body(response)
     assert len(_FakeO365Client.instances) == 1
     client = _FakeO365Client.instances[0]
     assert isinstance(client.token_provider, _FakeTokenProvider)
-    assert client.token_provider.api_key == "abc.def", "Bearer prefix stripped"
+    assert client.token_provider.api_key == "abc.def", "token passed as-is"
     assert client.closed is True, "per-call token client must be closed"
     assert mod._clients == {}, "token client must not be cached"
     called = await client.manager_async(userId="u1")
@@ -324,15 +324,6 @@ async def _check_o365_with_token_closes_on_connector_error():
     assert _FakeO365Client.instances[0].closed is True
 
 
-async def _check_o365_rejects_non_string_token():
-    mod = _o365_setup()
-    try:
-        await mod.rayfin_office365users_v1(_o365_payload(accessToken=123))
-    except ValueError:
-        return
-    raise AssertionError("non-string accessToken must raise ValueError")
-
-
 def test_o365_without_token_uses_cached_msi_client():
     asyncio.run(_check_o365_without_token_uses_cached_msi_client())
 
@@ -343,10 +334,6 @@ def test_o365_with_token_uses_fresh_client_and_closes():
 
 def test_o365_with_token_closes_on_connector_error():
     asyncio.run(_check_o365_with_token_closes_on_connector_error())
-
-
-def test_o365_rejects_non_string_token():
-    asyncio.run(_check_o365_rejects_non_string_token())
 
 
 def test_streams_multiple_chunks_without_buffering():
@@ -374,6 +361,4 @@ if __name__ == "__main__":
     print("  ok: o365 with accessToken uses fresh, closed, uncached client")
     test_o365_with_token_closes_on_connector_error()
     print("  ok: o365 token client is closed on connector error")
-    test_o365_rejects_non_string_token()
-    print("  ok: o365 rejects non-string accessToken")
     print("ALL UDF STREAMING TESTS PASSED")

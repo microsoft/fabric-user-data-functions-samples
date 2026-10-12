@@ -198,11 +198,9 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
 # ---------------------------------------------------------------------------
 # Azure Connector Namespace (ACN) -- office365users
 # ---------------------------------------------------------------------------
-# By default no bearer token is passed in: the connection's access policy is bound
-# to this function's managed identity, so the `azure-connectors` SDK mints its own.
-# A caller may instead supply `input.accessToken` (an APIHub-audience token whose
-# identity holds an access policy on the connection); it is then used verbatim.
-# In exchange for its retries and typed requests the SDK buffers rather than streams.
+# No bearer token is passed in: the connection's access policy is bound to this
+# function's managed identity, so the `azure-connectors` SDK mints its own. In
+# exchange for its retries and typed requests it buffers rather than streams.
 _clients: dict = {}
 _clients_lock = asyncio.Lock()
 
@@ -228,27 +226,6 @@ async def _get_office365users_client(connectionRuntimeUrl: str):
             client = Office365usersClient(connectionRuntimeUrl)
             _clients[connectionRuntimeUrl] = client
     return client
-
-
-def _create_office365users_token_client(connectionRuntimeUrl: str, accessToken: str):
-    """Return an uncached Office365usersClient that sends `accessToken` as-is.
-
-    Not cached: the token is caller-scoped and short-lived, so the client is
-    closed after the single call it serves.
-    """
-    from azure.connectors.office365users import Office365usersClient
-    from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
-
-    # The SDK prepends "Bearer " itself; tolerate callers that already did.
-    if accessToken[:7].lower() == "bearer ":
-        accessToken = accessToken[7:].strip()
-    if not accessToken:
-        raise ValueError("input.accessToken must not be empty when provided")
-
-    return Office365usersClient(
-        connectionRuntimeUrl,
-        token_provider=ConnectionStringTokenProvider(accessToken),
-    )
 
 
 def _required(input_data: dict, name: str):
@@ -318,18 +295,17 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     methodName, buildKwargs = handler
     kwargs = buildKwargs(input_data)
 
-    # Optional caller-supplied token; absent -> managed identity (cached client).
-    # Never log it.
+    # Optional caller-supplied token, used as-is; otherwise managed identity.
     accessToken = input_data.get("accessToken")
-    if accessToken is not None and not isinstance(accessToken, str):
-        raise ValueError("input.accessToken must be a string")
-
     if accessToken:
-        client = _create_office365users_token_client(connectionRuntimeUrl, accessToken)
-        ownsClient = True
+        from azure.connectors.office365users import Office365usersClient
+        from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
+
+        client = Office365usersClient(
+            connectionRuntimeUrl, token_provider=ConnectionStringTokenProvider(accessToken)
+        )
     else:
         client = await _get_office365users_client(connectionRuntimeUrl)
-        ownsClient = False
 
     try:
         result = await getattr(client, methodName)(**kwargs)
@@ -348,7 +324,7 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
             status_code=exc.status_code or 502,
         )
     finally:
-        if ownsClient:
+        if accessToken:
             await client.close()
 
     # The SDK returns None on an empty 2xx (e.g. no manager); emit JSON `null` so
