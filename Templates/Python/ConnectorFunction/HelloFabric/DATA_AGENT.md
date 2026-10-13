@@ -17,6 +17,8 @@ Every invocation initializes MCP and attempts session `DELETE` in `finally`.
 There are no automatic retries.
 The requested response retains upstream status, content type, and streamed body without an envelope; the adapter does not filter or forward arbitrary response headers.
 Only the Fabric JSON initialization handshake is consumed in Python to establish the session and send the initialized notification; requested response parsing lives in the SDK.
+Successful initialization must return parseable JSON with a JSON content type; SSE, non-JSON, or malformed JSON produces HTTP 502 (`MCP initialize did not return JSON`).
+Initialization ID and protocol validation remain SDK policy; non-success upstream HTTP responses retain their original status and body.
 The message method must match the authorized outer connector operation, preventing a `getInfo` caller from submitting `tools/call`.
 **Breaking contract:** `history` is rejected even when empty; older flat-field requests without a JSON-RPC `message` are also rejected.
 Upgrade the SDK and adapter together.
@@ -40,6 +42,7 @@ Redirects and caller-supplied routing/authentication values cannot change that e
 Backend authorization and routing checks remain authoritative; the adapter keeps URL-path GUID validation.
 
 Transport work is bounded to 230 seconds with up to 5 seconds for cleanup, below the documented 240-second UDF limit and BaaS's five-minute deadline.
+The adapter requires Python 3.11+ for `asyncio.timeout`; the [published UDF runtime is Python 3.11, and the test runtime is Python 3.12](https://learn.microsoft.com/en-us/fabric/data-engineering/user-data-functions/user-data-functions-service-limits#service-limits).
 The template dependency pins are unchanged; ring-specific package/runtime validation and automatic provisioning remain release prerequisites.
 Binding pattern: `PYTHON/VariableLibrary/chat_completion_with_azure_openai.py`.
 

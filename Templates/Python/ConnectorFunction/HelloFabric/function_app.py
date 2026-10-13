@@ -328,7 +328,7 @@ async def _mcp_relay(session, endpoint, headers, message):
             "jsonrpc": "2.0", "id": "initialize:" + message["id"], "method": "initialize",
             "params": {"protocolVersion": _MCP_PROTOCOL,
                        "capabilities": {"tasks": {"requests": {"tools": {"call": {}}}}},
-                       "clientInfo": {"name": "rayfin_mcp", "version": "1"}},
+                       "clientInfo": {"name": "rayfin-dataagent", "version": "1"}},
         }
         response = await post(initialize)
         session_id = response.headers.get("Mcp-Session-Id")
@@ -339,6 +339,9 @@ async def _mcp_relay(session, endpoint, headers, message):
         if 200 <= response.status < 300:
             # Fabric's initialize endpoint returns JSON. Only the handshake is
             # consumed here; all requested response validation belongs to the SDK.
+            media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if media_type != "application/json" and not media_type.endswith("+json"):
+                raise _mcp_failure(502, "MCP initialize did not return JSON.")
             body = bytearray()
             async for chunk in response.content.iter_any():
                 body.extend(chunk)
@@ -347,15 +350,10 @@ async def _mcp_relay(session, endpoint, headers, message):
             buffered = bytes(body)
             try:
                 initialized = json.loads(buffered)
-            except (ValueError, UnicodeError):
-                initialized = None  # Relay the original body for SDK validation.
+            except (ValueError, UnicodeError, RecursionError) as exc:
+                raise _mcp_failure(502, "MCP initialize did not return JSON.") from exc
             if isinstance(initialized, dict) and "error" not in initialized and isinstance(initialized.get("result"), dict):
-                version = initialized["result"].get("protocolVersion")
-                if (not _mcp_header(version, 64) or initialized.get("jsonrpc") != "2.0"
-                        or initialized.get("id") != initialize["id"]
-                        or version != initialize.get("params", {}).get("protocolVersion")):
-                    raise _mcp_failure(502, "MCP initialization did not match the requested protocol and id.")
-                headers["MCP-Protocol-Version"] = version
+                headers["MCP-Protocol-Version"] = _MCP_PROTOCOL
                 acknowledged = await post({"jsonrpc": "2.0", "method": "notifications/initialized"})
                 if acknowledged.status not in (202, 204):
                     response.release()

@@ -201,6 +201,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m["method"] for m, _ in self.records],
                          ["initialize", "notifications/initialized", "tools/list", "DELETE"])
         self.assertEqual(self.records[0][0]["id"], "initialize:request-1")
+        self.assertEqual(self.records[0][0]["params"]["clientInfo"]["name"], "rayfin-dataagent")
         self.assertEqual(self.records[2][0], payload()["input"]["message"])
         signature = inspect.signature(APP.rayfin_data_agent_v1)
         self.assertEqual(list(signature.parameters), ["payload", "fabricClient"])
@@ -295,14 +296,40 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(len(self.records), 4)
 
-    async def test_invalid_hidden_handshake_never_sends_the_requested_message(self):
-        for field, value in (("id", "unrelated"), ("jsonrpc", "invalid")):
+    async def test_initialize_validation_is_owned_by_the_sdk(self):
+        for field, value in (("id", "unrelated"), ("jsonrpc", "invalid"),
+                             ("result", {**INITIALIZE, "protocolVersion": "future-version"})):
             self.records.clear()
             self.overrides["initialize"] = lambda _r, m: web.json_response({
                 **rpc(INITIALIZE, m["id"]), field: value}, headers={"Mcp-Session-Id": "session-test-token"})
-            response, _ = await self.invoke(payload("startTask"))
+            response, body = await self.invoke(payload(message=message("initialize")))
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(json.loads(body)[field], value)
+            self.assertEqual([m["method"] for m, _ in self.records],
+                             ["initialize", "notifications/initialized", "DELETE"])
+
+    async def test_non_json_initialize_is_a_clear_502_and_never_sends_the_requested_message(self):
+        for content_type, raw in (("text/event-stream", b"data: {}\n\n"),
+                                  ("text/plain", b"upstream"),
+                                  ("application/json", b"{broken"),
+                                  ("application/json", b"\xff")):
+            self.records.clear()
+            self.overrides["initialize"] = lambda _r, _m: web.Response(
+                body=raw, headers={"Content-Type": content_type, "Mcp-Session-Id": "session-test-token"})
+            response, body = await self.invoke(payload("startTask"))
             self.assertEqual(response.status_code, 502)
+            self.assertEqual(json.loads(body)["message"], "MCP initialize did not return JSON.")
             self.assertEqual([m["method"] for m, _ in self.records], ["initialize", "DELETE"])
+
+    async def test_non_json_initialize_http_failure_preserves_the_upstream_response(self):
+        self.overrides["initialize"] = lambda _r, _m: web.Response(
+            status=503, text="upstream unavailable",
+            headers={"Mcp-Session-Id": "session-test-token"})
+        response, body = await self.invoke(payload("startTask"))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(body, b"upstream unavailable")
+        self.assertTrue(response.media_type.startswith("text/plain"))
+        self.assertEqual([m["method"] for m, _ in self.records], ["initialize", "DELETE"])
 
     async def test_stream_is_unbuffered_and_cancellation_cleans_the_session(self):
         async def stalled(request, _message):
