@@ -448,7 +448,7 @@ def test_managed_wrapper_uses_fabric_item_obo(monkeypatch):
     monkeypatch.setattr(app, "_invoke_fabric_mcp", fake_invoke)
     payload = _request()
     supplied = {"operation": "executeQuery", "input": payload}
-    response = asyncio.run(app.rayfin_fabric_mcp_v1(supplied, FabricItem()))
+    response = asyncio.run(app.rayfin_fabriciq_mcp_v1(supplied, FabricItem()))
     assert response.media_type == "application/json"
     assert json.loads(b"".join(response.body)) == {
         "status": 429, "headers": {"Retry-After": "7"}, "message": "response"
@@ -486,7 +486,7 @@ def test_nonstandard_wrapper_is_rejected_before_invocation(monkeypatch, payload)
 
     monkeypatch.setattr(app, "_invoke_fabric_mcp", unexpected_invoke)
     with pytest.raises(app.FabricMcpRequestError, match="Invalid connector invocation wrapper"):
-        asyncio.run(app.rayfin_fabric_mcp_v1(payload, object()))
+        asyncio.run(app.rayfin_fabriciq_mcp_v1(payload, object()))
     assert calls == []
 
 
@@ -527,7 +527,7 @@ def test_actual_baas_serialized_fixture_preserves_upstream_exchange(monkeypatch)
         token = "synthetic-obo-token"
 
     monkeypatch.setattr(app, "_invoke_fabric_mcp", invoke_with_session)
-    output = asyncio.run(app.rayfin_fabric_mcp_v1(payload, FabricItem()))
+    output = asyncio.run(app.rayfin_fabriciq_mcp_v1(payload, FabricItem()))
     assert output.media_type == "application/json"
     assert json.loads(b"".join(output.body)) == {
         "status": 202,
@@ -549,8 +549,9 @@ def test_actual_baas_serialized_fixture_preserves_upstream_exchange(monkeypatch)
 def test_metadata_declares_only_payload_and_fabric_item():
     metadata = json.loads(Path(__file__).with_name("functions.metadata").read_text())
     function = next(
-        item for item in metadata if item["name"] == "rayfin_fabric_mcp_v1"
+        item for item in metadata if item["name"] == "rayfin_fabriciq_mcp_v1"
     )
+    assert function["bindings"][0]["route"] == "rayfin_fabriciq_mcp_v1"
     assert function["fabricProperties"]["fabricFunctionParameters"] == [
         {"name": "payload", "dataType": "dict"}
     ]

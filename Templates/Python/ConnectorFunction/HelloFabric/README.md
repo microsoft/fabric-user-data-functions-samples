@@ -5,7 +5,7 @@ Do not mix `@udf.function()` with `@udf.streaming_function()` in this template: 
 
 ## Fabric MCP response
 
-`rayfin_fabric_mcp_v1` returns a `StreamResponse` with media type `application/json`.
+`rayfin_fabriciq_mcp_v1` returns a `StreamResponse` with media type `application/json`.
 Its body is this top-level UTF-8 JSON envelope, rather than the classic UDF
 `output.message` envelope:
 

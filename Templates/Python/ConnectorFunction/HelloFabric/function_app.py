@@ -112,7 +112,7 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
 
 @udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
 @udf.streaming_function()
-async def rayfin_fabric_mcp_v1(
+async def rayfin_fabriciq_mcp_v1(
     payload: dict, fabricIqClient: fn.FabricItem
 ) -> fn.StreamResponse:
     if (
