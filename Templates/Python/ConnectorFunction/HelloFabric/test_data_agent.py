@@ -433,19 +433,18 @@ class ArchiveTests(unittest.TestCase):
     def test_archives_preserve_peer_metadata_members_and_permissions(self):
         baseline = self.baseline()
         definitions = json.loads((ROOT / "functions.metadata").read_bytes())
-        for definition in json.loads((baseline / "functions.metadata").read_bytes()):
-            self.assertIn(definition, definitions)
+        baseline_definitions = json.loads((baseline / "functions.metadata").read_bytes())
+        baseline_names = {d["name"] for d in baseline_definitions}
+        self.assertEqual([d for d in definitions if d["name"] in baseline_names],
+                         baseline_definitions)
         for name in ("SourceCode.zip", "Deploy.zip"):
             with zipfile.ZipFile(baseline / name) as before, zipfile.ZipFile(ROOT / name) as after:
                 self.assertEqual(before.namelist(), after.namelist())
                 self.assertEqual(before.comment, after.comment)
                 for entry in before.infolist():
                     packed = after.getinfo(entry.filename)
-                    # The shared repacker clears host-specific ZIP metadata.
-                    for attr in ("external_attr", "create_system", "create_version"):
-                        self.assertEqual(getattr(packed, attr), 0)
-                    for attr in ("internal_attr", "extract_version", "date_time",
-                                 "compress_type", "comment", "extra"):
+                    for attr in ("external_attr", "internal_attr", "create_system", "create_version",
+                                 "extract_version", "date_time", "compress_type", "comment", "extra"):
                         self.assertEqual(getattr(entry, attr), getattr(packed, attr))
                     if entry.filename not in ("function_app.py", "fabric_lib/functions.metadata"):
                         self.assertEqual(before.read(entry), after.read(entry.filename))
