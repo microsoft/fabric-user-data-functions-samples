@@ -102,12 +102,15 @@ def test_invalid_wrapper_fails_before_credentials(supplied):
 
 @pytest.mark.parametrize("host, expected", [
     ("dailyapi.powerbi.com", "dailyapi.fabric.microsoft.com"),
-    ("api.powerbi.com", "api.powerbi.com"),
-    ("dxtapi.powerbi.com", "dxtapi.powerbi.com"),
+    ("api.powerbi.com", "api.fabric.microsoft.com"),
+    ("dxtapi.powerbi.com", "dxtapi.fabric.microsoft.com"),
     ("powerbiapi.analysis-df.windows.net", "powerbiapi.analysis-df.windows.net"),
-    ("managed.example", "managed.example"),
+    ("dailyapi.fabric.microsoft.com", "dailyapi.fabric.microsoft.com"),
+    ("msitapi.fabric.microsoft.com", "msitapi.fabric.microsoft.com"),
+    ("api.fabric.microsoft.com", "api.fabric.microsoft.com"),
+    ("managed.example", "managed.fabric.microsoft.com"),
 ])
-def test_only_daily_host_is_converted(monkeypatch, host, expected):
+def test_edog_is_preserved_and_other_host_prefixes_map_to_fabric(monkeypatch, host, expected):
     app = _load_function_app()
     monkeypatch.setattr(app, "_POWERBI_BASE", f"https://{host}/v1.0/myorg")
     captured = []

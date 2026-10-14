@@ -83,8 +83,9 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
 
     base = urlparse(_POWERBI_BASE)
     origin = "{0.scheme}://{0.netloc}".format(base)
-    if base.hostname == "dailyapi.powerbi.com":
-        origin = f"{base.scheme}://{base.hostname.split('.')[0]}.fabric.microsoft.com"
+    if base.hostname != "powerbiapi.analysis-df.windows.net":
+        prefix = base.hostname.split('.')[0]
+        origin = f"{base.scheme}://{prefix}.fabric.microsoft.com"
 
     try:
         response = await session.post(
