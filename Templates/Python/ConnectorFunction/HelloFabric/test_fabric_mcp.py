@@ -100,6 +100,29 @@ def test_invalid_wrapper_fails_before_credentials(supplied):
         asyncio.run(app.rayfin_fabriciq_mcp_v1(supplied, object()))
 
 
+@pytest.mark.parametrize("host, expected", [
+    ("dailyapi.powerbi.com", "dailyapi.fabric.microsoft.com"),
+    ("api.powerbi.com", "api.powerbi.com"),
+    ("dxtapi.powerbi.com", "dxtapi.powerbi.com"),
+    ("powerbiapi.analysis-df.windows.net", "powerbiapi.analysis-df.windows.net"),
+    ("managed.example", "managed.example"),
+])
+def test_only_daily_host_is_converted(monkeypatch, host, expected):
+    app = _load_function_app()
+    monkeypatch.setattr(app, "_POWERBI_BASE", f"https://{host}/v1.0/myorg")
+    captured = []
+
+    class Session:
+        async def post(self, url, **_kwargs):
+            captured.append(url)
+            return Response("opaque")
+
+    asyncio.run(app._invoke_fabric_mcp(
+        payload()["input"], lambda: "synthetic-obo", lambda: Session()
+    ))
+    assert captured == [f"https://{expected}/v1/mcp/fabriciq"]
+
+
 def test_response_is_released_on_decode_failure():
     app = _load_function_app()
     response = Response(UnicodeError("synthetic"))
