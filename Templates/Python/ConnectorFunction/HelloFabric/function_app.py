@@ -55,6 +55,15 @@ class FabricMcpRequestError(ValueError):
 
 
 async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):
+    try:
+        parsed = urlparse(_POWERBI_BASE)
+    except ValueError as exc:
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.") from exc
+    origin = _FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
+    if (origin is None or not _mcp_header(_POWERBI_BASE, 2048)
+            or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.")
+
     token = token_provider()
     if inspect.isawaitable(token):
         token = await token
@@ -69,7 +78,7 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
     headers = {
         name: value
         for name, value in payload["headers"].items()
-        if name.lower() != "authorization"
+        if name.lower() not in ("authorization", "host", "content-length", "connection")
     }
     header_names = {name.lower() for name in headers}
     for name, value in (
@@ -80,12 +89,6 @@ async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_sess
         if name.lower() not in header_names:
             headers[name] = value
     headers["Authorization"] = f"Bearer {token}"
-
-    base = urlparse(_POWERBI_BASE)
-    origin = "{0.scheme}://{0.netloc}".format(base)
-    if base.hostname != "powerbiapi.analysis-df.windows.net":
-        prefix = base.hostname.split('.')[0]
-        origin = f"{base.scheme}://{prefix}.fabric.microsoft.com"
 
     try:
         response = await session.post(
@@ -313,7 +316,7 @@ async def _mcp_relay(session, endpoint, headers, message):
                              media_type=response.headers.get("Content-Type", _JSON_MEDIA_TYPE))
 
 
-_DATA_AGENT_FABRIC_ORIGINS = {
+_FABRIC_ORIGINS = {
     "https://powerbiapi.analysis-df.windows.net": "https://powerbiapi.analysis-df.windows.net",
     "https://dailyapi.powerbi.com": "https://dailyapi.fabric.microsoft.com",
     "https://dxtapi.powerbi.com": "https://dxtapi.fabric.microsoft.com",
@@ -336,7 +339,7 @@ def _data_agent_endpoint(data):
         parsed = urlparse(_POWERBI_BASE)
     except ValueError as exc:
         raise _mcp_failure(503, "POWERBI_API_BASE must use a supported Power BI HTTPS origin.") from exc
-    origin = _DATA_AGENT_FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
+    origin = _FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
     if (origin is None or not _mcp_header(_POWERBI_BASE, 2048)
             or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
         raise _mcp_failure(503, "POWERBI_API_BASE must use a supported Power BI HTTPS origin.")

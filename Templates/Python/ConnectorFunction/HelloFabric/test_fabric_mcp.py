@@ -16,7 +16,9 @@ def payload():
         "input": {
             "protocolVersion": "2026-07-28",
             "headers": {"authorization": "caller", "AUTHORIZATION": "other",
-                        "Mcp-Name": "opaque-task", "X-Variants": "opaque-variant"},
+                        "hOsT": "wrong.example", "CONTENT-LENGTH": "999", "Connection": "close",
+                        "Mcp-Name": "opaque-task", "X-Variants": "opaque-variant",
+                        "X-Sdk-Extension": "unchanged"},
             "message": {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                         "params": {"opaque": True}},
         },
@@ -82,7 +84,8 @@ def test_public_relay_preserves_exchange_and_overwrites_auth(monkeypatch, conten
     assert captured["data"] == json.dumps(request["input"]["message"], separators=(",", ":")).encode()
     assert captured["headers"] == {
         "Authorization": "Bearer synthetic-obo", "Mcp-Name": "opaque-task",
-        "X-Variants": "opaque-variant", "Content-Type": "application/json",
+        "X-Variants": "opaque-variant", "X-Sdk-Extension": "unchanged",
+        "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28",
     }
     assert response.released
@@ -105,12 +108,8 @@ def test_invalid_wrapper_fails_before_credentials(supplied):
     ("api.powerbi.com", "api.fabric.microsoft.com"),
     ("dxtapi.powerbi.com", "dxtapi.fabric.microsoft.com"),
     ("powerbiapi.analysis-df.windows.net", "powerbiapi.analysis-df.windows.net"),
-    ("dailyapi.fabric.microsoft.com", "dailyapi.fabric.microsoft.com"),
-    ("msitapi.fabric.microsoft.com", "msitapi.fabric.microsoft.com"),
-    ("api.fabric.microsoft.com", "api.fabric.microsoft.com"),
-    ("managed.example", "managed.fabric.microsoft.com"),
 ])
-def test_edog_is_preserved_and_other_host_prefixes_map_to_fabric(monkeypatch, host, expected):
+def test_supported_origins_map_to_fabric(monkeypatch, host, expected):
     app = _load_function_app()
     monkeypatch.setattr(app, "_POWERBI_BASE", f"https://{host}/v1.0/myorg")
     captured = []
@@ -124,6 +123,29 @@ def test_edog_is_preserved_and_other_host_prefixes_map_to_fabric(monkeypatch, ho
         payload()["input"], lambda: "synthetic-obo", lambda: Session()
     ))
     assert captured == [f"https://{expected}/v1/mcp/fabriciq"]
+
+
+@pytest.mark.parametrize("base", [
+    "", "https://[invalid", "https://managed.example/v1.0/myorg",
+    "https://api.attacker.example/v1.0/myorg", "https://unknown.powerbi.com",
+    "https://api.powerbi.com.attacker.example", "http://api.powerbi.com",
+    "https://user@api.powerbi.com", "https://api.powerbi.com:443",
+    "https://api.powerbi.com\\@attacker.example",
+    "https://api.powerbi.com/v1.0/myorg?host=attacker.example",
+    "https://api.powerbi.com/v1.0/myorg#fragment",
+    "https://api.powerbi.com/\npath", "https://msitapi.fabric.microsoft.com",
+    "https://dailyapi.fabric.microsoft.com", "https://dxtapi.fabric.microsoft.com",
+    "https://api.fabric.microsoft.com",
+])
+def test_unsupported_origins_fail_before_token_or_network(monkeypatch, base):
+    app = _load_function_app()
+    monkeypatch.setattr(app, "_POWERBI_BASE", base)
+
+    def unexpected():
+        pytest.fail("Unsupported origin must fail before token/session acquisition")
+
+    with pytest.raises(app.FabricMcpRequestError, match="supported Power BI HTTPS origin"):
+        asyncio.run(app._invoke_fabric_mcp(payload()["input"], unexpected, unexpected))
 
 
 def test_response_is_released_on_decode_failure():
