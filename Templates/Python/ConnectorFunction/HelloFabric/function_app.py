@@ -584,7 +584,17 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     methodName, buildKwargs = handler
     kwargs = buildKwargs(input_data)
 
-    client = await _get_office365users_client(connectionRuntimeUrl)
+    # Optional caller-supplied token, used as-is; otherwise managed identity.
+    accessToken = input_data.get("accessToken")
+    if accessToken:
+        from azure.connectors.office365users import Office365usersClient
+        from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
+
+        client = Office365usersClient(
+            connectionRuntimeUrl, token_provider=ConnectionStringTokenProvider(accessToken)
+        )
+    else:
+        client = await _get_office365users_client(connectionRuntimeUrl)
 
     try:
         result = await getattr(client, methodName)(**kwargs)
@@ -602,6 +612,9 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
             media_type=_JSON_MEDIA_TYPE,
             status_code=exc.status_code or 502,
         )
+    finally:
+        if accessToken:
+            await client.close()
 
     # The SDK returns None on an empty 2xx (e.g. no manager); emit JSON `null` so
     # the client can parse unconditionally. Upstream document passes through as-is.
