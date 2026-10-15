@@ -4,17 +4,9 @@ on:
   pull_request:
     branches:
       - 'connector-*'
-    paths:
-      - '**/*.zip'
-      - '.github/scripts/check_function_metadata.py'
-      - '.github/workflows/validate-function-metadata.yml'
   push:
     branches:
       - 'connector-*'
-    paths:
-      - '**/*.zip'
-      - '.github/scripts/check_function_metadata.py'
-      - '.github/workflows/validate-function-metadata.yml'
   workflow_dispatch:
 
 permissions:
