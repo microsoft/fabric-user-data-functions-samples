@@ -1,0 +1,32 @@
+name: Validate functions.metadata
+
+on:
+  pull_request:
+    branches:
+      - 'connector-*'
+    paths:
+      - '**/*.zip'
+      - '.github/scripts/check_function_metadata.py'
+      - '.github/workflows/validate-function-metadata.yml'
+  push:
+    branches:
+      - 'connector-*'
+    paths:
+      - '**/*.zip'
+      - '.github/scripts/check_function_metadata.py'
+      - '.github/workflows/validate-function-metadata.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-function-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check functions.metadata matches declared functions
+        run: python .github/scripts/check_function_metadata.py
