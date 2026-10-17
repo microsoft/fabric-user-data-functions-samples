@@ -523,3 +523,362 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
         media_type=_JSON_MEDIA_TYPE,
         status_code=200,
     )
+
+
+# ---------------------------------------------------------------------------
+# Azure Connector Namespace (ACN) -- shared adapter for the wave 1 connectors
+# ---------------------------------------------------------------------------
+# Same contract as rayfin_office365users_v1 above: managed-identity auth, flat
+# camelCase operation names, upstream JSON passed through. Wave 1 admits JSON
+# reads only; writes, binary content, triggers and http_request are excluded.
+
+# connector slug -> (SDK module, client class)
+_ACN_CONNECTORS = {
+    "sharepointonline": ("azure.connectors.sharepointonline", "SharepointonlineClient"),
+    "office365": ("azure.connectors.office365", "Office365Client"),
+    "excelonlinebusiness": ("azure.connectors.excelonlinebusiness", "ExcelonlinebusinessClient"),
+    "teams": ("azure.connectors.teams", "TeamsClient"),
+    "onedriveforbusiness": ("azure.connectors.onedriveforbusiness", "OnedriveforbusinessClient"),
+    "office365groups": ("azure.connectors.office365groups", "Office365groupsClient"),
+    "microsoftforms": ("azure.connectors.microsoftforms", "MicrosoftformsClient"),
+    "planner": ("azure.connectors.planner", "PlannerClient"),
+    "azuread": ("azure.connectors.azuread", "AzureadClient"),
+}
+# Keyed by (slug, connectionRuntimeUrl); see _get_office365users_client for why
+# clients are cached and never closed.
+_acn_clients: dict = {}
+_acn_clients_lock = asyncio.Lock()
+
+
+async def _get_acn_client(slug: str, connectionRuntimeUrl: str):
+    key = (slug, connectionRuntimeUrl)
+    client = _acn_clients.get(key)
+    if client is not None:
+        return client
+
+    async with _acn_clients_lock:
+        client = _acn_clients.get(key)
+        if client is None:
+            # Deferred so a missing module fails this connector alone.
+            import importlib
+
+            moduleName, className = _ACN_CONNECTORS[slug]
+            clientClass = getattr(importlib.import_module(moduleName), className)
+            client = clientClass(connectionRuntimeUrl)
+            _acn_clients[key] = client
+    return client
+
+
+def _query(input_data: dict, name: str):
+    # The SDK types every query parameter as Optional[str] and sends it verbatim.
+    value = input_data.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamResponse:
+    from azure.connectors import ConnectorException
+
+    functionName = f"rayfin_{slug}_v1"
+    operation = (payload.get("operation") or "").strip()
+    input_data = payload.get("input", {})
+    connectionRuntimeUrl = input_data.get("connectionRuntimeUrl")
+
+    if not operation:
+        raise ValueError("'operation' is required")
+    if not connectionRuntimeUrl:
+        raise ValueError("input.connectionRuntimeUrl is required")
+
+    handler = operations.get(operation)
+    if handler is None:
+        supported = ", ".join(sorted(operations))
+        raise ValueError(
+            f"unsupported operation '{operation}'; expected one of: {supported}"
+        )
+    methodName, buildKwargs = handler
+    kwargs = buildKwargs(input_data)
+
+    client = await _get_acn_client(slug, connectionRuntimeUrl)
+
+    try:
+        result = await getattr(client, methodName)(**kwargs)
+    except ConnectorException as exc:
+        # Never log str(exc), exc.path or exc.operation: they embed the connection id.
+        logging.warning(
+            "%s: operation '%s' failed with status %s",
+            functionName,
+            operation,
+            exc.status_code,
+        )
+        detail = exc.response_body or ""
+        return fn.StreamResponse(
+            iter([detail.encode("utf-8")]),
+            media_type=_JSON_MEDIA_TYPE,
+            status_code=exc.status_code or 502,
+        )
+
+    document = json.dumps(result) if result is not None else "null"
+    return fn.StreamResponse(
+        iter([document.encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+        status_code=200,
+    )
+
+
+# SharePoint (App + Delegated). Excluded: file content (binary), sharing and
+# permission changes, deletes, hub-site ops, triggers, writes (wave 2).
+_SHAREPOINTONLINE_OPERATIONS = {
+    "getTablesAsync": ("get_tables_async", lambda d: {
+        "dataset": _required(d, "siteUrl"),
+    }),
+    "getItemsAsync": ("get_items_async", lambda d: {
+        "dataset": _required(d, "siteUrl"),
+        "table": _required(d, "listName"),
+        "filter": d.get("filter"),
+        "orderby": d.get("orderby"),
+        "top": _query(d, "top"),
+        "folder_path": d.get("folderPath"),
+    }),
+    "getItemAsync": ("get_item_async", lambda d: {
+        "dataset": _required(d, "siteUrl"),
+        "table": _required(d, "listName"),
+        "id": _required(d, "itemId"),
+    }),
+    "listFolderAsync": ("list_folder_async", lambda d: {
+        "dataset": _required(d, "siteUrl"),
+        "id": _required(d, "folderId"),
+    }),
+    "getFileMetadataByPathAsync": ("get_file_metadata_by_path_async", lambda d: {
+        "dataset": _required(d, "siteUrl"),
+        "path": _required(d, "path"),
+    }),
+}
+
+
+# Outlook (Delegated only). Attachments are forced off and mailbox_address is
+# never exposed, so a caller can only read their own mailbox.
+_OFFICE365_OPERATIONS = {
+    "getEmailsAsync": ("get_emails_async", lambda d: {
+        "folder_path": d.get("folderPath"),
+        "from_": d.get("from"),
+        "to": d.get("to"),
+        "subject_filter": d.get("subjectFilter"),
+        "fetch_only_unread": _query(d, "fetchOnlyUnread"),
+        "search_query": d.get("searchQuery"),
+        "top": _query(d, "top"),
+        "include_attachments": "false",
+    }),
+    "getEmailAsync": ("get_email_async", lambda d: {
+        "message_id": _required(d, "messageId"),
+        "include_attachments": "false",
+    }),
+    "getEventsCalendarViewAsync": ("get_events_calendar_view_async", lambda d: {
+        "calendar_id": _required(d, "calendarId"),
+        "start_date_time_utc": _required(d, "startDateTimeUtc"),
+        "end_date_time_utc": _required(d, "endDateTimeUtc"),
+        "filter": d.get("filter"),
+        "top": _query(d, "top"),
+    }),
+    "calendarGetTablesAsync": ("calendar_get_tables_async", lambda d: {}),
+    # POST with read semantics; the SDK serializes a wire-named dict body as-is.
+    "findMeetingTimesAsync": ("find_meeting_times_async", lambda d: {
+        "input": _required(d, "request"),
+    }),
+}
+
+
+# Excel (App + Delegated). `source` is "me" (OneDrive) or a SharePoint site URL;
+# under App auth "me" is the connection owner.
+def _excel_file(d: dict) -> dict:
+    return {
+        "source": _required(d, "source"),
+        "drive": _required(d, "driveId"),
+        "file": _required(d, "fileId"),
+    }
+
+
+_EXCELONLINEBUSINESS_OPERATIONS = {
+    "getTablesAsync": ("get_tables_async", lambda d: _excel_file(d)),
+    "getItemsAsync": ("get_items_async", lambda d: {
+        **_excel_file(d),
+        "table": _required(d, "tableName"),
+        "filter": d.get("filter"),
+        "orderby": d.get("orderby"),
+        "top": _query(d, "top"),
+        "skip": _query(d, "skip"),
+        "select": d.get("select"),
+    }),
+    "getItemAsync": ("get_item_async", lambda d: {
+        **_excel_file(d),
+        "table": _required(d, "tableName"),
+        "id_column": _required(d, "keyColumn"),
+        "id": _required(d, "keyValue"),
+    }),
+}
+
+
+# Teams (Delegated only). Excluded: posting, team/channel/member management,
+# card-and-wait, feed notifications, triggers.
+_TEAMS_OPERATIONS = {
+    "getAllTeamsAsync": ("get_all_teams_async", lambda d: {}),
+    "getAllChannelsForTeamAsync": ("get_all_channels_for_team_async", lambda d: {
+        "group_id": _required(d, "teamId"),
+        "filter": d.get("filter"),
+        "orderby": d.get("orderby"),
+    }),
+    "getMessagesFromChannelAsync": ("get_messages_from_channel_async", lambda d: {
+        "group_id": _required(d, "teamId"),
+        "channel_id": _required(d, "channelId"),
+    }),
+    "getMessagesFromChatAsync": ("get_messages_from_chat_async", lambda d: {
+        "chat_id": _required(d, "chatId"),
+        "filter": d.get("filter"),
+        "orderby": d.get("orderby"),
+        "top": _query(d, "top"),
+    }),
+}
+
+
+# OneDrive (Delegated only). Excluded: file content (binary), create/copy/move/
+# delete, triggers.
+_ONEDRIVEFORBUSINESS_OPERATIONS = {
+    "listRootFolderAsync": ("list_root_folder_async", lambda d: {}),
+    "listFolderAsync": ("list_folder_async", lambda d: {
+        "id": _required(d, "folderId"),
+    }),
+    "getFileMetadataAsync": ("get_file_metadata_async", lambda d: {
+        "id": _required(d, "fileId"),
+    }),
+    "getFileMetadataByPathAsync": ("get_file_metadata_by_path_async", lambda d: {
+        "path": _required(d, "path"),
+    }),
+}
+
+
+# Office 365 Groups (App + Delegated). Membership changes and deleted-group
+# restore are never admitted.
+_OFFICE365GROUPS_OPERATIONS = {
+    "listGroupsAsync": ("list_groups_async", lambda d: {
+        "filter": d.get("filter"),
+        "top": _query(d, "top"),
+        "skiptoken": d.get("skipToken"),
+    }),
+    "listOwnedGroupsAsync": ("list_owned_groups_async", lambda d: {}),
+    "listGroupMembersAsync": ("list_group_members_async", lambda d: {
+        "group_id": _required(d, "groupId"),
+        "top": _query(d, "top"),
+    }),
+}
+
+
+# Microsoft Forms (App + Delegated). Read-only connector; the SDK has no "list
+# responses" operation, so response ids must come from elsewhere.
+_MICROSOFTFORMS_OPERATIONS = {
+    "listFormsAsync": ("list_forms_async", lambda d: {}),
+    "getFormDetailsByIdAsync": ("get_form_details_by_id_async", lambda d: {
+        "form_id": _required(d, "formId"),
+    }),
+    "getQuestionsAsync": ("get_questions_async", lambda d: {
+        "form_id": _required(d, "formId"),
+    }),
+    "getFormResponseByIdAsync": ("get_form_response_by_id_async", lambda d: {
+        "form_id": _required(d, "formId"),
+        "response_id": _required(d, "responseId"),
+    }),
+}
+
+
+# Planner (App + Delegated). Under App auth listMyTasksAsync returns the
+# connection owner's tasks. Excluded: create/update/delete, assignment, buckets.
+_PLANNER_OPERATIONS = {
+    "listMyTasksAsync": ("list_my_tasks_async", lambda d: {}),
+    "listGroupPlansAsync": ("list_group_plans_async", lambda d: {
+        "group_id": _required(d, "groupId"),
+    }),
+    "listBucketsAsync": ("list_buckets_async", lambda d: {
+        "group_id": _required(d, "groupId"),
+        "id": _required(d, "planId"),
+    }),
+    "listTasksAsync": ("list_tasks_async", lambda d: {
+        "group_id": _required(d, "groupId"),
+        "id": _required(d, "planId"),
+    }),
+    "getTaskAsync": ("get_task_async", lambda d: {
+        "id": _required(d, "taskId"),
+    }),
+    "getTaskDetailsAsync": ("get_task_details_async", lambda d: {
+        "id": _required(d, "taskId"),
+    }),
+}
+
+
+# Entra ID (App + Delegated). Tenant directory writes are never admitted. The
+# membership checks are POSTs with read semantics.
+_AZUREAD_OPERATIONS = {
+    "getUserAsync": ("get_user_async", lambda d: {
+        "id": _required(d, "userId"),
+    }),
+    "getGroupAsync": ("get_group_async", lambda d: {
+        "id": _required(d, "groupId"),
+    }),
+    "getGroupMembersAsync": ("get_group_members_async", lambda d: {
+        "id": _required(d, "groupId"),
+        "top": _query(d, "top"),
+    }),
+    "checkMemberGroupsAsync": ("check_member_groups_async", lambda d: {
+        "id": _required(d, "userId"),
+        "input": {"groupIds": _required(d, "groupIds")},
+    }),
+    "getMemberGroupsAsync": ("get_member_groups_async", lambda d: {
+        "id": _required(d, "userId"),
+        "input": {"securityEnabledOnly": bool(d.get("securityEnabledOnly"))},
+    }),
+}
+
+
+@udf.streaming_function()
+async def rayfin_sharepointonline_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("sharepointonline", _SHAREPOINTONLINE_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_office365_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("office365", _OFFICE365_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_excelonlinebusiness_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("excelonlinebusiness", _EXCELONLINEBUSINESS_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_teams_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("teams", _TEAMS_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_onedriveforbusiness_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("onedriveforbusiness", _ONEDRIVEFORBUSINESS_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_office365groups_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("office365groups", _OFFICE365GROUPS_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_microsoftforms_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("microsoftforms", _MICROSOFTFORMS_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_planner_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("planner", _PLANNER_OPERATIONS, payload)
+
+
+@udf.streaming_function()
+async def rayfin_azuread_v1(payload: dict) -> fn.StreamResponse:
+    return await _invoke_acn("azuread", _AZUREAD_OPERATIONS, payload)
