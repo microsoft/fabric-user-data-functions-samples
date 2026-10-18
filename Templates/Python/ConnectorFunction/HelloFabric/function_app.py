@@ -16,7 +16,7 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://powerbiapi.analysis-df.windows.net/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
-_LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1/workspaces"
+_LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1"
 _LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
 _MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
 _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
@@ -24,9 +24,13 @@ _MAXIMUM_TELEMETRY_ROWS = 10000
 _TELEMETRY_TIMESPAN_PATTERN = re.compile(
     r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
 )
-_WORKSPACE_ID_PATTERN = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+_APPLICATION_INSIGHTS_RESOURCE_ID_PATTERN = re.compile(
+    r"/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}"
+    r"/resourceGroups/(?!\.{1,2}/)[a-z0-9_().-]{1,90}(?<!\.)"
+    r"/providers/Microsoft\.Insights/components/"
+    r"(?!\.{1,2}$)[a-z0-9_().-]{1,260}",
+    re.IGNORECASE | re.ASCII,
 )
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
@@ -153,12 +157,12 @@ async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
             f"kql cannot exceed {_MAXIMUM_TELEMETRY_QUERY_LENGTH} characters"
         )
 
-    workspace_id = input_data.get("workspaceId")
+    resource_id = input_data.get("resourceId")
     if (
-        not isinstance(workspace_id, str)
-        or not _WORKSPACE_ID_PATTERN.fullmatch(workspace_id)
+        not isinstance(resource_id, str)
+        or not _APPLICATION_INSIGHTS_RESOURCE_ID_PATTERN.fullmatch(resource_id)
     ):
-        raise ValueError("workspaceId must be a valid GUID")
+        raise ValueError("resourceId must be a full Application Insights ARM resource ID")
 
     timespan = _validate_telemetry_timespan(input_data.get("timespan"))
 
@@ -174,7 +178,7 @@ async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
         )
 
     access_token = await _get_telemetry_access_token()
-    url = f"{_LOG_ANALYTICS_BASE}/{workspace_id}/query"
+    url = f"{_LOG_ANALYTICS_BASE}{resource_id}/query"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": _JSON_MEDIA_TYPE,
