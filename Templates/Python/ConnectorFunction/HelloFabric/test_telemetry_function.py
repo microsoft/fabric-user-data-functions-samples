@@ -10,6 +10,12 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 
+_RESOURCE_ID = (
+    "/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    "/resourceGroups/telemetry-rg/providers/Microsoft.Insights/components/app-insights"
+)
+
+
 def _load_function_app():
     if "fabric.functions" not in sys.modules:
         fabric = types.ModuleType("fabric")
@@ -74,7 +80,7 @@ class _FakeResponse:
 def _payload(**overrides):
     data = {
         "kql": "AppTraces | project TimeGenerated, Message",
-        "workspaceId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "resourceId": _RESOURCE_ID,
         "timespan": "P1D",
         "maxRows": 1000,
     }
@@ -110,7 +116,7 @@ class TelemetryFunctionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_streams_with_managed_identity(self):
         result = await self.app.rayfin_telemetry_v1(
-            _payload(resourceId="/subscriptions/caller-controlled")
+            _payload(workspaceId="ignored-legacy-workspace")
         )
         self.assertEqual(
             [chunk async for chunk in result.body],
@@ -129,8 +135,7 @@ class TelemetryFunctionTests(unittest.IsolatedAsyncioTestCase):
             headers={"X-IDENTITY-HEADER": "rotating-identity-header"},
         )
         self.session.post.assert_awaited_once_with(
-            "https://api.loganalytics.azure.com/v1/workspaces/"
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/query",
+            f"https://api.loganalytics.azure.com/v1{_RESOURCE_ID}/query",
             json={
                 "query": "AppTraces | project TimeGenerated, Message\n| take 1000",
                 "timespan": "P1D",
@@ -140,6 +145,16 @@ class TelemetryFunctionTests(unittest.IsolatedAsyncioTestCase):
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
+        )
+
+    async def test_accepts_mixed_case_resource_id(self):
+        resource_id = _RESOURCE_ID.upper().replace(
+            "APP-INSIGHTS", "App_Insights.v1(blue)"
+        )
+        await self.app.rayfin_telemetry_v1(_payload(resourceId=resource_id))
+        self.assertEqual(
+            self.session.post.call_args.args[0],
+            f"https://api.loganalytics.azure.com/v1{resource_id}/query",
         )
 
     async def test_removes_trailing_query_semicolon(self):
@@ -177,7 +192,6 @@ class TelemetryFunctionTests(unittest.IsolatedAsyncioTestCase):
         invalid = [
             None, [], {}, {"operation": "emit", "input": {}},
             {"operation": "query"}, {"operation": "query", "input": []},
-            _payload(workspaceId="not-a-guid"), _payload(workspaceId=123),
             _payload(kql=""), _payload(kql=" "), _payload(kql=123),
             _payload(kql="x" * 8193),
             *[_payload(timespan=value) for value in
@@ -188,6 +202,45 @@ class TelemetryFunctionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     await self.app.rayfin_telemetry_v1(payload)
+        self.session.get.assert_not_awaited()
+        self.session.post.assert_not_awaited()
+
+    async def test_rejects_invalid_resource_ids_before_network(self):
+        invalid_ids = [
+            None, 123, {}, "", "not-an-arm-id",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            _RESOURCE_ID.replace("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "not-a-guid"),
+            _RESOURCE_ID.replace("Microsoft.Insights/components", "Microsoft.OperationalInsights/workspaces"),
+            _RESOURCE_ID.replace("Microsoft.Insights/components", "Microsoft.Insights/webtests"),
+            _RESOURCE_ID.replace("Microsoft.Insights", "Other.Insights"),
+            _RESOURCE_ID.replace("/telemetry-rg/", "//"),
+            _RESOURCE_ID.replace("/telemetry-rg/", "/../"),
+            _RESOURCE_ID.replace("/telemetry-rg/", "/./"),
+            _RESOURCE_ID.replace("/telemetry-rg/", "/bad rg/"),
+            _RESOURCE_ID.replace("/telemetry-rg/", "/bad./"),
+            _RESOURCE_ID.rsplit("/", 1)[0] + "/..",
+            _RESOURCE_ID.rsplit("/", 1)[0] + "/.",
+            _RESOURCE_ID.rsplit("/", 1)[0] + "/",
+            _RESOURCE_ID + "/", _RESOURCE_ID + "/child",
+            _RESOURCE_ID + "/../other", _RESOURCE_ID + "/./query",
+            _RESOURCE_ID + "?query=other", _RESOURCE_ID + "#fragment",
+            _RESOURCE_ID + "%2f..%2fother", _RESOURCE_ID + "%252fother",
+            _RESOURCE_ID + "\\other", _RESOURCE_ID + " space",
+            _RESOURCE_ID + "\n", _RESOURCE_ID + "\r", _RESOURCE_ID + "\t",
+            _RESOURCE_ID + "\x00", " " + _RESOURCE_ID,
+            _RESOURCE_ID.lstrip("/"), "/" + _RESOURCE_ID,
+            "https://api.loganalytics.azure.com/v1" + _RESOURCE_ID,
+            "//evil.example" + _RESOURCE_ID,
+            _RESOURCE_ID.replace("Insights", "In\u017fights"),
+        ]
+        for resource_id in invalid_ids:
+            with self.subTest(resource_id=resource_id):
+                with self.assertRaisesRegex(ValueError, "resourceId"):
+                    await self.app.rayfin_telemetry_v1(_payload(resourceId=resource_id))
+        legacy = _payload(workspaceId="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        del legacy["input"]["resourceId"]
+        with self.assertRaisesRegex(ValueError, "resourceId"):
+            await self.app.rayfin_telemetry_v1(legacy)
         self.session.get.assert_not_awaited()
         self.session.post.assert_not_awaited()
 
