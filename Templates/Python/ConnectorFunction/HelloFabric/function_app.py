@@ -748,10 +748,55 @@ _SHAREPOINTONLINE_OPERATIONS = {
 }
 
 
-# Outlook (App only). Every op runs against the connection owner's mailbox, so
-# mail reads and the calendar listing are not admitted: they would expose the
-# owner's whole inbox and calendars to every app user. calendarId is meant to be
-# pinned per connection; until BaaS injects it, the caller supplies it.
+# Outlook, Teams and OneDrive are App only: every op runs as the connection
+# owner. Ops scoped by an id (calendarId, teamId/channelId, folderId) are always
+# admitted. Owner-wide reads (mailbox, calendar list, all teams, chats, drive
+# root, lookup by path) are disabled by default.
+#
+# WARNING: setting this to True lets ANYONE who can call this app read the
+# owner's mail, chats and files, including messages other people sent the owner.
+# Only enable it if you intend to share that data with every app user.
+ENABLE_OWNER_WIDE_READS = False
+
+
+def _owner_wide_disabled(operation: str):
+    def build(_d: dict) -> dict:
+        raise ValueError(
+            f"'{operation}' reads the connection owner's data and is disabled; "
+            "set ENABLE_OWNER_WIDE_READS = True to allow it"
+        )
+    return build
+
+
+def _app_only_operations(scoped: dict, owner_wide: dict) -> dict:
+    if ENABLE_OWNER_WIDE_READS:
+        return {**scoped, **owner_wide}
+    return {
+        **scoped,
+        **{op: (method, _owner_wide_disabled(op)) for op, (method, _) in owner_wide.items()},
+    }
+
+
+# Outlook (App only). calendarId is meant to be pinned per connection; until
+# BaaS injects it, the caller supplies it.
+_OFFICE365_OWNER_WIDE_OPERATIONS = {
+    "getEmailsAsync": ("get_emails_async", lambda d: {
+        "folder_path": d.get("folderPath"),
+        "from_": d.get("from"),
+        "to": d.get("to"),
+        "subject_filter": d.get("subjectFilter"),
+        "fetch_only_unread": _query(d, "fetchOnlyUnread"),
+        "search_query": d.get("searchQuery"),
+        "top": _query(d, "top"),
+        "include_attachments": "false",
+    }),
+    "getEmailAsync": ("get_email_async", lambda d: {
+        "message_id": _required(d, "messageId"),
+        "include_attachments": "false",
+    }),
+    "calendarGetTablesAsync": ("calendar_get_tables_async", lambda d: {}),
+}
+
 _OFFICE365_OPERATIONS = {
     "getEventsCalendarViewAsync": ("get_events_calendar_view_async", lambda d: {
         "calendar_id": _required(d, "calendarId"),
@@ -797,11 +842,19 @@ _EXCELONLINEBUSINESS_OPERATIONS = {
 }
 
 
-# Teams (App only). Every op runs as the connection owner, so listing the
-# owner's teams and reading their chats are not admitted. teamId/channelId are
-# meant to be pinned per connection; until BaaS injects them, the caller
-# supplies them. Excluded: posting, team/channel/member management,
-# card-and-wait, feed notifications, triggers.
+# Teams (App only). teamId/channelId are meant to be pinned per connection;
+# until BaaS injects them, the caller supplies them. Excluded: posting,
+# team/channel/member management, card-and-wait, feed notifications, triggers.
+_TEAMS_OWNER_WIDE_OPERATIONS = {
+    "getAllTeamsAsync": ("get_all_teams_async", lambda d: {}),
+    "getMessagesFromChatAsync": ("get_messages_from_chat_async", lambda d: {
+        "chat_id": _required(d, "chatId"),
+        "filter": d.get("filter"),
+        "orderby": d.get("orderby"),
+        "top": _query(d, "top"),
+    }),
+}
+
 _TEAMS_OPERATIONS = {
     "getAllChannelsForTeamAsync": ("get_all_channels_for_team_async", lambda d: {
         "group_id": _required(d, "teamId"),
@@ -815,10 +868,16 @@ _TEAMS_OPERATIONS = {
 }
 
 
-# OneDrive (App only). Every op runs against the connection owner's drive, so
-# the root listing and lookup by arbitrary path are not admitted. folderId is
-# meant to be pinned per connection; until BaaS injects it, the caller supplies
-# it. Excluded: file content (binary), create/copy/move/delete, triggers.
+# OneDrive (App only). folderId is meant to be pinned per connection; until
+# BaaS injects it, the caller supplies it. Excluded: file content (binary),
+# create/copy/move/delete, triggers.
+_ONEDRIVEFORBUSINESS_OWNER_WIDE_OPERATIONS = {
+    "listRootFolderAsync": ("list_root_folder_async", lambda d: {}),
+    "getFileMetadataByPathAsync": ("get_file_metadata_by_path_async", lambda d: {
+        "path": _required(d, "path"),
+    }),
+}
+
 _ONEDRIVEFORBUSINESS_OPERATIONS = {
     "listFolderAsync": ("list_folder_async", lambda d: {
         "id": _required(d, "folderId"),
@@ -917,7 +976,8 @@ async def rayfin_sharepointonline_v1(payload: dict) -> fn.StreamResponse:
 
 @udf.streaming_function()
 async def rayfin_office365_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("office365", _OFFICE365_OPERATIONS, payload)
+    return await _invoke_acn("office365", _app_only_operations(
+        _OFFICE365_OPERATIONS, _OFFICE365_OWNER_WIDE_OPERATIONS), payload)
 
 
 @udf.streaming_function()
@@ -927,12 +987,14 @@ async def rayfin_excelonlinebusiness_v1(payload: dict) -> fn.StreamResponse:
 
 @udf.streaming_function()
 async def rayfin_teams_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("teams", _TEAMS_OPERATIONS, payload)
+    return await _invoke_acn("teams", _app_only_operations(
+        _TEAMS_OPERATIONS, _TEAMS_OWNER_WIDE_OPERATIONS), payload)
 
 
 @udf.streaming_function()
 async def rayfin_onedriveforbusiness_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("onedriveforbusiness", _ONEDRIVEFORBUSINESS_OPERATIONS, payload)
+    return await _invoke_acn("onedriveforbusiness", _app_only_operations(
+        _ONEDRIVEFORBUSINESS_OPERATIONS, _ONEDRIVEFORBUSINESS_OWNER_WIDE_OPERATIONS), payload)
 
 
 @udf.streaming_function()

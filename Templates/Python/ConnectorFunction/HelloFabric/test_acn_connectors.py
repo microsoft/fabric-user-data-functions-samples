@@ -125,18 +125,37 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["top"], "5")
         self.assertEqual(kwargs["calendar_id"], "c1")
 
-    def test_app_only_connectors_reject_owner_wide_reads(self):
-        dropped = {
-            "office365": ("getEmailsAsync", "getEmailAsync", "calendarGetTablesAsync"),
-            "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync"),
-            "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync"),
-        }
-        for slug, operations in dropped.items():
+    OWNER_WIDE = {
+        "office365": ("getEmailsAsync", "getEmailAsync", "calendarGetTablesAsync"),
+        "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync"),
+        "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync"),
+    }
+
+    def test_owner_wide_reads_are_disabled_by_default(self):
+        self.assertFalse(app.ENABLE_OWNER_WIDE_READS)
+        for slug, operations in self.OWNER_WIDE.items():
             for operation in operations:
                 with self.subTest(slug=slug, operation=operation):
-                    with self.assertRaisesRegex(ValueError, f"unsupported operation '{operation}'"):
+                    with self.assertRaisesRegex(ValueError, f"'{operation}'.*ENABLE_OWNER_WIDE_READS"):
                         _invoke(slug, operation)
         self.assertEqual(FakeClient.calls, [])
+        self.assertEqual(app._acn_clients, {})
+
+    def test_owner_wide_reads_dispatch_when_enabled(self):
+        app.ENABLE_OWNER_WIDE_READS = True
+        try:
+            _invoke("office365", "calendarGetTablesAsync")
+            _invoke("office365", "getEmailsAsync", top=3)
+            _invoke("teams", "getMessagesFromChatAsync", chatId="19:abc")
+            _invoke("onedriveforbusiness", "getFileMetadataByPathAsync", path="/Shared/a.xlsx")
+        finally:
+            app.ENABLE_OWNER_WIDE_READS = False
+        self.assertEqual(FakeClient.calls[0], ("calendar_get_tables_async", {}))
+        self.assertEqual(FakeClient.calls[1][0], "get_emails_async")
+        self.assertEqual(FakeClient.calls[1][1]["include_attachments"], "false")
+        self.assertEqual(FakeClient.calls[1][1]["top"], "3")
+        self.assertEqual(FakeClient.calls[2][1]["chat_id"], "19:abc")
+        self.assertEqual(FakeClient.calls[3], ("get_file_metadata_by_path_async", {"path": "/Shared/a.xlsx"}))
 
     def test_post_bodies_use_wire_names(self):
         _invoke("azuread", "checkMemberGroupsAsync", userId="u1", groupIds=["g1"])
