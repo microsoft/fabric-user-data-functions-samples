@@ -748,23 +748,11 @@ _SHAREPOINTONLINE_OPERATIONS = {
 }
 
 
-# Outlook (Delegated only). Attachments are forced off and mailbox_address is
-# never exposed, so a caller can only read their own mailbox.
+# Outlook (App only). Every op runs against the connection owner's mailbox, so
+# mail reads and the calendar listing are not admitted: they would expose the
+# owner's whole inbox and calendars to every app user. calendarId is meant to be
+# pinned per connection; until BaaS injects it, the caller supplies it.
 _OFFICE365_OPERATIONS = {
-    "getEmailsAsync": ("get_emails_async", lambda d: {
-        "folder_path": d.get("folderPath"),
-        "from_": d.get("from"),
-        "to": d.get("to"),
-        "subject_filter": d.get("subjectFilter"),
-        "fetch_only_unread": _query(d, "fetchOnlyUnread"),
-        "search_query": d.get("searchQuery"),
-        "top": _query(d, "top"),
-        "include_attachments": "false",
-    }),
-    "getEmailAsync": ("get_email_async", lambda d: {
-        "message_id": _required(d, "messageId"),
-        "include_attachments": "false",
-    }),
     "getEventsCalendarViewAsync": ("get_events_calendar_view_async", lambda d: {
         "calendar_id": _required(d, "calendarId"),
         "start_date_time_utc": _required(d, "startDateTimeUtc"),
@@ -772,7 +760,6 @@ _OFFICE365_OPERATIONS = {
         "filter": d.get("filter"),
         "top": _query(d, "top"),
     }),
-    "calendarGetTablesAsync": ("calendar_get_tables_async", lambda d: {}),
     # POST with read semantics; the SDK serializes a wire-named dict body as-is.
     "findMeetingTimesAsync": ("find_meeting_times_async", lambda d: {
         "input": _required(d, "request"),
@@ -810,10 +797,12 @@ _EXCELONLINEBUSINESS_OPERATIONS = {
 }
 
 
-# Teams (Delegated only). Excluded: posting, team/channel/member management,
+# Teams (App only). Every op runs as the connection owner, so listing the
+# owner's teams and reading their chats are not admitted. teamId/channelId are
+# meant to be pinned per connection; until BaaS injects them, the caller
+# supplies them. Excluded: posting, team/channel/member management,
 # card-and-wait, feed notifications, triggers.
 _TEAMS_OPERATIONS = {
-    "getAllTeamsAsync": ("get_all_teams_async", lambda d: {}),
     "getAllChannelsForTeamAsync": ("get_all_channels_for_team_async", lambda d: {
         "group_id": _required(d, "teamId"),
         "filter": d.get("filter"),
@@ -823,27 +812,19 @@ _TEAMS_OPERATIONS = {
         "group_id": _required(d, "teamId"),
         "channel_id": _required(d, "channelId"),
     }),
-    "getMessagesFromChatAsync": ("get_messages_from_chat_async", lambda d: {
-        "chat_id": _required(d, "chatId"),
-        "filter": d.get("filter"),
-        "orderby": d.get("orderby"),
-        "top": _query(d, "top"),
-    }),
 }
 
 
-# OneDrive (Delegated only). Excluded: file content (binary), create/copy/move/
-# delete, triggers.
+# OneDrive (App only). Every op runs against the connection owner's drive, so
+# the root listing and lookup by arbitrary path are not admitted. folderId is
+# meant to be pinned per connection; until BaaS injects it, the caller supplies
+# it. Excluded: file content (binary), create/copy/move/delete, triggers.
 _ONEDRIVEFORBUSINESS_OPERATIONS = {
-    "listRootFolderAsync": ("list_root_folder_async", lambda d: {}),
     "listFolderAsync": ("list_folder_async", lambda d: {
         "id": _required(d, "folderId"),
     }),
     "getFileMetadataAsync": ("get_file_metadata_async", lambda d: {
         "id": _required(d, "fileId"),
-    }),
-    "getFileMetadataByPathAsync": ("get_file_metadata_by_path_async", lambda d: {
-        "path": _required(d, "path"),
     }),
 }
 

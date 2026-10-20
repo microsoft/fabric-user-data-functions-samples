@@ -116,14 +116,27 @@ class AcnAdapterTests(unittest.TestCase):
 
     def test_null_result_returns_json_null(self):
         FakeClient.result = None
-        self.assertEqual(_invoke("teams", "getAllTeamsAsync"), (200, "null"))
+        self.assertEqual(_invoke("teams", "getAllChannelsForTeamAsync", teamId="t1"), (200, "null"))
 
-    def test_query_flags_are_stringified_and_attachments_forced_off(self):
-        _invoke("office365", "getEmailsAsync", fetchOnlyUnread=True, includeAttachments=True)
+    def test_query_flags_are_stringified(self):
+        _invoke("office365", "getEventsCalendarViewAsync", calendarId="c1",
+                startDateTimeUtc="2026-01-01T00:00:00Z", endDateTimeUtc="2026-01-02T00:00:00Z", top=5)
         _, kwargs = FakeClient.calls[0]
-        self.assertEqual(kwargs["fetch_only_unread"], "true")
-        self.assertEqual(kwargs["include_attachments"], "false")
-        self.assertNotIn("mailbox_address", kwargs)
+        self.assertEqual(kwargs["top"], "5")
+        self.assertEqual(kwargs["calendar_id"], "c1")
+
+    def test_app_only_connectors_reject_owner_wide_reads(self):
+        dropped = {
+            "office365": ("getEmailsAsync", "getEmailAsync", "calendarGetTablesAsync"),
+            "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync"),
+            "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync"),
+        }
+        for slug, operations in dropped.items():
+            for operation in operations:
+                with self.subTest(slug=slug, operation=operation):
+                    with self.assertRaisesRegex(ValueError, f"unsupported operation '{operation}'"):
+                        _invoke(slug, operation)
+        self.assertEqual(FakeClient.calls, [])
 
     def test_post_bodies_use_wire_names(self):
         _invoke("azuread", "checkMemberGroupsAsync", userId="u1", groupIds=["g1"])
@@ -146,7 +159,7 @@ class AcnAdapterTests(unittest.TestCase):
     def test_connector_error_maps_status_without_leaking_connection(self):
         FakeClient.error = ConnectorException(403, '{"error":"forbidden"}')
         with self.assertLogs(level="WARNING") as logs:
-            status, body = _invoke("onedriveforbusiness", "listRootFolderAsync")
+            status, body = _invoke("onedriveforbusiness", "listFolderAsync", folderId="f1")
         self.assertEqual((status, body), (403, '{"error":"forbidden"}'))
         self.assertNotIn("connection-id", "\n".join(logs.output))
         self.assertIn("rayfin_onedriveforbusiness_v1", logs.output[0])
