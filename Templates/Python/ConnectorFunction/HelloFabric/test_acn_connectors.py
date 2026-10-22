@@ -125,31 +125,11 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["top"], "5")
         self.assertEqual(kwargs["calendar_id"], "c1")
 
-    OWNER_WIDE = {
-        "office365": ("getEmailsAsync", "getEmailAsync", "calendarGetTablesAsync"),
-        "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync", "listMeetingTranscriptsAsync",
-                  "getMeetingTranscriptContentAsync"),
-        "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync", "findFilesByPathAsync"),
-    }
-
-    def test_owner_wide_reads_are_disabled_by_default(self):
-        self.assertFalse(app.ENABLE_OWNER_WIDE_READS)
-        for slug, operations in self.OWNER_WIDE.items():
-            for operation in operations:
-                with self.subTest(slug=slug, operation=operation):
-                    self.assertBadRequest(_invoke(slug, operation), f"'{operation}'.*ENABLE_OWNER_WIDE_READS")
-        self.assertEqual(FakeClient.calls, [])
-        self.assertEqual(app._acn_clients, {})
-
-    def test_owner_wide_reads_dispatch_when_enabled(self):
-        app.ENABLE_OWNER_WIDE_READS = True
-        try:
-            _invoke("office365", "calendarGetTablesAsync")
-            _invoke("office365", "getEmailsAsync", top=3)
-            _invoke("teams", "getMessagesFromChatAsync", chatId="19:abc")
-            _invoke("onedriveforbusiness", "getFileMetadataByPathAsync", path="/Shared/a.xlsx")
-        finally:
-            app.ENABLE_OWNER_WIDE_READS = False
+    def test_owner_wide_reads_dispatch(self):
+        _invoke("office365", "calendarGetTablesAsync")
+        _invoke("office365", "getEmailsAsync", top=3)
+        _invoke("teams", "getMessagesFromChatAsync", chatId="19:abc")
+        _invoke("onedriveforbusiness", "getFileMetadataByPathAsync", path="/Shared/a.xlsx")
         self.assertEqual(FakeClient.calls[0], ("calendar_get_tables_async", {}))
         self.assertEqual(FakeClient.calls[1][0], "get_emails_async")
         self.assertEqual(FakeClient.calls[1][1]["include_attachments"], "false")
@@ -175,38 +155,15 @@ class AcnAdapterTests(unittest.TestCase):
     def test_unknown_operation_lists_supported(self):
         self.assertBadRequest(_invoke("planner", "deleteBucketAsync"), "listMyTasksAsync")
 
-    OWNER_WRITES = {
-        "office365": ("sendEmailAsync", "replyToAsync", "calendarPostItemAsync",
-                      "sharedMailboxSendEmailAsync"),
-        "teams": ("postMessageToConversationAsync", "postCardToConversationAsync",
-                  "replyWithMessageToConversationAsync", "updateCardInConversationAsync",
-                  "createTeamsMeetingAsync"),
-        "onedriveforbusiness": ("createFileAsync", "createShareLinkAsync",
-                                "copyDriveFileAsync", "moveFileAsync"),
-    }
-
-    def test_owner_writes_are_disabled_by_default(self):
-        self.assertFalse(app.ENABLE_OWNER_WRITES)
-        for slug, operations in self.OWNER_WRITES.items():
-            for operation in operations:
-                with self.subTest(slug=slug, operation=operation):
-                    self.assertBadRequest(_invoke(slug, operation), f"'{operation}'.*ENABLE_OWNER_WRITES")
-        self.assertEqual(FakeClient.calls, [])
-        self.assertEqual(app._acn_clients, {})
-
-    def test_owner_writes_dispatch_when_enabled(self):
-        app.ENABLE_OWNER_WRITES = True
-        try:
-            _invoke("office365", "sendEmailAsync", request={"To": "a@b.c", "Subject": "s"})
-            _invoke("office365", "replyToAsync", messageId="m1", request={"Body": "hi"})
-            _invoke("teams", "postMessageToConversationAsync", poster="Flow bot",
-                    location="Channel", request={"recipient": {"groupId": "g"}})
-            _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs",
-                    name="a.txt", content="aGVsbG8=")
-            _invoke("onedriveforbusiness", "copyDriveFileAsync", fileId="f1",
-                    destination="/Backup/a.txt", overwrite=True)
-        finally:
-            app.ENABLE_OWNER_WRITES = False
+    def test_owner_writes_dispatch(self):
+        _invoke("office365", "sendEmailAsync", request={"To": "a@b.c", "Subject": "s"})
+        _invoke("office365", "replyToAsync", messageId="m1", request={"Body": "hi"})
+        _invoke("teams", "postMessageToConversationAsync", poster="Flow bot",
+                location="Channel", request={"recipient": {"groupId": "g"}})
+        _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs",
+                name="a.txt", content="aGVsbG8=")
+        _invoke("onedriveforbusiness", "copyDriveFileAsync", fileId="f1",
+                destination="/Backup/a.txt", overwrite=True)
         self.assertEqual(FakeClient.calls[0],
                          ("send_email_async", {"input": {"To": "a@b.c", "Subject": "s"}}))
         self.assertEqual(FakeClient.calls[1], ("reply_to_async", {
@@ -218,16 +175,12 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(FakeClient.calls[4][1]["overwrite"], "true")
 
     def test_create_file_rejects_non_base64_content(self):
-        app.ENABLE_OWNER_WRITES = True
-        try:
-            response = _invoke("onedriveforbusiness", "createFileAsync",
-                               folderPath="/Docs", name="a.txt", content="not base64!")
-        finally:
-            app.ENABLE_OWNER_WRITES = False
+        response = _invoke("onedriveforbusiness", "createFileAsync",
+                           folderPath="/Docs", name="a.txt", content="not base64!")
         self.assertBadRequest(response, "base64")
         self.assertEqual(FakeClient.calls, [])
 
-    def test_delegated_connector_writes_need_no_flag(self):
+    def test_delegated_connector_writes_dispatch(self):
         site = "https://contoso.sharepoint.com/sites/x"
         _invoke("sharepointonline", "postItemAsync", siteUrl=site, listName="Tasks", item={"Title": "a"})
         _invoke("sharepointonline", "patchItemAsync", siteUrl=site, listName="Tasks", id=7, item={"Title": "b"})
