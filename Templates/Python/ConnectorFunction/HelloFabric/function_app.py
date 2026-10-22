@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -204,3 +205,91 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
             await resp.release()
 
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
+
+
+@udf.generic_connection(argName="kustoClient", audienceType="Kusto")
+@udf.streaming_function()
+async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
+    # The SDK carries the operation name alongside the input. `executeQuery` runs a
+    # KQL query against /v1/rest/query; `executeCommand` runs a Kusto management
+    # (control) command — text starting with a leading dot, e.g. `.show databases` —
+    # against /v1/rest/mgmt. Both share the same cluster, database context, token and
+    # v1 {Tables} response shape; only the caller's input field and the REST verb
+    # differ. Default to executeQuery so callers that omit the operation still work.
+    operation = (payload.get("operation") or "executeQuery").strip()
+    input_data = payload.get("input", {})
+
+    # queryServiceUri + databaseName are resolved at `rayfin connector add` time by
+    # the Rayfin CLI and flow in via connector config. executeQuery callers supply
+    # `query`; executeCommand callers supply `command`.
+    query_service_uri = input_data.get("queryServiceUri")
+    database_name = input_data.get("databaseName")
+    is_command = operation == "executeCommand"
+    # Prefer the field that matches the operation; fall back to the other so a caller
+    # that set only one of query/command still works.
+    if is_command:
+        csl = input_data.get("command") or input_data.get("query")
+    else:
+        csl = input_data.get("query") or input_data.get("command")
+
+    if not query_service_uri or not database_name or not csl:
+        raise ValueError("queryServiceUri, databaseName and query/command are required")
+
+    client_request_id = (
+        input_data.get("clientRequestId")
+        or f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+    )
+
+    # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
+    # connection (audienceType="Kusto") and injects a FabricItem whose
+    # get_access_token() returns a token-credential object; get_token().token is the
+    # pre-minted Kusto-audience bearer string.
+    access_token = kustoClient.get_access_token().get_token().token
+
+    # executeCommand -> /v1/rest/mgmt ; executeQuery -> /v1/rest/query. Kusto keeps
+    # the endpoints apart at the protocol level; the caller's role decides authZ.
+    rest_verb = "mgmt" if is_command else "query"
+    url = f"{query_service_uri.rstrip('/')}/v1/rest/{rest_verb}"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-ms-client-request-id": client_request_id,
+    }
+    body = {"db": database_name, "csl": csl, "properties": {}}
+
+    session = await _get_session()
+
+    resp = await session.post(url, json=body, headers=headers)
+
+    if resp.status != 200:
+        # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.
+        detail = await resp.text()
+        await resp.release()
+        return fn.StreamResponse(
+            iter([detail.encode("utf-8")]),
+            media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
+            status_code=resp.status,
+        )
+
+    # True streaming: relay the Kusto v1 response body chunk-by-chunk without
+    # buffering, parsing, or re-serializing it — a pure byte pump, mirroring
+    # rayfin_semantic_model_v1. The v1 {Tables} document is transformed to the
+    # Rayfin connector output shape client-side in the SDK
+    # (packages/typescript-sdk/connector-kusto/src), so the UDF keeps constant
+    # memory and TTFB stays ~= Kusto's TTFB. The `x-ms-client-request-id` header
+    # was set from the SDK-supplied clientRequestId above, so the SDK can
+    # correlate without reading the body; `x-ms-activity-id` is not relayed
+    # (accepted loss, same as the semantic-model path).
+    async def relay():
+        try:
+            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        finally:
+            # Release the response so its connection returns to the pool (or is
+            # closed if the client disconnected mid-stream). Do NOT close the
+            # shared session here.
+            await resp.release()
+
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
