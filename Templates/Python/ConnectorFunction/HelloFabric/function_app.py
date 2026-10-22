@@ -434,6 +434,14 @@ def _required(input_data: dict, name: str):
     return value
 
 
+def _required_key(input_data: dict, name: str):
+    # Like _required, but admits falsy values such as 0 (a valid numeric id).
+    value = input_data.get(name)
+    if value is None or value == "":
+        raise ValueError(f"'{name}' is required for this operation")
+    return value
+
+
 # operation -> (SDK coroutine name, kwargs builder). Flat names match rayfin.yml and
 # the generated TypeScript SDK 1:1; kwargs differ per operation, so no generic splat.
 # Excluded: userPhoto (raw bytes), the profile writes, httpRequest (untyped).
@@ -579,6 +587,15 @@ def _query(input_data: dict, name: str):
     return str(value)
 
 
+def _error_response(status_code: int, message: str) -> fn.StreamResponse:
+    body = json.dumps({"error": {"message": message}})
+    return fn.StreamResponse(
+        iter([body.encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+        status_code=status_code,
+    )
+
+
 async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamResponse:
     from azure.connectors import ConnectorException
 
@@ -587,24 +604,41 @@ async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamRe
     input_data = payload.get("input", {})
     connectionRuntimeUrl = input_data.get("connectionRuntimeUrl")
 
-    if not operation:
-        raise ValueError("'operation' is required")
-    if not connectionRuntimeUrl:
-        raise ValueError("input.connectionRuntimeUrl is required")
+    # Input errors return 400 with a message instead of escaping as an opaque 500.
+    try:
+        if not operation:
+            raise ValueError("'operation' is required")
+        if not connectionRuntimeUrl:
+            raise ValueError("input.connectionRuntimeUrl is required")
 
-    handler = operations.get(operation)
-    if handler is None:
-        supported = ", ".join(sorted(operations))
-        raise ValueError(
-            f"unsupported operation '{operation}'; expected one of: {supported}"
-        )
-    methodName, buildKwargs = handler
-    kwargs = buildKwargs(input_data)
+        handler = operations.get(operation)
+        if handler is None:
+            supported = ", ".join(sorted(operations))
+            raise ValueError(
+                f"unsupported operation '{operation}'; expected one of: {supported}"
+            )
+        methodName, buildKwargs = handler
+        kwargs = buildKwargs(input_data)
+    except (ValueError, KeyError, TypeError) as exc:
+        logging.warning("%s: rejected operation '%s': %s", functionName, operation, exc)
+        return _error_response(400, str(exc))
 
     client = await _get_acn_client(slug, connectionRuntimeUrl)
 
     try:
         result = await getattr(client, methodName)(**kwargs)
+    except asyncio.TimeoutError:
+        logging.warning("%s: operation '%s' timed out", functionName, operation)
+        return _error_response(504, f"operation '{operation}' timed out")
+    except aiohttp.ClientError as exc:
+        # Type name only: the message can embed the connection URL.
+        logging.warning(
+            "%s: operation '%s' transport error %s",
+            functionName,
+            operation,
+            type(exc).__name__,
+        )
+        return _error_response(502, f"operation '{operation}' failed to reach the connector")
     except ConnectorException as exc:
         # Never log str(exc), exc.path or exc.operation: they embed the connection id.
         logging.warning(
@@ -619,6 +653,15 @@ async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamRe
             media_type=_JSON_MEDIA_TYPE,
             status_code=exc.status_code or 502,
         )
+    except Exception as exc:
+        # Type name only, for the same reason as above.
+        logging.error(
+            "%s: operation '%s' failed unexpectedly: %s",
+            functionName,
+            operation,
+            type(exc).__name__,
+        )
+        return _error_response(500, f"operation '{operation}' failed unexpectedly")
 
     document = json.dumps(result) if result is not None else "null"
     return fn.StreamResponse(
@@ -645,7 +688,9 @@ _SHAREPOINTONLINE_OPERATIONS = {
     "getItemAsync": ("get_item_async", lambda d: {
         "dataset": _required(d, "siteUrl"),
         "table": _required(d, "listName"),
-        "id": _required(d, "itemId"),
+        # Not `itemId`: BaaS reserves that name for the Fabric item and strips it
+        # from the caller's input before invoking, so it never reaches the adapter.
+        "id": _required_key(d, "id"),
     }),
     "listFolderAsync": ("list_folder_async", lambda d: {
         "dataset": _required(d, "siteUrl"),
