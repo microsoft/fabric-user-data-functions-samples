@@ -773,52 +773,10 @@ _SHAREPOINTONLINE_OPERATIONS = {
 
 
 # Outlook, Teams and OneDrive are App only: every op runs as the connection
-# owner. Ops scoped by an id (calendarId, teamId/channelId, folderId) are always
-# admitted. Owner-wide reads (mailbox, calendar list, all teams, chats, drive
-# root, lookup by path) and owner writes (send mail, post to Teams, create or
-# share files) are disabled by default.
-#
-# WARNING: setting this to True lets ANYONE who can call this app read the
-# owner's mail, chats and files, including messages other people sent the owner.
-# Only enable it if you intend to share that data with every app user.
-ENABLE_OWNER_WIDE_READS = False
-
-# WARNING: setting this to True lets ANYONE who can call this app send mail,
-# post to Teams and create or share files AS the connection owner. Only enable
-# it if every app user may act with the owner's identity.
-ENABLE_OWNER_WRITES = False
-
-
-def _owner_wide_disabled(operation: str):
-    def build(_d: dict) -> dict:
-        raise ValueError(
-            f"'{operation}' reads the connection owner's data and is disabled; "
-            "set ENABLE_OWNER_WIDE_READS = True to allow it"
-        )
-    return build
-
-
-def _owner_write_disabled(operation: str):
-    def build(_d: dict) -> dict:
-        raise ValueError(
-            f"'{operation}' acts as the connection owner and is disabled; "
-            "set ENABLE_OWNER_WRITES = True to allow it"
-        )
-    return build
-
-
-def _gate(operations: dict, enabled: bool, disabled) -> dict:
-    if enabled:
-        return dict(operations)
-    return {op: (method, disabled(op)) for op, (method, _) in operations.items()}
-
-
-def _app_only_operations(scoped: dict, owner_wide: dict, owner_writes: dict = None) -> dict:
-    return {
-        **scoped,
-        **_gate(owner_wide, ENABLE_OWNER_WIDE_READS, _owner_wide_disabled),
-        **_gate(owner_writes or {}, ENABLE_OWNER_WRITES, _owner_write_disabled),
-    }
+# owner. This adapter exposes every supported op; BaaS rejects any op the app
+# did not declare under `operations:` in rayfin.yml, so builders opt in per app
+# to owner-wide reads (mailbox, chats, drive root) and owner writes (send mail,
+# post to Teams, create or share files).
 
 
 # Outlook (App only). calendarId is meant to be pinned per connection; until
@@ -1182,9 +1140,9 @@ async def rayfin_sharepointonline_v1(payload: dict) -> fn.StreamResponse:
 
 @udf.streaming_function()
 async def rayfin_office365_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("office365", _app_only_operations(
-        _OFFICE365_OPERATIONS, _OFFICE365_OWNER_WIDE_OPERATIONS,
-        _OFFICE365_OWNER_WRITE_OPERATIONS), payload)
+    return await _invoke_acn("office365", {
+        **_OFFICE365_OPERATIONS, **_OFFICE365_OWNER_WIDE_OPERATIONS,
+        **_OFFICE365_OWNER_WRITE_OPERATIONS}, payload)
 
 
 @udf.streaming_function()
@@ -1194,16 +1152,16 @@ async def rayfin_excelonlinebusiness_v1(payload: dict) -> fn.StreamResponse:
 
 @udf.streaming_function()
 async def rayfin_teams_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("teams", _app_only_operations(
-        _TEAMS_OPERATIONS, _TEAMS_OWNER_WIDE_OPERATIONS,
-        _TEAMS_OWNER_WRITE_OPERATIONS), payload)
+    return await _invoke_acn("teams", {
+        **_TEAMS_OPERATIONS, **_TEAMS_OWNER_WIDE_OPERATIONS,
+        **_TEAMS_OWNER_WRITE_OPERATIONS}, payload)
 
 
 @udf.streaming_function()
 async def rayfin_onedriveforbusiness_v1(payload: dict) -> fn.StreamResponse:
-    return await _invoke_acn("onedriveforbusiness", _app_only_operations(
-        _ONEDRIVEFORBUSINESS_OPERATIONS, _ONEDRIVEFORBUSINESS_OWNER_WIDE_OPERATIONS,
-        _ONEDRIVEFORBUSINESS_OWNER_WRITE_OPERATIONS), payload)
+    return await _invoke_acn("onedriveforbusiness", {
+        **_ONEDRIVEFORBUSINESS_OPERATIONS, **_ONEDRIVEFORBUSINESS_OWNER_WIDE_OPERATIONS,
+        **_ONEDRIVEFORBUSINESS_OWNER_WRITE_OPERATIONS}, payload)
 
 
 @udf.streaming_function()
