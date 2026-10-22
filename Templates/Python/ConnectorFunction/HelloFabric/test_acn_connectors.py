@@ -16,7 +16,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 RUNTIME_URL = "https://example.azure-apim.net/apim/x/11111111111111111111111111111111"
 SLUGS = (
-    "sharepointonline", "office365", "excelonlinebusiness", "teams",
+    "office365users", "sharepointonline", "office365", "excelonlinebusiness", "teams",
     "onedriveforbusiness", "office365groups", "microsoftforms", "planner", "azuread",
 )
 
@@ -127,8 +127,9 @@ class AcnAdapterTests(unittest.TestCase):
 
     OWNER_WIDE = {
         "office365": ("getEmailsAsync", "getEmailAsync", "calendarGetTablesAsync"),
-        "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync"),
-        "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync"),
+        "teams": ("getAllTeamsAsync", "getMessagesFromChatAsync", "listMeetingTranscriptsAsync",
+                  "getMeetingTranscriptContentAsync"),
+        "onedriveforbusiness": ("listRootFolderAsync", "getFileMetadataByPathAsync", "findFilesByPathAsync"),
     }
 
     def test_owner_wide_reads_are_disabled_by_default(self):
@@ -172,7 +173,87 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(FakeClient.calls, [])
 
     def test_unknown_operation_lists_supported(self):
-        self.assertBadRequest(_invoke("planner", "createTaskAsync"), "listMyTasksAsync")
+        self.assertBadRequest(_invoke("planner", "deleteBucketAsync"), "listMyTasksAsync")
+
+    OWNER_WRITES = {
+        "office365": ("sendEmailAsync", "replyToAsync", "calendarPostItemAsync",
+                      "sharedMailboxSendEmailAsync"),
+        "teams": ("postMessageToConversationAsync", "postCardToConversationAsync",
+                  "replyWithMessageToConversationAsync", "updateCardInConversationAsync",
+                  "createTeamsMeetingAsync"),
+        "onedriveforbusiness": ("createFileAsync", "createShareLinkAsync",
+                                "copyDriveFileAsync", "moveFileAsync"),
+    }
+
+    def test_owner_writes_are_disabled_by_default(self):
+        self.assertFalse(app.ENABLE_OWNER_WRITES)
+        for slug, operations in self.OWNER_WRITES.items():
+            for operation in operations:
+                with self.subTest(slug=slug, operation=operation):
+                    self.assertBadRequest(_invoke(slug, operation), f"'{operation}'.*ENABLE_OWNER_WRITES")
+        self.assertEqual(FakeClient.calls, [])
+        self.assertEqual(app._acn_clients, {})
+
+    def test_owner_writes_dispatch_when_enabled(self):
+        app.ENABLE_OWNER_WRITES = True
+        try:
+            _invoke("office365", "sendEmailAsync", request={"To": "a@b.c", "Subject": "s"})
+            _invoke("office365", "replyToAsync", messageId="m1", request={"Body": "hi"})
+            _invoke("teams", "postMessageToConversationAsync", poster="Flow bot",
+                    location="Channel", request={"recipient": {"groupId": "g"}})
+            _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs",
+                    name="a.txt", content="aGVsbG8=")
+            _invoke("onedriveforbusiness", "copyDriveFileAsync", fileId="f1",
+                    destination="/Backup/a.txt", overwrite=True)
+        finally:
+            app.ENABLE_OWNER_WRITES = False
+        self.assertEqual(FakeClient.calls[0],
+                         ("send_email_async", {"input": {"To": "a@b.c", "Subject": "s"}}))
+        self.assertEqual(FakeClient.calls[1], ("reply_to_async", {
+            "message_id": "m1", "input": {"Body": "hi"}, "mailbox_address": None}))
+        self.assertEqual(FakeClient.calls[2], ("post_message_to_conversation_async", {
+            "poster": "Flow bot", "location": "Channel", "input": {"recipient": {"groupId": "g"}}}))
+        self.assertEqual(FakeClient.calls[3], ("create_file_async", {
+            "folder_path": "/Docs", "name": "a.txt", "input": b"hello"}))
+        self.assertEqual(FakeClient.calls[4][1]["overwrite"], "true")
+
+    def test_create_file_rejects_non_base64_content(self):
+        app.ENABLE_OWNER_WRITES = True
+        try:
+            response = _invoke("onedriveforbusiness", "createFileAsync",
+                               folderPath="/Docs", name="a.txt", content="not base64!")
+        finally:
+            app.ENABLE_OWNER_WRITES = False
+        self.assertBadRequest(response, "base64")
+        self.assertEqual(FakeClient.calls, [])
+
+    def test_delegated_connector_writes_need_no_flag(self):
+        site = "https://contoso.sharepoint.com/sites/x"
+        _invoke("sharepointonline", "postItemAsync", siteUrl=site, listName="Tasks", item={"Title": "a"})
+        _invoke("sharepointonline", "patchItemAsync", siteUrl=site, listName="Tasks", id=7, item={"Title": "b"})
+        _invoke("sharepointonline", "getItemAttachmentsAsync", siteUrl=site, listName="Tasks", id=7)
+        _invoke("excelonlinebusiness", "addRowAsync", source="me", driveId="d", fileId="f",
+                tableName="T", item={"A": 1})
+        _invoke("office365groups", "updateCalendarEventAsync", groupId="g", eventId="e", request={"subject": "x"})
+        _invoke("planner", "assignUsersAsync", taskId="t", request={"userIds": ["u"]})
+        self.assertEqual(FakeClient.calls[0], ("post_item_async", {
+            "dataset": site, "table": "Tasks", "input": {"Title": "a"}}))
+        self.assertEqual(FakeClient.calls[1], ("patch_item_async", {
+            "dataset": site, "table": "Tasks", "id": "7", "input": {"Title": "b"}}))
+        self.assertEqual(FakeClient.calls[2], ("get_item_attachments_async", {
+            "dataset": site, "table": "Tasks", "item_id": "7"}))
+        self.assertEqual(FakeClient.calls[3], ("add_row_async", {
+            "source": "me", "drive": "d", "file": "f", "table": "T", "input": {"A": 1}}))
+        self.assertEqual(FakeClient.calls[4], ("update_calendar_event_async", {
+            "group_id": "g", "event": "e", "input": {"subject": "x"}}))
+        self.assertEqual(FakeClient.calls[5], ("assign_users_async", {"id": "t", "input": {"userIds": ["u"]}}))
+
+    def test_office365users_uses_shared_adapter(self):
+        _invoke("office365users", "searchUserAsync", searchTerm="ada", top=5, isSearchTermRequired=False)
+        self.assertEqual(FakeClient.calls[0], ("search_user_async", {
+            "search_term": "ada", "top": "5", "is_search_term_required": "false", "skip_token": None}))
+        self.assertIn(("office365users", RUNTIME_URL), app._acn_clients)
+        self.assertBadRequest(_invoke("office365users", "managerAsync"), "userId")
 
     def test_missing_operation_and_runtime_url_return_400(self):
         def run(payload):

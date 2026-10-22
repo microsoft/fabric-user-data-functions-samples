@@ -452,7 +452,7 @@ class PeerAdapterTests(unittest.IsolatedAsyncioTestCase):
                 method, kwargs = APP._OFFICE365USERS_OPERATIONS[operation]
                 handler = AsyncMock(return_value={"result": operation})
                 setattr(client, method, handler)
-                with patch.object(APP, "_get_office365users_client", AsyncMock(return_value=client)):
+                with patch.object(APP, "_get_acn_client", AsyncMock(return_value=client)):
                     result = await APP.rayfin_office365users_v1({
                         "operation": operation, "input": {"connectionRuntimeUrl": "https://example.test/connection", **values}})
                 self.assertEqual(await decode(result), {"result": operation})
