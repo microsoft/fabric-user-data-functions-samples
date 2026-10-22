@@ -1,10 +1,12 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import inspect
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Optional
 from urllib.parse import urlparse
@@ -14,6 +16,22 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://dailyapi.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+_LOG_ANALYTICS_BASE = "https://api.loganalytics.azure.com/v1"
+_LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
+_MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
+_MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
+_MAXIMUM_TELEMETRY_ROWS = 10000
+_TELEMETRY_TIMESPAN_PATTERN = re.compile(
+    r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
+)
+_APPLICATION_INSIGHTS_RESOURCE_ID_PATTERN = re.compile(
+    r"/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}"
+    r"/resourceGroups/(?!\.{1,2}/)[a-z0-9_().-]{1,90}(?<!\.)"
+    r"/providers/Microsoft\.Insights/components/"
+    r"(?!\.{1,2}$)[a-z0-9_().-]{1,260}",
+    re.IGNORECASE | re.ASCII,
+)
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -27,6 +45,9 @@ _RAYFIN_ARTIFACT_OBJECT_ID_HEADER = "X-Rayfin-ArtifactObjectId"
 # loop on first use; never closed per-invoke.
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
+_telemetry_token: Optional[str] = None
+_telemetry_token_expires_at = 0.0
+_telemetry_token_lock = asyncio.Lock()
 
 
 async def _get_session() -> aiohttp.ClientSession:
@@ -47,6 +68,239 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+def _validate_telemetry_timespan(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    match = _TELEMETRY_TIMESPAN_PATTERN.fullmatch(value)
+    if not match:
+        raise ValueError("timespan must be an ISO-8601 duration")
+
+    days, hours, minutes, seconds = (
+        int(component or 0) for component in match.groups()
+    )
+    duration_seconds = (
+        days * 24 * 60 * 60 + hours * 60 * 60 + minutes * 60 + seconds
+    )
+    if duration_seconds <= 0 or duration_seconds > _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS:
+        raise ValueError("timespan must be greater than zero and at most 30 days")
+    return value
+
+
+async def _get_telemetry_access_token() -> str:
+    global _telemetry_token, _telemetry_token_expires_at
+
+    now = time.time()
+    if _telemetry_token and now < _telemetry_token_expires_at - 60:
+        return _telemetry_token
+
+    async with _telemetry_token_lock:
+        now = time.time()
+        if _telemetry_token and now < _telemetry_token_expires_at - 60:
+            return _telemetry_token
+
+        identity_endpoint = os.environ.get("IDENTITY_ENDPOINT")
+        identity_header = os.environ.get("IDENTITY_HEADER")
+        if not identity_endpoint or not identity_header:
+            raise RuntimeError("Managed identity is unavailable")
+
+        session = await _get_session()
+        response = await session.get(
+            identity_endpoint,
+            params={
+                "resource": _LOG_ANALYTICS_RESOURCE,
+                "api-version": "2019-08-01",
+            },
+            headers={"X-IDENTITY-HEADER": identity_header},
+        )
+        try:
+            if response.status != 200:
+                await response.read()
+                raise RuntimeError("Managed identity token acquisition failed")
+            token_response = await response.json()
+        finally:
+            response.release()
+
+        if not isinstance(token_response, dict):
+            raise RuntimeError("Managed identity returned an invalid token")
+        access_token = token_response.get("access_token")
+        try:
+            expires_on = float(token_response.get("expires_on", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Managed identity returned an invalid token") from exc
+        if not access_token or expires_on <= now:
+            raise RuntimeError("Managed identity returned an invalid token")
+
+        _telemetry_token = access_token
+        _telemetry_token_expires_at = expires_on
+        return access_token
+
+
+@udf.streaming_function()
+async def rayfin_telemetry_v1(payload: dict) -> fn.StreamResponse:
+    if not isinstance(payload, dict) or payload.get("operation") != "query":
+        raise ValueError("operation must be query")
+
+    input_data = payload.get("input")
+    if not isinstance(input_data, dict):
+        raise ValueError("input is required")
+
+    query = input_data.get("kql")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("kql is required")
+    if len(query) > _MAXIMUM_TELEMETRY_QUERY_LENGTH:
+        raise ValueError(
+            f"kql cannot exceed {_MAXIMUM_TELEMETRY_QUERY_LENGTH} characters"
+        )
+
+    resource_id = input_data.get("resourceId")
+    if (
+        not isinstance(resource_id, str)
+        or not _APPLICATION_INSIGHTS_RESOURCE_ID_PATTERN.fullmatch(resource_id)
+    ):
+        raise ValueError("resourceId must be a full Application Insights ARM resource ID")
+
+    timespan = _validate_telemetry_timespan(input_data.get("timespan"))
+
+    maximum_rows = input_data.get("maxRows", _MAXIMUM_TELEMETRY_ROWS)
+    if (
+        not isinstance(maximum_rows, int)
+        or isinstance(maximum_rows, bool)
+        or maximum_rows < 1
+        or maximum_rows > _MAXIMUM_TELEMETRY_ROWS
+    ):
+        raise ValueError(
+            f"maxRows must be between 1 and {_MAXIMUM_TELEMETRY_ROWS}"
+        )
+
+    access_token = await _get_telemetry_access_token()
+    url = f"{_LOG_ANALYTICS_BASE}{resource_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": _JSON_MEDIA_TYPE,
+        "Accept": _JSON_MEDIA_TYPE,
+    }
+    query_text = query.rstrip()
+    if query_text.endswith(";"):
+        query_text = query_text[:-1].rstrip()
+
+    bounded_query = f"{query_text}\n| take {maximum_rows}"
+    body = {"query": bounded_query}
+    if timespan:
+        body["timespan"] = timespan
+
+    session = await _get_session()
+    response = await session.post(url, json=body, headers=headers)
+    if response.status != 200:
+        detail = await response.text()
+        response.release()
+        return fn.StreamResponse(
+            iter([detail.encode("utf-8")]),
+            media_type=response.headers.get("Content-Type", _JSON_MEDIA_TYPE),
+            status_code=response.status,
+        )
+
+    async def relay():
+        try:
+            async for chunk in response.content.iter_any():
+                yield chunk
+        finally:
+            response.release()
+
+    return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
+
+
+class FabricMcpRequestError(ValueError):
+    pass
+
+
+async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):
+    try:
+        parsed = urlparse(_POWERBI_BASE)
+    except ValueError as exc:
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.") from exc
+    origin = _FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
+    if (origin is None or not _mcp_header(_POWERBI_BASE, 2048)
+            or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.")
+
+    token = token_provider()
+    if inspect.isawaitable(token):
+        token = await token
+    if type(token) is not str or not token or "\r" in token or "\n" in token:
+        raise FabricMcpRequestError("Invalid Fabric MCP access token.")
+
+    session = session_provider()
+    if inspect.isawaitable(session):
+        session = await session
+
+    message = payload["message"]
+    headers = {
+        name: value
+        for name, value in payload["headers"].items()
+        if name.lower() not in ("authorization", "host", "content-length", "connection")
+    }
+    header_names = {name.lower() for name in headers}
+    for name, value in (
+        ("Content-Type", _JSON_MEDIA_TYPE),
+        ("Accept", "application/json, text/event-stream"),
+        ("MCP-Protocol-Version", payload["protocolVersion"]),
+    ):
+        if name.lower() not in header_names:
+            headers[name] = value
+    headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = await session.post(
+            f"{origin}/v1/mcp/fabriciq",
+            data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            allow_redirects=False,
+        )
+        try:
+            raw = await response.text(encoding="utf-8")
+            response_headers = {}
+            seen_names = set()
+            for name, value in response.headers.items():
+                if name.lower() not in seen_names:
+                    response_headers[name] = value
+                    seen_names.add(name.lower())
+            return {
+                "status": response.status,
+                "headers": response_headers,
+                "message": raw,
+            }
+        finally:
+            response.release()
+    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError):
+        raise RuntimeError("Fabric MCP upstream transport failed.") from None
+
+
+@udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
+@udf.streaming_function()
+async def rayfin_fabriciq_mcp_v1(
+    payload: dict, fabricIqClient: fn.FabricItem
+) -> fn.StreamResponse:
+    if (
+        payload.get("operation") != "executeQuery"
+        or not isinstance(payload.get("input"), dict)
+        or any(key in payload for key in ("protocolVersion", "headers", "message"))
+    ):
+        raise FabricMcpRequestError("Invalid connector invocation wrapper.")
+    payload = payload["input"]
+
+    def token_provider():
+        return fabricIqClient.get_access_token().get_token().token
+
+    result = await _invoke_fabric_mcp(payload, token_provider)
+    return fn.StreamResponse(
+        iter([json.dumps(result, separators=(",", ":")).encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+    )
 
 
 @udf.streaming_function()
@@ -226,7 +480,7 @@ async def _mcp_relay(session, endpoint, headers, message):
                              media_type=response.headers.get("Content-Type", _JSON_MEDIA_TYPE))
 
 
-_DATA_AGENT_FABRIC_ORIGINS = {
+_FABRIC_ORIGINS = {
     "https://powerbiapi.analysis-df.windows.net": "https://powerbiapi.analysis-df.windows.net",
     "https://dailyapi.powerbi.com": "https://dailyapi.fabric.microsoft.com",
     "https://dxtapi.powerbi.com": "https://dxtapi.fabric.microsoft.com",
@@ -249,7 +503,7 @@ def _data_agent_endpoint(data):
         parsed = urlparse(_POWERBI_BASE)
     except ValueError as exc:
         raise _mcp_failure(503, "POWERBI_API_BASE must use a supported Power BI HTTPS origin.") from exc
-    origin = _DATA_AGENT_FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
+    origin = _FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
     if (origin is None or not _mcp_header(_POWERBI_BASE, 2048)
             or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
         raise _mcp_failure(503, "POWERBI_API_BASE must use a supported Power BI HTTPS origin.")
@@ -502,7 +756,17 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     methodName, buildKwargs = handler
     kwargs = buildKwargs(input_data)
 
-    client = await _get_office365users_client(connectionRuntimeUrl)
+    # Optional caller-supplied token, used as-is; otherwise managed identity.
+    accessToken = input_data.get("accessToken")
+    if accessToken:
+        from azure.connectors.office365users import Office365usersClient
+        from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
+
+        client = Office365usersClient(
+            connectionRuntimeUrl, token_provider=ConnectionStringTokenProvider(accessToken)
+        )
+    else:
+        client = await _get_office365users_client(connectionRuntimeUrl)
 
     try:
         result = await getattr(client, methodName)(**kwargs)
@@ -520,6 +784,9 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
             media_type=_JSON_MEDIA_TYPE,
             status_code=exc.status_code or 502,
         )
+    finally:
+        if accessToken:
+            await client.close()
 
     # The SDK returns None on an empty 2xx (e.g. no manager); emit JSON `null` so
     # the client can parse unconditionally. Upstream document passes through as-is.

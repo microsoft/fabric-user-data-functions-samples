@@ -433,8 +433,10 @@ class ArchiveTests(unittest.TestCase):
     def test_archives_preserve_peer_metadata_members_and_permissions(self):
         baseline = self.baseline()
         definitions = json.loads((ROOT / "functions.metadata").read_bytes())
-        self.assertEqual([d for d in definitions if d["name"] != "rayfin_data_agent_v1"],
-                         json.loads((baseline / "functions.metadata").read_bytes()))
+        baseline_definitions = json.loads((baseline / "functions.metadata").read_bytes())
+        baseline_names = {d["name"] for d in baseline_definitions}
+        self.assertEqual([d for d in definitions if d["name"] in baseline_names],
+                         baseline_definitions)
         for name in ("SourceCode.zip", "Deploy.zip"):
             with zipfile.ZipFile(baseline / name) as before, zipfile.ZipFile(ROOT / name) as after:
                 self.assertEqual(before.namelist(), after.namelist())
