@@ -136,8 +136,7 @@ class AcnAdapterTests(unittest.TestCase):
         for slug, operations in self.OWNER_WIDE.items():
             for operation in operations:
                 with self.subTest(slug=slug, operation=operation):
-                    with self.assertRaisesRegex(ValueError, f"'{operation}'.*ENABLE_OWNER_WIDE_READS"):
-                        _invoke(slug, operation)
+                    self.assertBadRequest(_invoke(slug, operation), f"'{operation}'.*ENABLE_OWNER_WIDE_READS")
         self.assertEqual(FakeClient.calls, [])
         self.assertEqual(app._acn_clients, {})
 
@@ -161,19 +160,48 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("azuread", "checkMemberGroupsAsync", userId="u1", groupIds=["g1"])
         self.assertEqual(FakeClient.calls[0][1], {"id": "u1", "input": {"groupIds": ["g1"]}})
 
-    def test_missing_required_field_raises(self):
-        with self.assertRaisesRegex(ValueError, "listName"):
-            _invoke("sharepointonline", "getItemsAsync", siteUrl="https://contoso.sharepoint.com")
+    def assertBadRequest(self, response, pattern):
+        status, body = response
+        self.assertEqual(status, 400)
+        self.assertRegex(json.loads(body)["error"]["message"], pattern)
+
+    def test_missing_required_field_returns_400(self):
+        self.assertBadRequest(
+            _invoke("sharepointonline", "getItemsAsync", siteUrl="https://contoso.sharepoint.com"),
+            "listName")
+        self.assertEqual(FakeClient.calls, [])
 
     def test_unknown_operation_lists_supported(self):
-        with self.assertRaisesRegex(ValueError, "listMyTasksAsync"):
-            _invoke("planner", "createTaskAsync")
+        self.assertBadRequest(_invoke("planner", "createTaskAsync"), "listMyTasksAsync")
 
-    def test_missing_operation_and_runtime_url_raise(self):
-        with self.assertRaisesRegex(ValueError, "operation"):
-            asyncio.run(app.rayfin_planner_v1({"input": {"connectionRuntimeUrl": RUNTIME_URL}}))
-        with self.assertRaisesRegex(ValueError, "connectionRuntimeUrl"):
-            asyncio.run(app.rayfin_planner_v1({"operation": "listMyTasksAsync", "input": {}}))
+    def test_missing_operation_and_runtime_url_return_400(self):
+        def run(payload):
+            response = asyncio.run(app.rayfin_planner_v1(payload))
+            return response.status_code, b"".join(response.body).decode("utf-8")
+        self.assertBadRequest(run({"input": {"connectionRuntimeUrl": RUNTIME_URL}}), "operation")
+        self.assertBadRequest(run({"operation": "listMyTasksAsync", "input": {}}), "connectionRuntimeUrl")
+
+    def test_sharepoint_get_item_reads_id_not_reserved_item_id(self):
+        site = "https://contoso.sharepoint.com/sites/x"
+        _invoke("sharepointonline", "getItemAsync", siteUrl=site, listName="Tasks", id=0)
+        self.assertEqual(FakeClient.calls[0], ("get_item_async", {"dataset": site, "table": "Tasks", "id": 0}))
+        self.assertBadRequest(
+            _invoke("sharepointonline", "getItemAsync", siteUrl=site, listName="Tasks", itemId=7), "'id'")
+
+    def test_transport_and_unexpected_errors_map_without_leaking(self):
+        cases = (
+            (asyncio.TimeoutError(), 504),
+            (app.aiohttp.ClientConnectionError("leaks /apim/x/connection-id"), 502),
+            (RuntimeError("leaks /apim/x/connection-id"), 500),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                FakeClient.error = error
+                with self.assertLogs(level="WARNING") as logs:
+                    status, body = _invoke("planner", "listMyTasksAsync")
+                self.assertEqual(status, expected)
+                self.assertIn("listMyTasksAsync", json.loads(body)["error"]["message"])
+                self.assertNotIn("connection-id", body + "\n".join(logs.output))
 
     def test_connector_error_maps_status_without_leaking_connection(self):
         FakeClient.error = ConnectorException(403, '{"error":"forbidden"}')
