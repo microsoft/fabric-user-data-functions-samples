@@ -1,6 +1,8 @@
 import fabric.functions as fn
 import aiohttp
 import asyncio
+import inspect
+import json
 import os
 import uuid
 from typing import Optional
@@ -11,6 +13,13 @@ udf = fn.UserDataFunctions()
 _POWERBI_BASE = os.environ.get("POWERBI_API_BASE", "https://api.powerbi.com/v1.0/myorg")
 _ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 _JSON_MEDIA_TYPE = "application/json"
+_FABRIC_ORIGINS = {
+    "https://powerbiapi.analysis-df.windows.net": "https://powerbiapi.analysis-df.windows.net",
+    "https://dailyapi.powerbi.com": "https://dailyapi.fabric.microsoft.com",
+    "https://dxtapi.powerbi.com": "https://dxtapi.fabric.microsoft.com",
+    # MSIT and production share this Power BI base; it cannot distinguish them.
+    "https://api.powerbi.com": "https://api.fabric.microsoft.com",
+}
 
 # Relaxed-Build internal DAX route. Lives at the host root (origin), not under
 # /v1.0/myorg, and is model-only. When the caller supplies a BaaS artifact
@@ -44,6 +53,99 @@ async def _get_session() -> aiohttp.ClientSession:
             )
             _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
+
+
+def _mcp_header(value, limit):
+    return isinstance(value, str) and 0 < len(value) <= limit and all(0x21 <= ord(c) <= 0x7E for c in value)
+
+
+class FabricMcpRequestError(ValueError):
+    pass
+
+
+async def _invoke_fabric_mcp(payload, token_provider, session_provider=_get_session):
+    try:
+        parsed = urlparse(_POWERBI_BASE)
+    except ValueError as exc:
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.") from exc
+    origin = _FABRIC_ORIGINS.get(f"{parsed.scheme}://{parsed.netloc}")
+    if (origin is None or not _mcp_header(_POWERBI_BASE, 2048)
+            or "\\" in _POWERBI_BASE or parsed.query or parsed.fragment):
+        raise FabricMcpRequestError("POWERBI_API_BASE must use a supported Power BI HTTPS origin.")
+
+    token = token_provider()
+    if inspect.isawaitable(token):
+        token = await token
+    if type(token) is not str or not token or "\r" in token or "\n" in token:
+        raise FabricMcpRequestError("Invalid Fabric MCP access token.")
+
+    session = session_provider()
+    if inspect.isawaitable(session):
+        session = await session
+
+    message = payload["message"]
+    headers = {
+        name: value
+        for name, value in payload["headers"].items()
+        if name.lower() not in ("authorization", "host", "content-length", "connection")
+    }
+    header_names = {name.lower() for name in headers}
+    for name, value in (
+        ("Content-Type", _JSON_MEDIA_TYPE),
+        ("Accept", "application/json, text/event-stream"),
+        ("MCP-Protocol-Version", payload["protocolVersion"]),
+    ):
+        if name.lower() not in header_names:
+            headers[name] = value
+    headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = await session.post(
+            f"{origin}/v1/mcp/fabriciq",
+            data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            allow_redirects=False,
+        )
+        try:
+            raw = await response.text(encoding="utf-8")
+            response_headers = {}
+            seen_names = set()
+            for name, value in response.headers.items():
+                if name.lower() not in seen_names:
+                    response_headers[name] = value
+                    seen_names.add(name.lower())
+            return {
+                "status": response.status,
+                "headers": response_headers,
+                "message": raw,
+            }
+        finally:
+            response.release()
+    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError):
+        raise RuntimeError("Fabric MCP upstream transport failed.") from None
+
+
+@udf.generic_connection(argName="fabricIqClient", audienceType="Fabric")
+@udf.streaming_function()
+async def rayfin_fabriciq_mcp_v1(
+    payload: dict, fabricIqClient: fn.FabricItem
+) -> fn.StreamResponse:
+    if (
+        payload.get("operation") != "executeQuery"
+        or not isinstance(payload.get("input"), dict)
+        or any(key in payload for key in ("protocolVersion", "headers", "message"))
+    ):
+        raise FabricMcpRequestError("Invalid connector invocation wrapper.")
+    payload = payload["input"]
+
+    def token_provider():
+        return fabricIqClient.get_access_token().get_token().token
+
+    result = await _invoke_fabric_mcp(payload, token_provider)
+    return fn.StreamResponse(
+        iter([json.dumps(result, separators=(",", ":")).encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+    )
 
 
 @udf.streaming_function()
