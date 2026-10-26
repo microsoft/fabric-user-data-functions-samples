@@ -606,6 +606,16 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
 
     query_service_uri = _validate_kusto_endpoint(query_service_uri)
 
+    parameters = input_data.get("parameters", {})
+    if not isinstance(parameters, dict) or any(
+        not isinstance(name, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name, re.ASCII) is None
+        or not isinstance(value, str)
+        for name, value in parameters.items()
+    ):
+        logging.warning("rayfin_kusto_v1: rejected invalid query parameters")
+        raise ValueError("parameters must map parameter names to Kusto literal strings")
+
     client_request_id = (
         input_data.get("clientRequestId")
         or f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
@@ -627,7 +637,17 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
         "Accept": "application/json",
         "x-ms-client-request-id": client_request_id,
     }
-    body = {"db": database_name, "csl": csl, "properties": {}}
+    body = {
+        "db": database_name,
+        "csl": csl,
+        "properties": json.dumps({
+            "Options": {
+                "request_readonly": True,
+                "request_readonly_hardline": True,
+            },
+            "Parameters": dict(parameters),
+        }),
+    }
 
     session = await _get_session()
 
