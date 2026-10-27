@@ -263,3 +263,7 @@ def test_metadata_and_packages():
             assert archive.read("fabric_lib/functions.metadata") == metadata
             assert not any("test_" in member or "__pycache__" in member
                            for member in archive.namelist())
+            for entry in archive.infolist():
+                mode = (entry.external_attr >> 16) & 0xFFFF
+                assert mode == 0 or mode & 0o044 == 0o044, (name, entry.filename, oct(mode))
+                assert not {".github", ".git"}.intersection(entry.filename.split("/"))
