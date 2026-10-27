@@ -272,7 +272,7 @@ def _o365_payload(**extra):
 def _o365_setup():
     _install_connectors_stub()
     mod = _load_function_app()
-    mod._clients.clear()
+    mod._acn_clients.clear()
     _FakeO365Client.instances.clear()
     return mod
 
@@ -304,7 +304,7 @@ async def _check_o365_with_token_uses_fresh_client_and_closes():
     assert isinstance(client.token_provider, _FakeTokenProvider)
     assert client.token_provider.api_key == "abc.def", "token passed as-is"
     assert client.closed is True, "per-call token client must be closed"
-    assert mod._clients == {}, "token client must not be cached"
+    assert mod._acn_clients == {}, "token client must not be cached"
     called = await client.manager_async(userId="u1")
     assert "accessToken" not in called["kwargs"], "token never reaches SDK kwargs"
 
