@@ -329,7 +329,7 @@ async def _check_o365_with_token_closes_on_connector_error():
         "invocationId": "00000000-0000-0000-0000-000000000000",
         "status": "BadRequest",
         "errors": [{
-            "errorCode": "UserThrownError",
+            "errorCode": "UserThrown",
             "subErrorCode": "Http403",
             "message": "forbidden",
             "properties": error,

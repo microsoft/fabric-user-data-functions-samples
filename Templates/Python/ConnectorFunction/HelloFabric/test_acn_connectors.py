@@ -275,8 +275,8 @@ class AcnAdapterTests(unittest.TestCase):
     def test_errors_map_to_udf_status_and_error_code(self):
         cases = (
             (ConnectorException(404, '{"error":{"code":"NotFound","message":"m"}}'),
-             "BadRequest", "UserThrownError"),
-            (ConnectorException(403, '{"error":"forbidden"}'), "BadRequest", "UserThrownError"),
+             "BadRequest", "UserThrown"),
+            (ConnectorException(403, '{"error":"forbidden"}'), "BadRequest", "UserThrown"),
             (ConnectorException(500, None), "Failed", "Http500"),
             (ConnectorException(None, None), "Failed", "Http502"),
             (asyncio.TimeoutError(), "Timeout", "Timeout"),

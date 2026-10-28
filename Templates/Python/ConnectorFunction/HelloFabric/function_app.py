@@ -810,9 +810,10 @@ def _error_response(message: str, code: str, category: str,
         "invocationId": _EMPTY_INVOCATION_ID,
         "status": status,
         "errors": [{
-            # UserThrownError marks a caller/upstream error rather than a
-            # function failure.
-            "errorCode": "UserThrownError" if status == "BadRequest" else code,
+            # "UserThrown" (the value of the host's UserThrownError code) marks
+            # a caller/upstream error, which the host returns as 422 rather than
+            # 400.
+            "errorCode": "UserThrown" if status == "BadRequest" else code,
             "subErrorCode": code,
             "message": message,
             "properties": error,
