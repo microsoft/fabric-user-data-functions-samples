@@ -815,15 +815,34 @@ def _query(input_data: dict, name: str):
         return None
     if isinstance(value, bool):
         return "true" if value else "false"
+    if name == "top":
+        # Graph rejects $top=0 with an opaque error, so validate it up front.
+        try:
+            top = int(value)
+        except (TypeError, ValueError):
+            top = 0
+        if top < 1:
+            raise ValueError("'top' must be a positive integer")
     return str(value)
 
 
-# Errors go back as HTTP 200 with a Rayfin ConnectorErrorResult body
-# ({"status": "error", "error": {...}}). The UDF host replaces any non-2xx
-# response with a generic failure and drops the body, so a non-2xx status
-# would hide the reason from the app. Callers check isConnectorError().
-_UDF_SUCCEEDED_HEADERS = {"x-fabric-udf-status": "Succeeded"}
+# Errors go back as HTTP 200 with a non-Succeeded x-fabric-udf-status header
+# and a UDFInvokeResponse body. The UDF host replaces any non-2xx response with
+# a generic failure and drops the body, but for a 2xx with a non-Succeeded
+# status it reads the body, keeps the error details, records the invocation as
+# failed and maps the status to an HTTP error code for the caller.
 _MAX_ERROR_MESSAGE_LENGTH = 1000
+_EMPTY_INVOCATION_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def _udf_status(code: str, category: str, details: Optional[str]) -> str:
+    if code == "Timeout":
+        return "Timeout"
+    if category == "query":
+        return "BadRequest"
+    if details and details.isdigit() and 400 <= int(details) < 500:
+        return "BadRequest"
+    return "Failed"
 
 
 def _error_response(message: str, code: str, category: str,
@@ -831,12 +850,27 @@ def _error_response(message: str, code: str, category: str,
     error = {"message": message, "code": code, "category": category}
     if details:
         error["details"] = details
-    body = json.dumps({"status": "error", "error": error})
+    status = _udf_status(code, category, details)
+    body = json.dumps({
+        "functionName": "connector",
+        "invocationId": _EMPTY_INVOCATION_ID,
+        "status": status,
+        "errors": [{
+            # "UserThrown" (the value of the host's UserThrownError code) marks
+            # a caller/upstream error, which the host returns as 422 rather than
+            # 400.
+            "errorCode": "UserThrown" if status == "BadRequest" else code,
+            "subErrorCode": code,
+            "message": message,
+            "properties": error,
+        }],
+        "error": error,
+    })
     return fn.StreamResponse(
         iter([body.encode("utf-8")]),
         media_type=_JSON_MEDIA_TYPE,
         status_code=200,
-        headers=_UDF_SUCCEEDED_HEADERS,
+        headers={"x-fabric-udf-status": status},
     )
 
 
