@@ -160,7 +160,16 @@ def test_query_and_command_routing(app, monkeypatch, operation, fields, verb, cs
     assert session.calls == [(
         f"https://cluster.kusto.fabric.microsoft.com/v1/rest/{verb}",
         {
-            "json": {"db": "db", "csl": csl, "properties": {}},
+            "json": {
+                "db": "db",
+                "csl": csl,
+                "properties": json.dumps({
+                    "Options": {
+                        "request_readonly": True,
+                        "request_readonly_hardline": True,
+                    },
+                }),
+            },
             "headers": {
                 "Authorization": "Bearer synthetic-kusto-token",
                 "Content-Type": "application/json",
@@ -174,6 +183,57 @@ def test_query_and_command_routing(app, monkeypatch, operation, fields, verb, cs
     assert response.release_calls == 1
     assert session.closed is False
     assert json.dumps(request) == before
+
+
+@pytest.mark.parametrize("operation, field, text", [
+    ("executeQuery", "query", "T | take 1"),
+    ("executeCommand", "command", ".show tables"),
+])
+@pytest.mark.parametrize("override", [
+    {"Options": {"request_readonly": False, "request_readonly_hardline": False}},
+    '{"Options":{"request_readonly":false,"request_readonly_hardline":false}}',
+])
+def test_readonly_options_cannot_be_disabled(app, monkeypatch, operation, field, text, override):
+    request = payload(operation, **{
+        field: text,
+        "properties": override,
+        "options": {"request_readonly": False, "request_readonly_hardline": False},
+        "request_readonly": False,
+        "request_readonly_hardline": False,
+    })
+    request["properties"] = override
+    before = json.dumps(request)
+    session = bind_session(app, monkeypatch, Response())
+
+    asyncio.run(invoke(app, request, KustoClient()))
+
+    body = session.calls[0][1]["json"]
+    assert body["csl"] == text
+    assert isinstance(body["properties"], str)
+    assert json.loads(body["properties"]) == {
+        "Options": {"request_readonly": True, "request_readonly_hardline": True},
+    }
+    assert json.dumps(request) == before
+
+
+def test_write_command_is_forwarded_readonly_and_upstream_denial_is_preserved(app, monkeypatch):
+    command = ".create table ReadOnlyProbe (Value:long)"
+    response = Response(status=403)
+    response.detail = '{"error":{"code":"ReadOnlyRequest","message":"Request is read-only."}}'
+    session = bind_session(app, monkeypatch, response)
+
+    result = asyncio.run(app.rayfin_kusto_v1(
+        payload("executeCommand", command=command), KustoClient()
+    ))
+
+    url, options = session.calls[0]
+    assert url.endswith("/v1/rest/mgmt")
+    assert options["json"]["csl"] == command
+    assert json.loads(options["json"]["properties"])["Options"] == {
+        "request_readonly": True, "request_readonly_hardline": True,
+    }
+    assert result.status_code == 403
+    assert b"".join(result.content) == response.detail.encode()
 
 
 def test_stream_starts_before_body_is_read(app, monkeypatch):

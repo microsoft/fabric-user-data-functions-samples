@@ -432,7 +432,16 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
         "Accept": "application/json",
         "x-ms-client-request-id": client_request_id,
     }
-    body = {"db": database_name, "csl": csl, "properties": {}}
+    body = {
+        "db": database_name,
+        "csl": csl,
+        "properties": json.dumps({
+            "Options": {
+                "request_readonly": True,
+                "request_readonly_hardline": True,
+            },
+        }),
+    }
 
     session = await _get_session()
 
