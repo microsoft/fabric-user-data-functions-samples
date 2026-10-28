@@ -712,6 +712,13 @@ def _required(input_data: dict, name: str):
     return value
 
 
+def _bool(value) -> bool:
+    # bool("false") is True, so string flags are parsed explicitly.
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
 def _required_key(input_data: dict, name: str):
     # Like _required, but admits falsy values such as 0 (a valid numeric id).
     value = input_data.get(name)
@@ -773,13 +780,59 @@ def _query(input_data: dict, name: str):
     return str(value)
 
 
-def _error_response(status_code: int, message: str) -> fn.StreamResponse:
-    body = json.dumps({"error": {"message": message}})
+# Errors go back as HTTP 200 with a Rayfin ConnectorErrorResult body
+# ({"status": "error", "error": {...}}). The UDF host replaces any non-2xx
+# response with a generic failure and drops the body, so a non-2xx status
+# would hide the reason from the app. Callers check isConnectorError().
+_UDF_SUCCEEDED_HEADERS = {"x-fabric-udf-status": "Succeeded"}
+_MAX_ERROR_MESSAGE_LENGTH = 1000
+
+
+def _error_response(message: str, code: str, category: str,
+                    details: Optional[str] = None) -> fn.StreamResponse:
+    error = {"message": message, "code": code, "category": category}
+    if details:
+        error["details"] = details
+    body = json.dumps({"status": "error", "error": error})
     return fn.StreamResponse(
         iter([body.encode("utf-8")]),
         media_type=_JSON_MEDIA_TYPE,
-        status_code=status_code,
+        status_code=200,
+        headers=_UDF_SUCCEEDED_HEADERS,
     )
+
+
+def _upstream_error(response_body) -> tuple:
+    # Pull only the code and message out of the connector's error body; other
+    # fields (source, path) can carry the connection URL.
+    if not response_body:
+        return None, None
+    try:
+        parsed = json.loads(response_body)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+
+    code, message = None, None
+    error = parsed.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+    elif isinstance(error, str):
+        message = error
+    if not message and isinstance(parsed.get("message"), str):
+        message = parsed["message"]
+    if not code and isinstance(parsed.get("code"), str):
+        code = parsed["code"]
+
+    if not isinstance(code, str):
+        code = None
+    if not isinstance(message, str) or not message.strip():
+        message = None
+    elif len(message) > _MAX_ERROR_MESSAGE_LENGTH:
+        message = message[:_MAX_ERROR_MESSAGE_LENGTH] + "..."
+    return code, message
 
 
 async def _invoke_acn(
@@ -790,7 +843,7 @@ async def _invoke_acn(
     input_data = payload.get("input", {})
     connectionRuntimeUrl = input_data.get("connectionRuntimeUrl")
 
-    # Input errors return 400 with a message instead of escaping as an opaque 500.
+    # Input errors return a BadRequest error result instead of an opaque 500.
     try:
         if not operation:
             raise ValueError("'operation' is required")
@@ -807,7 +860,7 @@ async def _invoke_acn(
         kwargs = buildKwargs(input_data)
     except (ValueError, KeyError, TypeError) as exc:
         logging.warning("%s: rejected operation '%s': %s", functionName, operation, exc)
-        return _error_response(400, str(exc))
+        return _error_response(str(exc), "BadRequest", "query", "400")
 
     # A caller-supplied token gets a fresh, uncached client that is closed after
     # the call; otherwise the cached managed-identity client is reused.
@@ -834,9 +887,12 @@ async def _call_acn(client, methodName: str, kwargs: dict, functionName: str,
 
     try:
         result = await getattr(client, methodName)(**kwargs)
+        document = json.dumps(result) if result is not None else "null"
     except asyncio.TimeoutError:
         logging.warning("%s: operation '%s' timed out", functionName, operation)
-        return _error_response(504, f"operation '{operation}' timed out")
+        return _error_response(
+            f"operation '{operation}' timed out", "Timeout", "network", "504"
+        )
     except aiohttp.ClientError as exc:
         # Type name only: the message can embed the connection URL.
         logging.warning(
@@ -845,20 +901,28 @@ async def _call_acn(client, methodName: str, kwargs: dict, functionName: str,
             operation,
             type(exc).__name__,
         )
-        return _error_response(502, f"operation '{operation}' failed to reach the connector")
+        return _error_response(
+            f"operation '{operation}' failed to reach the connector",
+            "ConnectorUnreachable",
+            "network",
+            "502",
+        )
     except ConnectorException as exc:
-        # Never log str(exc), exc.path or exc.operation: they embed the connection id.
+        # Never log or return str(exc), exc.path or exc.operation: they embed
+        # the connection id.
         logging.warning(
             "%s: operation '%s' failed with status %s",
             functionName,
             operation,
             exc.status_code,
         )
-        detail = exc.response_body or ""
-        return fn.StreamResponse(
-            iter([detail.encode("utf-8")]),
-            media_type=_JSON_MEDIA_TYPE,
-            status_code=exc.status_code or 502,
+        upstreamCode, upstreamMessage = _upstream_error(exc.response_body)
+        status = exc.status_code or 502
+        return _error_response(
+            upstreamMessage or f"operation '{operation}' failed with status {status}",
+            upstreamCode or f"Http{status}",
+            "api",
+            str(status),
         )
     except Exception as exc:
         # Type name only, for the same reason as above.
@@ -868,9 +932,13 @@ async def _call_acn(client, methodName: str, kwargs: dict, functionName: str,
             operation,
             type(exc).__name__,
         )
-        return _error_response(500, f"operation '{operation}' failed unexpectedly")
+        return _error_response(
+            f"operation '{operation}' failed unexpectedly",
+            "InternalError",
+            "unknown",
+            type(exc).__name__,
+        )
 
-    document = json.dumps(result) if result is not None else "null"
     return fn.StreamResponse(
         iter([document.encode("utf-8")]),
         media_type=_JSON_MEDIA_TYPE,
@@ -1162,9 +1230,12 @@ _ONEDRIVEFORBUSINESS_OPERATIONS = {
 
 def _file_content(d: dict) -> bytes:
     # JSON cannot carry raw bytes, so the caller sends base64; the SDK uploads
-    # a bytes body verbatim.
+    # a bytes body verbatim. Empty content ("") is a valid empty file.
+    content = d.get("content")
+    if content is None:
+        raise ValueError("'content' is required for this operation")
     try:
-        return base64.b64decode(_required(d, "content"), validate=True)
+        return base64.b64decode(content, validate=True)
     except (binascii.Error, TypeError) as exc:
         raise ValueError("'content' must be base64-encoded") from exc
 
@@ -1305,7 +1376,7 @@ _AZUREAD_OPERATIONS = {
     }),
     "getMemberGroupsAsync": ("get_member_groups_async", lambda d: {
         "id": _required(d, "userId"),
-        "input": {"securityEnabledOnly": bool(d.get("securityEnabledOnly"))},
+        "input": {"securityEnabledOnly": _bool(d.get("securityEnabledOnly"))},
     }),
 }
 

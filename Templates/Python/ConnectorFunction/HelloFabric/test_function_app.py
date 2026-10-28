@@ -17,6 +17,7 @@ aiohttp to be importable (function_app imports it at module load).
 
 import asyncio
 import importlib
+import json
 import os
 import sys
 import types
@@ -40,10 +41,11 @@ def _install_fabric_stub():
             return lambda fn: fn
 
     class StreamResponse:
-        def __init__(self, body, media_type=None, status_code=None):
+        def __init__(self, body, media_type=None, status_code=None, headers=None):
             self.body = body
             self.media_type = media_type
             self.status_code = status_code
+            self.headers = headers or {}
 
     class FabricItem:  # placeholder type hint target
         pass
@@ -319,8 +321,12 @@ async def _check_o365_with_token_closes_on_connector_error():
         )
     finally:
         _FakeO365Client.manager_async = original
-    assert response.status_code == 403
-    assert _body(response) == b'{"error":"forbidden"}'
+    assert response.status_code == 200
+    assert response.headers == {"x-fabric-udf-status": "Succeeded"}
+    assert json.loads(_body(response)) == {
+        "status": "error",
+        "error": {"message": "forbidden", "code": "Http403", "category": "api", "details": "403"},
+    }
     assert _FakeO365Client.instances[0].closed is True
 
 

@@ -57,6 +57,7 @@ def _install_stubs():
     class StreamResponse:
         def __init__(self, body, media_type=None, status_code=200, headers=None):
             self.body, self.media_type, self.status_code = body, media_type, status_code
+            self.headers = headers or {}
 
     functions.UserDataFunctions, functions.StreamResponse = UserDataFunctions, StreamResponse
     functions.FabricItem = type("FabricItem", (), {})
@@ -89,6 +90,15 @@ def _invoke(slug, operation, **input_data):
     payload = {"operation": operation, "input": {"connectionRuntimeUrl": RUNTIME_URL, **input_data}}
     response = asyncio.run(getattr(app, f"rayfin_{slug}_v1")(payload))
     return response.status_code, b"".join(response.body).decode("utf-8")
+
+
+def _error(response):
+    """Asserts the FuncSet-safe error envelope and returns its error object."""
+    status, body = response
+    assert status == 200, status
+    parsed = json.loads(body)
+    assert parsed["status"] == "error", parsed
+    return parsed["error"]
 
 
 class AcnAdapterTests(unittest.TestCase):
@@ -142,9 +152,9 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(FakeClient.calls[0][1], {"id": "u1", "input": {"groupIds": ["g1"]}})
 
     def assertBadRequest(self, response, pattern):
-        status, body = response
-        self.assertEqual(status, 400)
-        self.assertRegex(json.loads(body)["error"]["message"], pattern)
+        error = _error(response)
+        self.assertEqual((error["code"], error["category"], error["details"]), ("BadRequest", "query", "400"))
+        self.assertRegex(error["message"], pattern)
 
     def test_missing_required_field_returns_400(self):
         self.assertBadRequest(
@@ -180,6 +190,19 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertBadRequest(response, "base64")
         self.assertEqual(FakeClient.calls, [])
 
+    def test_create_file_accepts_empty_content_but_not_missing(self):
+        _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs", name="empty.txt", content="")
+        self.assertEqual(FakeClient.calls[0][1]["input"], b"")
+        self.assertBadRequest(
+            _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs", name="a.txt"), "content")
+
+    def test_boolean_flags_accept_string_false(self):
+        for value, expected in (("false", False), ("False", False), ("0", False), ("true", True), (True, True)):
+            with self.subTest(value=value):
+                FakeClient.calls = []
+                _invoke("azuread", "getMemberGroupsAsync", userId="u1", securityEnabledOnly=value)
+                self.assertEqual(FakeClient.calls[0][1]["input"], {"securityEnabledOnly": expected})
+
     def test_delegated_connector_writes_dispatch(self):
         site = "https://contoso.sharepoint.com/sites/x"
         _invoke("sharepointonline", "postItemAsync", siteUrl=site, listName="Tasks", item={"Title": "a"})
@@ -188,7 +211,7 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("excelonlinebusiness", "addRowAsync", source="me", driveId="d", fileId="f",
                 tableName="T", item={"A": 1})
         _invoke("office365groups", "updateCalendarEventAsync", groupId="g", eventId="e", request={"subject": "x"})
-        _invoke("planner", "assignUsersAsync", taskId="t", request={"userIds": ["u"]})
+        _invoke("planner", "assignUsersAsync", taskId="t", request={"assignments": "u1;u2"})
         self.assertEqual(FakeClient.calls[0], ("post_item_async", {
             "dataset": site, "table": "Tasks", "input": {"Title": "a"}}))
         self.assertEqual(FakeClient.calls[1], ("patch_item_async", {
@@ -199,7 +222,7 @@ class AcnAdapterTests(unittest.TestCase):
             "source": "me", "drive": "d", "file": "f", "table": "T", "input": {"A": 1}}))
         self.assertEqual(FakeClient.calls[4], ("update_calendar_event_async", {
             "group_id": "g", "event": "e", "input": {"subject": "x"}}))
-        self.assertEqual(FakeClient.calls[5], ("assign_users_async", {"id": "t", "input": {"userIds": ["u"]}}))
+        self.assertEqual(FakeClient.calls[5], ("assign_users_async", {"id": "t", "input": {"assignments": "u1;u2"}}))
 
     def test_office365users_uses_shared_adapter(self):
         _invoke("office365users", "searchUserAsync", searchTerm="ada", top=5, isSearchTermRequired=False)
@@ -224,30 +247,64 @@ class AcnAdapterTests(unittest.TestCase):
 
     def test_transport_and_unexpected_errors_map_without_leaking(self):
         cases = (
-            (asyncio.TimeoutError(), 504),
-            (app.aiohttp.ClientConnectionError("leaks /apim/x/connection-id"), 502),
-            (RuntimeError("leaks /apim/x/connection-id"), 500),
+            (asyncio.TimeoutError(), "Timeout", "network", "504"),
+            (app.aiohttp.ClientConnectionError("leaks /apim/x/connection-id"),
+             "ConnectorUnreachable", "network", "502"),
+            (RuntimeError("leaks /apim/x/connection-id"), "InternalError", "unknown", "RuntimeError"),
         )
-        for error, expected in cases:
-            with self.subTest(error=type(error).__name__):
-                FakeClient.error = error
+        for exc, code, category, details in cases:
+            with self.subTest(error=type(exc).__name__):
+                FakeClient.error = exc
                 with self.assertLogs(level="WARNING") as logs:
-                    status, body = _invoke("planner", "listMyTasksAsync")
-                self.assertEqual(status, expected)
-                self.assertIn("listMyTasksAsync", json.loads(body)["error"]["message"])
-                self.assertNotIn("connection-id", body + "\n".join(logs.output))
+                    response = _invoke("planner", "listMyTasksAsync")
+                error = _error(response)
+                self.assertEqual((error["code"], error["category"], error["details"]), (code, category, details))
+                self.assertIn("listMyTasksAsync", error["message"])
+                self.assertNotIn("connection-id", response[1] + "\n".join(logs.output))
 
-    def test_connector_error_maps_status_without_leaking_connection(self):
+    def test_error_responses_carry_udf_succeeded_header(self):
+        response = asyncio.run(app.rayfin_planner_v1({"input": {"connectionRuntimeUrl": RUNTIME_URL}}))
+        self.assertEqual(response.headers, {"x-fabric-udf-status": "Succeeded"})
+        self.assertEqual(response.media_type, "application/json")
+
+    def test_connector_error_surfaces_upstream_message_without_leaking_connection(self):
         FakeClient.error = ConnectorException(403, '{"error":"forbidden"}')
         with self.assertLogs(level="WARNING") as logs:
-            status, body = _invoke("onedriveforbusiness", "listFolderAsync", folderId="f1")
-        self.assertEqual((status, body), (403, '{"error":"forbidden"}'))
-        self.assertNotIn("connection-id", "\n".join(logs.output))
+            response = _invoke("onedriveforbusiness", "listFolderAsync", folderId="f1")
+        self.assertEqual(_error(response), {
+            "message": "forbidden", "code": "Http403", "category": "api", "details": "403"})
+        self.assertNotIn("connection-id", response[1] + "\n".join(logs.output))
         self.assertIn("rayfin_onedriveforbusiness_v1", logs.output[0])
+
+    def test_connector_error_reads_graph_style_error_and_truncates(self):
+        long_message = "x" * 5000
+        FakeClient.error = ConnectorException(
+            404, json.dumps({"error": {"code": "ErrorItemNotFound", "message": long_message}}))
+        with self.assertLogs(level="WARNING"):
+            error = _error(_invoke("office365", "getEmailsAsync"))
+        self.assertEqual((error["code"], error["category"], error["details"]), ("ErrorItemNotFound", "api", "404"))
+        self.assertEqual(error["message"], "x" * app._MAX_ERROR_MESSAGE_LENGTH + "...")
+
+    def test_connector_error_with_unparseable_body_uses_fallback(self):
+        FakeClient.error = ConnectorException(500, "<html>leaks /apim/x/connection-id</html>")
+        with self.assertLogs(level="WARNING"):
+            response = _invoke("teams", "getAllChannelsForTeamAsync", teamId="t1")
+        error = _error(response)
+        self.assertEqual((error["code"], error["details"]), ("Http500", "500"))
+        self.assertIn("getAllChannelsForTeamAsync", error["message"])
+        self.assertNotIn("connection-id", response[1])
 
     def test_connector_error_without_status_maps_to_502(self):
         FakeClient.error = ConnectorException(None, None)
-        self.assertEqual(_invoke("microsoftforms", "listFormsAsync"), (502, ""))
+        with self.assertLogs(level="WARNING"):
+            error = _error(_invoke("microsoftforms", "listFormsAsync"))
+        self.assertEqual((error["code"], error["category"], error["details"]), ("Http502", "api", "502"))
+
+    def test_unserializable_result_maps_to_internal_error(self):
+        FakeClient.result = {"value": object()}
+        with self.assertLogs(level="WARNING"):
+            error = _error(_invoke("planner", "listMyTasksAsync"))
+        self.assertEqual((error["code"], error["details"]), ("InternalError", "TypeError"))
 
     def test_clients_are_cached_per_connector_and_url(self):
         _invoke("planner", "listMyTasksAsync")
