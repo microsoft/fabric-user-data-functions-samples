@@ -29,11 +29,13 @@ class ConnectorException(Exception):
 
 class FakeClient:
     calls = []
+    tokens = []
     result = {"value": []}
     error = None
 
     def __init__(self, connection_runtime_url, token_provider=None, options=None):
         self.url = connection_runtime_url
+        FakeClient.tokens.append(token_provider)
 
     def __getattr__(self, name):
         async def call(**kwargs):
@@ -69,6 +71,11 @@ def _install_stubs():
     connectors.ConnectorException = ConnectorException
     azure.connectors = connectors
     sys.modules["azure.connectors"] = connectors
+    authentication = types.ModuleType("azure.connectors.sdk.authentication")
+    authentication.ConnectionStringTokenProvider = type(
+        "ConnectionStringTokenProvider", (), {"__init__": lambda self, token: setattr(self, "token", token)})
+    sys.modules["azure.connectors.sdk"] = types.ModuleType("azure.connectors.sdk")
+    sys.modules[authentication.__name__] = authentication
     for slug in SLUGS:
         module = types.ModuleType(f"azure.connectors.{slug}")
         setattr(module, slug.capitalize() + "Client", FakeClient)
@@ -108,7 +115,7 @@ def _error(response):
 
 class AcnAdapterTests(unittest.TestCase):
     def setUp(self):
-        FakeClient.calls, FakeClient.result, FakeClient.error = [], {"value": []}, None
+        FakeClient.calls, FakeClient.tokens, FakeClient.result, FakeClient.error = [], [], {"value": []}, None
         app._acn_clients.clear()
 
     def test_every_connector_is_registered_and_exposed(self):
@@ -243,6 +250,33 @@ class AcnAdapterTests(unittest.TestCase):
             "search_term": "ada", "top": "5", "is_search_term_required": "false", "skip_token": None}))
         self.assertIn(("office365users", RUNTIME_URL), app._acn_clients)
         self.assertBadRequest(_invoke("office365users", "managerAsync"), "userId")
+
+    def test_every_connector_honours_caller_access_token(self):
+        ids = {"teamId": "t", "userId": "u", "source": "me", "driveId": "d", "fileId": "f", "groupId": "g"}
+        operations = {
+            "office365users": "myProfileAsync", "sharepointonline": "getDataSetsAsync",
+            "office365": "getRoomListsAsync", "excelonlinebusiness": "getTablesAsync",
+            "teams": "getAllChannelsForTeamAsync", "onedriveforbusiness": "getFileMetadataAsync",
+            "office365groups": "listGroupsAsync", "microsoftforms": "listFormsAsync",
+            "planner": "listMyTasksAsync", "azuread": "getGroupAsync",
+        }
+        self.assertEqual(set(operations), set(SLUGS))
+        for slug, operation in operations.items():
+            with self.subTest(slug=slug):
+                FakeClient.calls, FakeClient.tokens = [], []
+                status, _ = _invoke(slug, operation, accessToken="caller-token", **ids)
+                self.assertEqual(status, 200)
+                self.assertEqual(FakeClient.tokens[0].token, "caller-token")
+                self.assertEqual(FakeClient.calls[-1], ("close", {}))
+        self.assertEqual(app._acn_clients, {})
+
+    def test_outlook_include_attachments_is_opt_in(self):
+        _invoke("office365", "getEmailsAsync")
+        _invoke("office365", "getEmailsAsync", includeAttachments=True)
+        _invoke("office365", "getEmailAsync", messageId="m1", includeAttachments="false")
+        _invoke("office365", "getEmailAsync", messageId="m1", includeAttachments="true")
+        self.assertEqual([kwargs["include_attachments"] for _, kwargs in FakeClient.calls],
+                         ["false", "true", "false", "true"])
 
     def test_missing_operation_and_runtime_url_return_400(self):
         def run(payload):
