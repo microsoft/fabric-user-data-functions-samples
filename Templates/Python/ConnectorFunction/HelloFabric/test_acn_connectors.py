@@ -93,12 +93,17 @@ def _invoke(slug, operation, **input_data):
 
 
 def _error(response):
-    """Asserts the FuncSet-safe error envelope and returns its error object."""
+    """Asserts the UDFInvokeResponse error envelope and returns its error object."""
     status, body = response
     assert status == 200, status
     parsed = json.loads(body)
-    assert parsed["status"] == "error", parsed
-    return parsed["error"]
+    assert parsed["status"] in ("BadRequest", "Timeout", "Failed"), parsed
+    error = parsed["error"]
+    [udf_error] = parsed["errors"]
+    assert udf_error["subErrorCode"] == error["code"], parsed
+    assert udf_error["message"] == error["message"], parsed
+    assert udf_error["properties"] == error, parsed
+    return error
 
 
 class AcnAdapterTests(unittest.TestCase):
@@ -196,6 +201,14 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertBadRequest(
             _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs", name="a.txt"), "content")
 
+    def test_top_must_be_positive(self):
+        for value in (0, "0", -1, "abc"):
+            with self.subTest(value=value):
+                self.assertBadRequest(_invoke("office365groups", "listGroupsAsync", top=value), "top")
+        self.assertEqual(FakeClient.calls, [])
+        _invoke("office365groups", "listGroupsAsync", top=3)
+        self.assertEqual(FakeClient.calls[0][1]["top"], "3")
+
     def test_boolean_flags_accept_string_false(self):
         for value, expected in (("false", False), ("False", False), ("0", False), ("true", True), (True, True)):
             with self.subTest(value=value):
@@ -262,10 +275,33 @@ class AcnAdapterTests(unittest.TestCase):
                 self.assertIn("listMyTasksAsync", error["message"])
                 self.assertNotIn("connection-id", response[1] + "\n".join(logs.output))
 
-    def test_error_responses_carry_udf_succeeded_header(self):
+    def test_error_responses_carry_udf_status_header(self):
         response = asyncio.run(app.rayfin_planner_v1({"input": {"connectionRuntimeUrl": RUNTIME_URL}}))
-        self.assertEqual(response.headers, {"x-fabric-udf-status": "Succeeded"})
+        self.assertEqual(response.headers, {"x-fabric-udf-status": "BadRequest"})
         self.assertEqual(response.media_type, "application/json")
+
+    def test_errors_map_to_udf_status_and_error_code(self):
+        cases = (
+            (ConnectorException(404, '{"error":{"code":"NotFound","message":"m"}}'),
+             "BadRequest", "UserThrown"),
+            (ConnectorException(403, '{"error":"forbidden"}'), "BadRequest", "UserThrown"),
+            (ConnectorException(500, None), "Failed", "Http500"),
+            (ConnectorException(None, None), "Failed", "Http502"),
+            (asyncio.TimeoutError(), "Timeout", "Timeout"),
+            (app.aiohttp.ClientConnectionError(), "Failed", "ConnectorUnreachable"),
+            (RuntimeError(), "Failed", "InternalError"),
+        )
+        for exc, status, errorCode in cases:
+            with self.subTest(error=repr(exc)):
+                FakeClient.error = exc
+                with self.assertLogs(level="WARNING"):
+                    response = asyncio.run(app.rayfin_planner_v1(
+                        {"operation": "listMyTasksAsync", "input": {"connectionRuntimeUrl": RUNTIME_URL}}))
+                body = json.loads(b"".join(response.body))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers, {"x-fabric-udf-status": status})
+                self.assertEqual(body["status"], status)
+                self.assertEqual(body["errors"][0]["errorCode"], errorCode)
 
     def test_connector_error_surfaces_upstream_message_without_leaking_connection(self):
         FakeClient.error = ConnectorException(403, '{"error":"forbidden"}')
