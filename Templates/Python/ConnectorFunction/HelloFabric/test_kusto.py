@@ -301,6 +301,7 @@ def test_metadata_matches_real_runtime_binding(monkeypatch):
     functions = {f.get_function_name(): f for f in app.udf.get_functions()}
     assert set(functions) == {entry["name"] for entry in entries} == {
         "rayfin_semantic_model_v1", "rayfin_fabriciq_mcp_v1", "rayfin_kusto_v1",
+        "rayfin_data_agent_v1", "rayfin_telemetry_v1",
     }
     entry = next(entry for entry in entries if entry["name"] == "rayfin_kusto_v1")
     assert entry["scriptFile"] == "function_app.py"
