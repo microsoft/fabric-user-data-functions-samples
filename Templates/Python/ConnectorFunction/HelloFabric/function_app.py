@@ -23,6 +23,11 @@ _LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
 _MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
 _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
 _MAXIMUM_TELEMETRY_ROWS = 10000
+_KUSTO_ENDPOINT_PATTERN = re.compile(
+    r"https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"kusto\.fabric\.microsoft\.com(?::443)?/?",
+    re.IGNORECASE | re.ASCII,
+)
 _TELEMETRY_TIMESPAN_PATTERN = re.compile(
     r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
 )
@@ -562,6 +567,20 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
                              media_type=_JSON_MEDIA_TYPE, headers=error.headers)
 
 
+def _validate_kusto_endpoint(value: object) -> str:
+    if (
+        isinstance(value, str)
+        and value.isascii()
+        and _KUSTO_ENDPOINT_PATTERN.fullmatch(value)
+    ):
+        hostname = urlparse(value).hostname
+        if hostname is not None and len(hostname) <= 253:
+            return f"https://{hostname}"
+
+    logging.warning("rayfin_kusto_v1: rejected an invalid query endpoint")
+    raise ValueError("queryServiceUri must be a root HTTPS Fabric Kusto endpoint")
+
+
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
 async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
@@ -574,9 +593,6 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
     operation = (payload.get("operation") or "executeQuery").strip()
     input_data = payload.get("input", {})
 
-    # queryServiceUri + databaseName are resolved at `rayfin connector add` time by
-    # the Rayfin CLI and flow in via connector config. executeQuery callers supply
-    # `query`; executeCommand callers supply `command`.
     query_service_uri = input_data.get("queryServiceUri")
     database_name = input_data.get("databaseName")
     is_command = operation == "executeCommand"
@@ -589,6 +605,18 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
 
     if not query_service_uri or not database_name or not csl:
         raise ValueError("queryServiceUri, databaseName and query/command are required")
+
+    query_service_uri = _validate_kusto_endpoint(query_service_uri)
+
+    parameters = input_data.get("parameters", {})
+    if not isinstance(parameters, dict) or any(
+        not isinstance(name, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name, re.ASCII) is None
+        or not isinstance(value, str)
+        for name, value in parameters.items()
+    ):
+        logging.warning("rayfin_kusto_v1: rejected invalid query parameters")
+        raise ValueError("parameters must map parameter names to Kusto literal strings")
 
     client_request_id = (
         input_data.get("clientRequestId")
@@ -611,11 +639,21 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
         "Accept": "application/json",
         "x-ms-client-request-id": client_request_id,
     }
-    body = {"db": database_name, "csl": csl, "properties": {}}
+    body = {
+        "db": database_name,
+        "csl": csl,
+        "properties": json.dumps({
+            "Options": {
+                "request_readonly": True,
+                "request_readonly_hardline": True,
+            },
+            "Parameters": dict(parameters),
+        }),
+    }
 
     session = await _get_session()
 
-    resp = await session.post(url, json=body, headers=headers)
+    resp = await session.post(url, json=body, headers=headers, allow_redirects=False)
 
     if resp.status != 200:
         # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.

@@ -94,10 +94,14 @@ class _FakeSession:
         self._response = response
         self.captured_headers = None
         self.captured_url = None
+        self.captured_json = None
+        self.captured_allow_redirects = None
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, *, allow_redirects=True):
         self.captured_url = url
         self.captured_headers = headers
+        self.captured_json = json
+        self.captured_allow_redirects = allow_redirects
         return self._response
 
 
