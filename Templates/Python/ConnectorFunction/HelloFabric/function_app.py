@@ -890,10 +890,10 @@ async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamRe
         logging.warning("%s: rejected operation '%s': %s", functionName, operation, exc)
         return _error_response(str(exc), "BadRequest", "query", "400")
 
-    # Every connector honours an optional caller-supplied accessToken (used
-    # as-is) in place of managed identity. It gets a fresh, uncached client that
-    # is closed after the call; otherwise the cached managed-identity client is
-    # reused.
+    # Every connector honours an accessToken passed internally by the platform
+    # (used as-is) in place of managed identity; apps don't send it. It gets a
+    # fresh, uncached client that is closed after the call; otherwise the cached
+    # managed-identity client is reused.
     accessToken = input_data.get("accessToken")
     if accessToken:
         from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
