@@ -801,11 +801,7 @@ _OFFICE365USERS_OPERATIONS = {
 
 @udf.streaming_function()
 async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
-    # Unlike the other connectors, office365users also honours an optional
-    # caller-supplied accessToken (used as-is) in place of managed identity.
-    return await _invoke_acn(
-        "office365users", _OFFICE365USERS_OPERATIONS, payload, allowAccessToken=True
-    )
+    return await _invoke_acn("office365users", _OFFICE365USERS_OPERATIONS, payload)
 
 
 def _query(input_data: dict, name: str):
@@ -907,9 +903,7 @@ def _upstream_error(response_body) -> tuple:
     return code, message
 
 
-async def _invoke_acn(
-    slug: str, operations: dict, payload: dict, allowAccessToken: bool = False
-) -> fn.StreamResponse:
+async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamResponse:
     functionName = f"rayfin_{slug}_v1"
     operation = (payload.get("operation") or "").strip()
     input_data = payload.get("input", {})
@@ -934,9 +928,11 @@ async def _invoke_acn(
         logging.warning("%s: rejected operation '%s': %s", functionName, operation, exc)
         return _error_response(str(exc), "BadRequest", "query", "400")
 
-    # A caller-supplied token gets a fresh, uncached client that is closed after
-    # the call; otherwise the cached managed-identity client is reused.
-    accessToken = input_data.get("accessToken") if allowAccessToken else None
+    # Every connector honours an accessToken passed internally by the platform
+    # (used as-is) in place of managed identity; apps don't send it. It gets a
+    # fresh, uncached client that is closed after the call; otherwise the cached
+    # managed-identity client is reused.
+    accessToken = input_data.get("accessToken")
     if accessToken:
         from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
 
@@ -1098,6 +1094,11 @@ _SHAREPOINTONLINE_OPERATIONS = {
 
 # Outlook (App only). calendarId is meant to be pinned per connection; until
 # BaaS injects it, the caller supplies it.
+def _include_attachments(d: dict) -> str:
+    # Off by default: attachment content comes back base64-encoded and can be large.
+    return "true" if _bool(d.get("includeAttachments")) else "false"
+
+
 _OFFICE365_OWNER_WIDE_OPERATIONS = {
     "getEmailsAsync": ("get_emails_async", lambda d: {
         "folder_path": d.get("folderPath"),
@@ -1107,11 +1108,11 @@ _OFFICE365_OWNER_WIDE_OPERATIONS = {
         "fetch_only_unread": _query(d, "fetchOnlyUnread"),
         "search_query": d.get("searchQuery"),
         "top": _query(d, "top"),
-        "include_attachments": "false",
+        "include_attachments": _include_attachments(d),
     }),
     "getEmailAsync": ("get_email_async", lambda d: {
         "message_id": _required(d, "messageId"),
-        "include_attachments": "false",
+        "include_attachments": _include_attachments(d),
     }),
     "calendarGetTablesAsync": ("calendar_get_tables_async", lambda d: {}),
 }
