@@ -322,10 +322,19 @@ async def _check_o365_with_token_closes_on_connector_error():
     finally:
         _FakeO365Client.manager_async = original
     assert response.status_code == 200
-    assert response.headers == {"x-fabric-udf-status": "Succeeded"}
+    assert response.headers == {"x-fabric-udf-status": "BadRequest"}
+    error = {"message": "forbidden", "code": "Http403", "category": "api", "details": "403"}
     assert json.loads(_body(response)) == {
-        "status": "error",
-        "error": {"message": "forbidden", "code": "Http403", "category": "api", "details": "403"},
+        "functionName": "connector",
+        "invocationId": "00000000-0000-0000-0000-000000000000",
+        "status": "BadRequest",
+        "errors": [{
+            "errorCode": "UserThrownError",
+            "subErrorCode": "Http403",
+            "message": "forbidden",
+            "properties": error,
+        }],
+        "error": error,
     }
     assert _FakeO365Client.instances[0].closed is True
 
