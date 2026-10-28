@@ -201,6 +201,14 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertBadRequest(
             _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs", name="a.txt"), "content")
 
+    def test_top_must_be_positive(self):
+        for value in (0, "0", -1, "abc"):
+            with self.subTest(value=value):
+                self.assertBadRequest(_invoke("office365groups", "listGroupsAsync", top=value), "top")
+        self.assertEqual(FakeClient.calls, [])
+        _invoke("office365groups", "listGroupsAsync", top=3)
+        self.assertEqual(FakeClient.calls[0][1]["top"], "3")
+
     def test_boolean_flags_accept_string_false(self):
         for value, expected in (("false", False), ("False", False), ("0", False), ("true", True), (True, True)):
             with self.subTest(value=value):

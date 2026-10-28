@@ -777,6 +777,14 @@ def _query(input_data: dict, name: str):
         return None
     if isinstance(value, bool):
         return "true" if value else "false"
+    if name == "top":
+        # Graph rejects $top=0 with an opaque error, so validate it up front.
+        try:
+            top = int(value)
+        except (TypeError, ValueError):
+            top = 0
+        if top < 1:
+            raise ValueError("'top' must be a positive integer")
     return str(value)
 
 
