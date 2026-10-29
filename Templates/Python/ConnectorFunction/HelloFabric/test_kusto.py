@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import socket
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ def no_live_requests(monkeypatch):
 
     monkeypatch.setattr(aiohttp.ClientSession, "_request", unexpected)
     monkeypatch.setattr(fn.FabricItem, "get_access_token", unexpected)
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected)
 
 
 @pytest.fixture
@@ -135,6 +137,8 @@ async def invoke(app, request, client):
      "query", "T | take 1"),
     ("executeCommand", {"command": ".show tables", "query": "T | take 1"},
      "mgmt", ".show tables"),
+    ("executeCommand", {"command": ".show database schema"},
+     "mgmt", ".show database schema"),
     (None, {"query": "T | take 1"}, "query", "T | take 1"),
     ("", {"query": "T | take 1"}, "query", "T | take 1"),
     ("  executeCommand  ", {"command": ".show tables"}, "mgmt", ".show tables"),
@@ -168,6 +172,7 @@ def test_query_and_command_routing(app, monkeypatch, operation, fields, verb, cs
                         "request_readonly": True,
                         "request_readonly_hardline": True,
                     },
+                    "Parameters": {},
                 }),
             },
             "headers": {
@@ -176,6 +181,7 @@ def test_query_and_command_routing(app, monkeypatch, operation, fields, verb, cs
                 "Accept": "application/json",
                 "x-ms-client-request-id": "KPC.rayfin_kusto_v1;test-id",
             },
+            "allow_redirects": False,
         },
     )]
     assert client.credential_calls == client.token_calls == 1
@@ -212,8 +218,172 @@ def test_readonly_options_cannot_be_disabled(app, monkeypatch, operation, field,
     assert isinstance(body["properties"], str)
     assert json.loads(body["properties"]) == {
         "Options": {"request_readonly": True, "request_readonly_hardline": True},
+        "Parameters": {},
     }
     assert json.dumps(request) == before
+
+
+@pytest.mark.parametrize("endpoint", [
+    None,
+    "",
+    42,
+    True,
+    [],
+    {},
+    "http://cluster.kusto.fabric.microsoft.com",
+    "https://example.invalid",
+    "https://kusto.fabric.microsoft.com",
+    "https://cluster.kusto.fabric.microsoft.com.example.invalid",
+    "https://clusterkusto.fabric.microsoft.com",
+    "https://cluster.kusto.windows.net",
+    "https://127.0.0.1",
+    "https://[::1]",
+    "https://user@cluster.kusto.fabric.microsoft.com",
+    "https://user:password@cluster.kusto.fabric.microsoft.com",
+    "https://cluster.kusto.fabric.microsoft.com:444",
+    "https://cluster.kusto.fabric.microsoft.com:0443",
+    "https://cluster.kusto.fabric.microsoft.com:",
+    "https://cluster.kusto.fabric.microsoft.com/v1/rest/query",
+    "https://cluster.kusto.fabric.microsoft.com//",
+    "https://cluster.kusto.fabric.microsoft.com/../",
+    "https://cluster.kusto.fabric.microsoft.com/%2e/",
+    "https://cluster.kusto.fabric.microsoft.com?",
+    "https://cluster.kusto.fabric.microsoft.com/?token=value",
+    "https://cluster.kusto.fabric.microsoft.com#",
+    "https://cluster.kusto.fabric.microsoft.com/#fragment",
+    "https://cluster.kusto.fabric.microsoft.com\\",
+    "https://cluster.kusto.fabric.microsoft.com\n",
+    "https://clu\tster.kusto.fabric.microsoft.com",
+    " https://cluster.kusto.fabric.microsoft.com",
+    "https://cluster.kusto.fabric.microsoft.com ",
+    "https://-cluster.kusto.fabric.microsoft.com",
+    "https://cluster-.kusto.fabric.microsoft.com",
+    "https://cluster..kusto.fabric.microsoft.com",
+    "https://cluster.kusto.fabric.microsoft.com.",
+    "https://cluster.kusto.fabric.microsoft.com%2f.example.invalid",
+    "https://clu\u212aster.kusto.fabric.microsoft.com",
+    "https://" + ("a" * 64) + ".kusto.fabric.microsoft.com",
+    "https://" + ".".join(["a" * 63] * 4) + ".kusto.fabric.microsoft.com",
+])
+@pytest.mark.parametrize("operation", ["executeQuery", "executeCommand"])
+def test_invalid_endpoint_stops_before_credentials_and_http(
+    app, monkeypatch, endpoint, operation
+):
+    async def no_session():
+        pytest.fail("An invalid endpoint must not create an HTTP session.")
+
+    monkeypatch.setattr(app, "_get_session", no_session)
+    request = payload(
+        operation, queryServiceUri=endpoint, query="T | take 1", command=".show tables"
+    )
+    with pytest.raises(ValueError, match="queryServiceUri"):
+        asyncio.run(app.rayfin_kusto_v1(request, object()))
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://cluster.kusto.fabric.microsoft.com",
+    "https://cluster.kusto.fabric.microsoft.com/",
+    "https://cluster.kusto.fabric.microsoft.com:443",
+    "https://cluster.kusto.fabric.microsoft.com:443/",
+    "HTTPS://CLUSTER.KUSTO.FABRIC.MICROSOFT.COM/",
+])
+@pytest.mark.parametrize("operation, route, text", [
+    ("executeQuery", "query", "T | take 1"),
+    ("executeCommand", "mgmt", ".show tables"),
+])
+def test_valid_endpoint_is_normalized_without_redirects(
+    app, monkeypatch, endpoint, operation, route, text
+):
+    response = Response()
+    session = bind_session(app, monkeypatch, response)
+    field = "command" if operation == "executeCommand" else "query"
+    request = payload(operation, queryServiceUri=endpoint, **{field: text})
+    before = json.dumps(request)
+
+    _, chunks = asyncio.run(invoke(app, request, KustoClient()))
+
+    assert chunks == list(response.chunks)
+    assert len(session.calls) == 1
+    url, options = session.calls[0]
+    assert url == f"https://cluster.kusto.fabric.microsoft.com/v1/rest/{route}"
+    assert options["allow_redirects"] is False
+    assert options["json"]["db"] == "db"
+    assert options["json"]["csl"] == text
+    assert json.dumps(request) == before
+
+
+def test_redirect_is_returned_without_a_follow_up_request(app, monkeypatch):
+    response = Response(status=302, headers={"Location": "https://receiver.invalid"})
+    session = bind_session(app, monkeypatch, response)
+
+    result = asyncio.run(app.rayfin_kusto_v1(payload(query="T | take 1"), KustoClient()))
+
+    assert result.status_code == 302
+    assert b"".join(result.content) == response.detail.encode("utf-8")
+    assert len(session.calls) == 1
+    assert session.calls[0][1]["allow_redirects"] is False
+    assert response.release_calls == 1
+
+
+@pytest.mark.parametrize("operation", ["executeQuery", "executeCommand"])
+def test_query_parameters_are_bound_without_changing_text(app, monkeypatch, operation):
+    response = Response()
+    session = bind_session(app, monkeypatch, response)
+    field = "command" if operation == "executeCommand" else "query"
+    text = ".show tables" if operation == "executeCommand" else "T | take 1"
+    parameters = {
+        "s": '"hello"',
+        "n": "long(42)",
+        "r": "real(1.25)",
+        "b": "true",
+        "at": "datetime(2026-10-26T10:00:00.0000000Z)",
+        "id": "guid(12345678-1234-1234-abcd-1234567890ab)",
+        "label": json.dumps('"; database("OtherDb").SecretTable'),
+    }
+    request = payload(operation, parameters=parameters, **{field: text})
+    before = json.dumps(request)
+
+    _, chunks = asyncio.run(invoke(app, request, KustoClient()))
+
+    body = session.calls[0][1]["json"]
+    assert chunks == list(response.chunks)
+    assert body["db"] == "db"
+    assert body["csl"] == text
+    assert json.loads(body["properties"]) == {
+        "Options": {"request_readonly": True, "request_readonly_hardline": True},
+        "Parameters": parameters,
+    }
+    assert response.text_calls == 0
+    assert response.release_calls == 1
+    assert json.dumps(request) == before
+
+
+@pytest.mark.parametrize("parameters", [
+    None,
+    [],
+    "",
+    1,
+    {"since": None},
+    {"since": 123},
+    {"since": True},
+    {"since": []},
+    {"since": {}},
+    {"": "1"},
+    {"with space": "1"},
+    {"a;print": "1"},
+    {"\u212a": "1"},
+])
+@pytest.mark.parametrize("operation", ["executeQuery", "executeCommand"])
+def test_invalid_query_parameters_stop_before_credentials_and_http(
+    app, monkeypatch, parameters, operation
+):
+    async def no_session():
+        pytest.fail("Invalid parameters must not create an HTTP session.")
+
+    monkeypatch.setattr(app, "_get_session", no_session)
+    request = payload(operation, parameters=parameters, query="T | take 1", command=".show tables")
+    with pytest.raises(ValueError, match="parameters"):
+        asyncio.run(app.rayfin_kusto_v1(request, object()))
 
 
 def test_write_command_is_forwarded_readonly_and_upstream_denial_is_preserved(app, monkeypatch):
