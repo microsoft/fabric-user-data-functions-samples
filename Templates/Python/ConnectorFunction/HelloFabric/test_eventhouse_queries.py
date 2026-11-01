@@ -23,7 +23,11 @@ FILTER_TEXT = (
     f"// {TEMPLATE_MARKER}\ndeclare query_parameters(state:string);\n"
     "StormEvents\n| where State == state"
 )
-READ_ONLY = {"request_readonly": True, "request_readonly_hardline": True}
+READ_ONLY = {
+    "request_readonly": True,
+    "request_readonly_hardline": True,
+    "request_remote_entities_disabled": True,
+}
 DEFAULT = object()
 
 
@@ -861,6 +865,22 @@ def test_request_is_bound_to_the_saved_template(app, monkeypatch, operation, rou
     assert session.captured_json["csl"] == text
     expected = {"state": '"TEXAS"'} if values else {}
     assert _properties(session) == {"Options": READ_ONLY, "Parameters": expected}
+
+
+@pytest.mark.parametrize("operation,route,text", [
+    ("executeQuery", "query", "print 1"),
+    ("executeCommand", "mgmt", ".show tables"),
+])
+def test_every_route_sends_read_only_and_local_only_options(app, monkeypatch, operation, route, text):
+    queries = {"Q": _template(operation, text, {})}
+    _, _, session = _accept(app, monkeypatch, _payload({}, operation=operation),
+                            settings=_settings(queries))
+    assert session.captured_url.endswith(f"/v1/rest/{route}")
+    assert _properties(session)["Options"] == {
+        "request_readonly": True,
+        "request_readonly_hardline": True,
+        "request_remote_entities_disabled": True,
+    }
 
 
 def test_values_never_change_the_template_text(app, monkeypatch):

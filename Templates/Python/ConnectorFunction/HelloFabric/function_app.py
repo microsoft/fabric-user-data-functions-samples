@@ -1045,6 +1045,7 @@ def _eventhouse_request(payload: object, additional_payload: object,
             "Options": {
                 "request_readonly": True,
                 "request_readonly_hardline": True,
+                "request_remote_entities_disabled": True,
             },
             "Parameters": literals,
         }),
