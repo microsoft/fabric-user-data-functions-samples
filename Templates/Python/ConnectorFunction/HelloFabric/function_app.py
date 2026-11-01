@@ -986,7 +986,9 @@ def _eventhouse_request(payload: object, additional_payload: object,
             details="403",
         )
 
-    if not is_authenticated:
+    if not is_authenticated or any(
+        _eventhouse_role(role) == _EVENTHOUSE_ANONYMOUS_ROLE for role in caller_roles
+    ):
         raise _EventhouseError(
             "QUERY_ROLE_NOT_ALLOWED",
             "An authenticated caller with a permitted template role is required.",

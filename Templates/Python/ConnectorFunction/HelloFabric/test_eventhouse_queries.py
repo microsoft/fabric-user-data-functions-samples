@@ -42,7 +42,12 @@ def no_network(monkeypatch):
 
 @pytest.fixture
 def app():
-    return _load_function_app()
+    # Python 3.9 needs a running loop for the module-level asyncio.Lock when
+    # another test file has forced a fresh import.
+    async def load():
+        return _load_function_app()
+
+    return asyncio.run(load())
 
 
 class _Session(_FakeSession):
@@ -663,13 +668,29 @@ def test_roles_that_do_not_match_are_rejected(app, monkeypatch, template_roles, 
     (["admin"], ["admin"]),
     (["admin"], ["viewer", "admin"]),
     (["viewer", "admin"], ["admin"]),
-    (["Anonymous"], ["anonymous"]),
-    (["anonymous"], ["ANONYMOUS"]),
     (["GetDataAnalyst"], ["GetDataAnalyst"]),
 ])
 def test_matching_roles_are_accepted(app, monkeypatch, template_roles, caller_roles):
     settings = _settings({"Q": _template(roles=template_roles)})
     _accept(app, monkeypatch, _texas(), settings=settings, caller=_caller(caller_roles))
+
+
+@pytest.mark.parametrize("template_roles,caller_roles", [
+    (["anonymous"], ["anonymous"]),
+    (["anonymous"], ["Anonymous"]),
+    (["anonymous"], ["ANONYMOUS"]),
+    (["Anonymous"], ["anonymous"]),
+    (["admin"], ["anonymous", "admin"]),
+    (["admin"], ["admin", "Anonymous"]),
+    (["authenticated"], ["anonymous"]),
+    (["authenticated", "anonymous"], ["anonymous"]),
+])
+def test_anonymous_callers_are_rejected_even_when_authenticated(
+    app, monkeypatch, template_roles, caller_roles
+):
+    settings = _settings({"Q": _template(roles=template_roles)})
+    assert _reject(app, monkeypatch, _texas(), settings=settings,
+                   caller=_caller(caller_roles)) == ("QUERY_ROLE_NOT_ALLOWED", "BadRequest")
 
 
 @pytest.mark.parametrize("role", ["authent\u0131cated", "AUTHENT\u0130CATED", "anonymou\u017f"])
