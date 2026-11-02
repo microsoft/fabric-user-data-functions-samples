@@ -5,9 +5,11 @@ import inspect
 import json
 import os
 import logging
+import math
 import re
 import uuid
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -21,11 +23,6 @@ _LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
 _MAXIMUM_TELEMETRY_QUERY_LENGTH = 8 * 1024
 _MAXIMUM_TELEMETRY_TIMESPAN_SECONDS = 30 * 24 * 60 * 60
 _MAXIMUM_TELEMETRY_ROWS = 10000
-_KUSTO_ENDPOINT_PATTERN = re.compile(
-    r"https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"kusto\.fabric\.microsoft\.com(?::443)?/?",
-    re.IGNORECASE | re.ASCII,
-)
 _TELEMETRY_TIMESPAN_PATTERN = re.compile(
     r"^P(?!$)(?:(\d+)D)?(?:T(?!$)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$"
 )
@@ -388,96 +385,639 @@ async def rayfin_semantic_model_v1(payload: dict, accesstoken: str) -> fn.Stream
     return fn.StreamResponse(relay(), media_type=_ARROW_MEDIA_TYPE)
 
 
-def _validate_kusto_endpoint(value: object) -> str:
+_EMPTY_INVOCATION_ID = "00000000-0000-0000-0000-000000000000"
+
+def _udf_status(code: str, category: str, details: Optional[str]) -> str:
+    if code == "Timeout":
+        return "Timeout"
+    if category == "query":
+        return "BadRequest"
+    if details and details.isdigit() and 400 <= int(details) < 500:
+        return "BadRequest"
+    return "Failed"
+
+def _error_response(message: str, code: str, category: str,
+                    details: Optional[str] = None) -> fn.StreamResponse:
+    error = {"message": message, "code": code, "category": category}
+    if details:
+        error["details"] = details
+    status = _udf_status(code, category, details)
+    body = json.dumps({
+        "functionName": "connector",
+        "invocationId": _EMPTY_INVOCATION_ID,
+        "status": status,
+        "errors": [{
+            # "UserThrown" (the value of the host's UserThrownError code) marks
+            # a caller/upstream error, which the host returns as 422 rather than
+            # 400.
+            "errorCode": "UserThrown" if status == "BadRequest" else code,
+            "subErrorCode": code,
+            "message": message,
+            "properties": error,
+        }],
+        "error": error,
+    })
+    return fn.StreamResponse(
+        iter([body.encode("utf-8")]),
+        media_type=_JSON_MEDIA_TYPE,
+        status_code=200,
+        headers={"x-fabric-udf-status": status},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Eventhouse -- saved, parameterized queries
+# ---------------------------------------------------------------------------
+# Next to operation and input, the host adds payload fields that the caller
+# cannot write:
+#   additionalPayload: the connector settings saved by the app builder
+#       {"queryServiceUri": ..., "database": <KQL database item ID>,
+#        "queries": {queryId: {"operation", "text", "parameters", "roles"}}}
+#   binding (optional): the invocation the host authorized, e.g. {"function", "operation", ...}
+#   callerContext (optional): the caller {"isAuthenticated": bool, "roles": [...]}.
+#       Without it the caller is a signed-in user with no custom roles; the host
+#       blocks anonymous callers and the function host accepts only host calls.
+# The caller selects a saved template by queryId and supplies typed values. The
+# template text is sent unchanged and the values travel as Kusto query
+# parameters, so a value can never change the query.
+_EVENTHOUSE_TARGET_FIELD = "queryServiceUri"
+_EVENTHOUSE_DATABASE_FIELD = "database"
+_EVENTHOUSE_QUERIES_FIELD = "queries"
+_EVENTHOUSE_SETTINGS_PAYLOAD_FIELD = "additionalPayload"
+_EVENTHOUSE_BINDING_PAYLOAD_FIELD = "binding"
+_EVENTHOUSE_CALLER_PAYLOAD_FIELD = "callerContext"
+_EVENTHOUSE_FUNCTION_NAME = "rayfin_kusto_v1"
+_EVENTHOUSE_AUTHENTICATED_FIELD = "isAuthenticated"
+_EVENTHOUSE_ROLES_FIELD = "roles"
+_EVENTHOUSE_SETTINGS_FIELDS = frozenset({
+    _EVENTHOUSE_TARGET_FIELD, _EVENTHOUSE_DATABASE_FIELD, _EVENTHOUSE_QUERIES_FIELD,
+})
+_EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS = frozenset({"operation", "text", "parameters"})
+_EVENTHOUSE_TEMPLATE_FIELDS = _EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS | {"roles"}
+_EVENTHOUSE_PAYLOAD_FIELDS = frozenset({
+    "operation", "input", _EVENTHOUSE_SETTINGS_PAYLOAD_FIELD,
+    _EVENTHOUSE_BINDING_PAYLOAD_FIELD, _EVENTHOUSE_CALLER_PAYLOAD_FIELD,
+})
+# workspaceId, itemId and baasItemId are injected by the platform from the
+# saved connector configuration; every other routing field is refused.
+_EVENTHOUSE_INPUT_FIELDS = frozenset({
+    "queryId", "parameters", "clientRequestId", "workspaceId", "itemId", "baasItemId",
+})
+_EVENTHOUSE_ROUTES = {"executeQuery": "query", "executeCommand": "mgmt"}
+_EVENTHOUSE_MAXIMUM_TEMPLATES = 256
+_EVENTHOUSE_MAXIMUM_TEXT_LENGTH = 65536
+_EVENTHOUSE_MAXIMUM_PARAMETERS = 128
+_EVENTHOUSE_MAXIMUM_ROLES = 128
+_EVENTHOUSE_MAXIMUM_ROLE_LENGTH = 128
+_EVENTHOUSE_MAXIMUM_REQUEST_ID_LENGTH = 256
+_EVENTHOUSE_AUTHENTICATED_ROLE = "authenticated"
+_EVENTHOUSE_ANONYMOUS_ROLE = "anonymous"
+_EVENTHOUSE_ENDPOINT_PATTERN = re.compile(
+    r"https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"kusto\.fabric\.microsoft\.com(?::443)?/?",
+    re.IGNORECASE | re.ASCII,
+)
+_EVENTHOUSE_GUID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE | re.ASCII,
+)
+_EVENTHOUSE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}", re.ASCII)
+_EVENTHOUSE_PARAMETER_TYPES = frozenset({
+    "string", "long", "real", "bool", "datetime", "guid", "timespan", "dynamic",
+})
+_EVENTHOUSE_COMMAND_SPACE = r"[ \t\r\n]+"
+_EVENTHOUSE_ENTITY_NAME = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]{0,127}|\['[A-Za-z_][A-Za-z0-9_ .-]{0,127}'\])"
+)
+# Database-scoped metadata commands only: no details forms, external tables,
+# comments, pipes or further statements.
+_EVENTHOUSE_METADATA_COMMAND_PATTERN = re.compile(
+    r"[ \t\r\n]*\.show" + _EVENTHOUSE_COMMAND_SPACE
+    + r"(?:tables|table" + _EVENTHOUSE_COMMAND_SPACE + _EVENTHOUSE_ENTITY_NAME
+    + r"(?:" + _EVENTHOUSE_COMMAND_SPACE + r"(?:schema(?:" + _EVENTHOUSE_COMMAND_SPACE
+    + r"as" + _EVENTHOUSE_COMMAND_SPACE + r"json)?|cslschema))?|database"
+    + _EVENTHOUSE_COMMAND_SPACE + r"(?:schema(?:" + _EVENTHOUSE_COMMAND_SPACE + r"as"
+    + _EVENTHOUSE_COMMAND_SPACE + r"json)?|cslschema)|functions|function"
+    + _EVENTHOUSE_COMMAND_SPACE + _EVENTHOUSE_ENTITY_NAME
+    + r"|materialized-views)[ \t\r\n]*",
+    re.IGNORECASE | re.ASCII,
+)
+# The characters that .NET treats as white space; the query policy is shared
+# with the platform, so blank and trim checks use the same set.
+_EVENTHOUSE_WHITESPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+_EVENTHOUSE_LEADING_SPACE = frozenset(_EVENTHOUSE_WHITESPACE + "\ufeff")
+_EVENTHOUSE_DATETIME_PATTERN = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,7}))?)?"
+    r"(?:Z|([+-])(\d{2}):(\d{2}))",
+    re.ASCII,
+)
+# 7d, -1.5h, 100ms or [-][d.]hh:mm:ss[.fffffff]
+_EVENTHOUSE_TIMESPAN_PATTERN = re.compile(
+    r"-?[0-9]{1,7}(?:\.[0-9]{1,7})?(?:d|h|m|s|ms)"
+    r"|-?(?:[0-9]{1,7}\.)?(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,7})?",
+    re.ASCII,
+)
+_EVENTHOUSE_MAXIMUM_DYNAMIC_ITEMS = 1000
+_EVENTHOUSE_MAXIMUM_DYNAMIC_LITERAL_LENGTH = 100000
+_EVENTHOUSE_LITERAL_ESCAPES = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+class _EventhouseError(Exception):
+    def __init__(self, code: str, message: str, details: str = "400",
+                 category: str = "query"):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+        self.category = category
+
+
+def _eventhouse_invalid_input(message: str) -> _EventhouseError:
+    return _EventhouseError("INVALID_QUERY_INPUT", message)
+
+
+def _eventhouse_invalid_policy(message: str) -> _EventhouseError:
+    return _EventhouseError("INVALID_QUERY_POLICY", message, category="configuration")
+
+
+def _eventhouse_invalid_target(message: str) -> _EventhouseError:
+    return _EventhouseError("INVALID_CONNECTOR_TARGET", message, category="configuration")
+
+
+def _eventhouse_length(value: str) -> int:
+    # Lengths are counted in UTF-16 code units, as the platform counts them.
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _eventhouse_is_blank(value: str) -> bool:
+    return all(character in _EVENTHOUSE_WHITESPACE for character in value)
+
+
+def _eventhouse_has_control(value: str) -> bool:
+    return any(
+        character < "\x20" or "\x7f" <= character <= "\x9f" for character in value
+    )
+
+
+def _eventhouse_has_lone_surrogate(value: str) -> bool:
+    return any("\ud800" <= character <= "\udfff" for character in value)
+
+
+def _eventhouse_is_identifier(value: object) -> bool:
+    return isinstance(value, str) and _EVENTHOUSE_IDENTIFIER_PATTERN.fullmatch(value) is not None
+
+
+def _eventhouse_endpoint(value: object) -> Optional[str]:
     if (
         isinstance(value, str)
         and value.isascii()
-        and _KUSTO_ENDPOINT_PATTERN.fullmatch(value)
+        and _EVENTHOUSE_ENDPOINT_PATTERN.fullmatch(value)
     ):
         hostname = urlparse(value).hostname
         if hostname is not None and len(hostname) <= 253:
             return f"https://{hostname}"
+    return None
 
-    logging.warning("rayfin_kusto_v1: rejected an invalid query endpoint")
-    raise ValueError("queryServiceUri must be a root HTTPS Fabric Kusto endpoint")
+
+def _eventhouse_is_query_text(text: str) -> bool:
+    # Skip white space and nested comments; the first remaining character must
+    # not start a management command.
+    index = 0
+    while index < len(text):
+        if text[index] in _EVENTHOUSE_LEADING_SPACE:
+            index += 1
+        elif text.startswith("//", index):
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+        elif text.startswith("/*", index):
+            index += 2
+            depth = 1
+            while index < len(text) and depth > 0:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth > 0:
+                return False
+        else:
+            return text[index] != "."
+    return False
+
+
+def _eventhouse_validate_template(template: object) -> None:
+    if (
+        not isinstance(template, dict)
+        or not _EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS <= set(template) <= _EVENTHOUSE_TEMPLATE_FIELDS
+    ):
+        raise _eventhouse_invalid_policy(
+            "Each query requires operation, text, and parameters, and accepts only roles besides."
+        )
+
+    operation = template["operation"]
+    if not isinstance(operation, str) or operation not in _EVENTHOUSE_ROUTES:
+        raise _eventhouse_invalid_policy("Query operation must be executeQuery or executeCommand.")
+
+    text = template["text"]
+    if (
+        not isinstance(text, str)
+        or _eventhouse_is_blank(text)
+        or _eventhouse_length(text) > _EVENTHOUSE_MAXIMUM_TEXT_LENGTH
+        or "\0" in text
+    ):
+        raise _eventhouse_invalid_policy(
+            "Query text must be nonblank, contain no NUL, and not exceed 65536 characters."
+        )
+    if operation == "executeCommand" and (
+        not text.isascii() or _EVENTHOUSE_METADATA_COMMAND_PATTERN.fullmatch(text) is None
+    ):
+        raise _eventhouse_invalid_policy(
+            "Command templates require one allowed database-scoped .show metadata command "
+            "for the bound database. Use .show tables or .show database schema; do not use "
+            "comments, pipes, multiple statements, or explicit database names."
+        )
+    if operation == "executeQuery" and not _eventhouse_is_query_text(text):
+        raise _eventhouse_invalid_policy(
+            "Query templates require query text, not a management command or an "
+            "empty/comment-only query. Register allowed metadata commands with operation "
+            "executeCommand."
+        )
+
+    parameters = template["parameters"]
+    if not isinstance(parameters, dict) or len(parameters) > _EVENTHOUSE_MAXIMUM_PARAMETERS:
+        raise _eventhouse_invalid_policy(
+            "Each query requires an explicit parameters dictionary with at most 128 entries; "
+            "use {} for none."
+        )
+    if any(
+        not _eventhouse_is_identifier(name)
+        or not isinstance(kind, str)
+        or kind not in _EVENTHOUSE_PARAMETER_TYPES
+        for name, kind in parameters.items()
+    ):
+        raise _eventhouse_invalid_policy(
+            "Parameters require simple identifier names and one of string, long, real, bool, "
+            "datetime, guid, timespan, dynamic."
+        )
+
+    if "roles" not in template:
+        return
+    roles = template["roles"]
+    if (
+        not isinstance(roles, list)
+        or not 0 < len(roles) <= _EVENTHOUSE_MAXIMUM_ROLES
+        or any(
+            not isinstance(role, str)
+            or _eventhouse_is_blank(role)
+            or _eventhouse_length(role) > _EVENTHOUSE_MAXIMUM_ROLE_LENGTH
+            or role != role.strip(_EVENTHOUSE_WHITESPACE)
+            or _eventhouse_has_control(role)
+            for role in roles
+        )
+        or len(set(roles)) != len(roles)
+    ):
+        raise _eventhouse_invalid_policy(
+            "Each query requires 1 to 128 distinct, nonblank role names of at most 128 "
+            "characters without surrounding whitespace or control characters."
+        )
+
+
+def _eventhouse_settings(settings: object) -> tuple:
+    if settings is None or settings == {}:
+        raise _EventhouseError(
+            "QUERY_POLICY_REQUIRED",
+            "Eventhouse requires a nonempty queries policy. Declare named templates and "
+            "redeploy; raw KQL invocation is not supported.",
+            category="configuration",
+        )
+    if not isinstance(settings, dict) or not set(settings) <= _EVENTHOUSE_SETTINGS_FIELDS:
+        raise _eventhouse_invalid_policy(
+            "Eventhouse connector settings accept only queryServiceUri, database, and queries."
+        )
+
+    endpoint = _eventhouse_endpoint(settings.get(_EVENTHOUSE_TARGET_FIELD))
+    if endpoint is None:
+        raise _eventhouse_invalid_target(
+            "queryServiceUri must be a root HTTPS Fabric Kusto endpoint."
+        )
+    database = settings.get(_EVENTHOUSE_DATABASE_FIELD)
+    if not isinstance(database, str) or _EVENTHOUSE_GUID_PATTERN.fullmatch(database) is None:
+        raise _eventhouse_invalid_target("database must be the KQL database item ID.")
+
+    queries = settings.get(_EVENTHOUSE_QUERIES_FIELD)
+    if not isinstance(queries, dict) or not queries:
+        raise _EventhouseError(
+            "QUERY_POLICY_REQUIRED",
+            "Eventhouse requires a nonempty queries policy. Declare named templates and "
+            "redeploy; raw KQL invocation is not supported.",
+            category="configuration",
+        )
+    if len(queries) > _EVENTHOUSE_MAXIMUM_TEMPLATES:
+        raise _eventhouse_invalid_policy("A query policy supports at most 256 templates.")
+    for query_id, template in queries.items():
+        if not _eventhouse_is_identifier(query_id):
+            raise _eventhouse_invalid_policy(
+                "Query IDs must be simple identifiers of 1 to 128 characters with a template object."
+            )
+        _eventhouse_validate_template(template)
+    return endpoint, database, queries
+
+
+def _eventhouse_caller(context: object) -> tuple:
+    if (
+        not isinstance(context, dict)
+        or type(context.get(_EVENTHOUSE_AUTHENTICATED_FIELD)) is not bool
+        or not isinstance(context.get(_EVENTHOUSE_ROLES_FIELD), list)
+        or any(not isinstance(role, str) for role in context[_EVENTHOUSE_ROLES_FIELD])
+    ):
+        raise _EventhouseError(
+            "INVALID_CALLER_CONTEXT",
+            "The host did not supply a valid caller context.",
+            details="500",
+            category="configuration",
+        )
+    return context[_EVENTHOUSE_AUTHENTICATED_FIELD], context[_EVENTHOUSE_ROLES_FIELD]
+
+
+def _eventhouse_role(role: str) -> str:
+    # Built-in roles match case-insensitively; custom roles are case-sensitive.
+    if _eventhouse_is_blank(role) or (
+        role.isascii() and role.lower() == _EVENTHOUSE_AUTHENTICATED_ROLE
+    ):
+        return _EVENTHOUSE_AUTHENTICATED_ROLE
+    if role.isascii() and role.lower() == _EVENTHOUSE_ANONYMOUS_ROLE:
+        return _EVENTHOUSE_ANONYMOUS_ROLE
+    return role
+
+
+def _eventhouse_string_literal(value: str) -> str:
+    characters = ['"']
+    for character in value:
+        escape = _EVENTHOUSE_LITERAL_ESCAPES.get(character)
+        if escape is not None:
+            characters.append(escape)
+        elif " " <= character <= "~":
+            characters.append(character)
+        else:
+            code = ord(character)
+            if code > 0xFFFF:
+                code -= 0x10000
+                characters.append(
+                    "\\u%04X\\u%04X" % (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+                )
+            else:
+                characters.append("\\u%04X" % code)
+    characters.append('"')
+    return "".join(characters)
+
+
+def _eventhouse_datetime_literal(value: str) -> Optional[str]:
+    match = _EVENTHOUSE_DATETIME_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, fraction, sign, offset_hours, offset_minutes = (
+        match.groups()
+    )
+    ticks = int(fraction.ljust(7, "0")) if fraction else 0
+    offset = timedelta(0)
+    if sign:
+        if int(offset_hours) > 14 or int(offset_minutes) > 59 or (
+            int(offset_hours) == 14 and int(offset_minutes) != 0
+        ):
+            return None
+        offset = timedelta(hours=int(offset_hours), minutes=int(offset_minutes))
+        if sign == "-":
+            offset = -offset
+    try:
+        moment = datetime(
+            int(year), int(month), int(day), int(hour), int(minute), int(second or 0),
+            ticks // 10, tzinfo=timezone(offset),
+        ).astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+    return (
+        f"datetime({moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+        f"T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}"
+        f".{moment.microsecond:06d}{ticks % 10}Z)"
+    )
+
+
+def _eventhouse_dynamic_literal(value: object) -> Optional[str]:
+    # Only a flat array of scalars; json.dumps emits exactly one literal.
+    if type(value) is not list or len(value) > _EVENTHOUSE_MAXIMUM_DYNAMIC_ITEMS:
+        return None
+    for item in value:
+        if item is None or type(item) is bool:
+            continue
+        if type(item) is int:
+            if not -(2 ** 63) <= item < 2 ** 63:
+                return None
+        elif type(item) is float:
+            if not math.isfinite(item):
+                return None
+        elif type(item) is str:
+            if _eventhouse_has_lone_surrogate(item):
+                return None
+        else:
+            return None
+    literal = "dynamic(" + json.dumps(
+        value, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+    ) + ")"
+    if len(literal) > _EVENTHOUSE_MAXIMUM_DYNAMIC_LITERAL_LENGTH:
+        return None
+    return literal
+
+
+def _eventhouse_literal(value: object, kind: str) -> Optional[str]:
+    if kind == "string":
+        if isinstance(value, str) and not _eventhouse_has_lone_surrogate(value):
+            return _eventhouse_string_literal(value)
+    elif kind == "long":
+        if type(value) is int and -(2 ** 63) <= value < 2 ** 63:
+            return f"long({value})"
+    elif kind == "real":
+        if type(value) in (int, float):
+            try:
+                number = float(value)
+            except OverflowError:
+                return None
+            if math.isfinite(number):
+                return f"real({number!r})"
+    elif kind == "bool":
+        if type(value) is bool:
+            return "true" if value else "false"
+    elif kind == "datetime":
+        if isinstance(value, str):
+            return _eventhouse_datetime_literal(value)
+    elif kind == "guid":
+        if isinstance(value, str) and _EVENTHOUSE_GUID_PATTERN.fullmatch(value):
+            return f"guid({value.lower()})"
+    elif kind == "timespan":
+        if isinstance(value, str) and _EVENTHOUSE_TIMESPAN_PATTERN.fullmatch(value):
+            return f"timespan({value})"
+    elif kind == "dynamic":
+        return _eventhouse_dynamic_literal(value)
+    return None
+
+
+def _eventhouse_binding(binding: object, operation: object) -> None:
+    if (
+        not isinstance(binding, dict)
+        or ("operation" in binding and binding["operation"] != operation)
+        or ("function" in binding and binding["function"] != _EVENTHOUSE_FUNCTION_NAME)
+    ):
+        raise _eventhouse_invalid_policy(
+            "The host binding does not match this function and operation."
+        )
+
+
+def _eventhouse_request(payload: object) -> tuple:
+    if not isinstance(payload, dict):
+        raise _eventhouse_invalid_input("The request payload must be an object.")
+    endpoint, database, queries = _eventhouse_settings(
+        payload.get(_EVENTHOUSE_SETTINGS_PAYLOAD_FIELD)
+    )
+    if _EVENTHOUSE_BINDING_PAYLOAD_FIELD in payload:
+        _eventhouse_binding(payload[_EVENTHOUSE_BINDING_PAYLOAD_FIELD], payload.get("operation"))
+    if _EVENTHOUSE_CALLER_PAYLOAD_FIELD in payload:
+        is_authenticated, caller_roles = _eventhouse_caller(
+            payload[_EVENTHOUSE_CALLER_PAYLOAD_FIELD]
+        )
+    else:
+        is_authenticated, caller_roles = True, []
+
+    if (
+        not set(payload) <= _EVENTHOUSE_PAYLOAD_FIELDS
+        or not isinstance(payload.get("operation"), str)
+        or not isinstance(payload.get("input"), dict)
+        or not set(payload["input"]) <= _EVENTHOUSE_INPUT_FIELDS
+    ):
+        raise _eventhouse_invalid_input(
+            "Supply only operation and input containing queryId, parameters, and "
+            "clientRequestId; raw text, routing, options, and roles are not accepted."
+        )
+    operation, input_data = payload["operation"], payload["input"]
+
+    if "itemId" in input_data and (
+        not isinstance(input_data["itemId"], str)
+        or input_data["itemId"].lower() != database.lower()
+    ):
+        raise _eventhouse_invalid_target(
+            "The configured KQL database does not match the saved connector settings."
+        )
+
+    query_id = input_data.get("queryId")
+    if not _eventhouse_is_identifier(query_id):
+        raise _eventhouse_invalid_input("A simple identifier queryId is required.")
+
+    template = queries.get(query_id)
+    if template is None or template["operation"] != operation:
+        raise _EventhouseError(
+            "QUERY_NOT_ALLOWED",
+            "The requested template is not available for this connector and operation.",
+            details="403",
+        )
+
+    if not is_authenticated or any(
+        _eventhouse_role(role) == _EVENTHOUSE_ANONYMOUS_ROLE for role in caller_roles
+    ):
+        raise _EventhouseError(
+            "QUERY_ROLE_NOT_ALLOWED",
+            "An authenticated caller with a permitted template role is required.",
+            details="403",
+        )
+    roles = {_eventhouse_role(role) for role in caller_roles} | {_EVENTHOUSE_AUTHENTICATED_ROLE}
+    template_roles = template.get("roles", [_EVENTHOUSE_AUTHENTICATED_ROLE])
+    if not any(_eventhouse_role(role) in roles for role in template_roles):
+        raise _EventhouseError(
+            "QUERY_ROLE_NOT_ALLOWED",
+            "The caller role is not permitted for this template.",
+            details="403",
+        )
+
+    if "parameters" in input_data and not isinstance(input_data["parameters"], dict):
+        raise _eventhouse_invalid_input("Parameters must be an object of non-null JSON scalars.")
+    supplied = input_data.get("parameters", {})
+    declared = template["parameters"]
+    if len(supplied) != len(declared) or any(name not in declared for name in supplied):
+        raise _eventhouse_invalid_input(
+            "Supply exactly the required template parameters, without additional names."
+        )
+    literals = {}
+    for name, kind in declared.items():
+        if supplied.get(name) is None:
+            raise _eventhouse_invalid_input(
+                "All template parameters are required and must be non-null."
+            )
+        literal = _eventhouse_literal(supplied[name], kind)
+        if literal is None:
+            raise _eventhouse_invalid_input(
+                "A parameter does not match its declared JSON type; datetime requires ISO 8601 "
+                "with an explicit time zone, guid requires the hyphenated format, timespan "
+                "requires a Kusto timespan such as 7d or 01:30:00, and dynamic requires a flat "
+                "array of scalars."
+            )
+        literals[name] = literal
+
+    client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+    if "clientRequestId" in input_data:
+        client_request_id = input_data["clientRequestId"]
+        if (
+            not isinstance(client_request_id, str)
+            or _eventhouse_is_blank(client_request_id)
+            or len(client_request_id) > _EVENTHOUSE_MAXIMUM_REQUEST_ID_LENGTH
+            or not client_request_id.isascii()
+            or _eventhouse_has_control(client_request_id)
+        ):
+            raise _eventhouse_invalid_input(
+                "clientRequestId must be a nonblank ASCII string of at most 256 characters "
+                "without control characters."
+            )
+
+    url = f"{endpoint}/v1/rest/{_EVENTHOUSE_ROUTES[operation]}"
+    body = {
+        "db": database,
+        "csl": template["text"],
+        "properties": json.dumps({
+            "Options": {
+                "request_readonly": True,
+                "request_readonly_hardline": True,
+                "request_remote_entities_disabled": True,
+            },
+            "Parameters": literals,
+        }),
+    }
+    return url, body, client_request_id
 
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
 async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
-    # The SDK carries the operation name alongside the input. `executeQuery` runs a
-    # KQL query against /v1/rest/query; `executeCommand` runs a Kusto management
-    # (control) command — text starting with a leading dot, e.g. `.show databases` —
-    # against /v1/rest/mgmt. Both share the same cluster, database context, token and
-    # v1 {Tables} response shape; only the caller's input field and the REST verb
-    # differ. Default to executeQuery so callers that omit the operation still work.
-    operation = (payload.get("operation") or "executeQuery").strip()
-    input_data = payload.get("input", {})
+    try:
+        url, body, client_request_id = _eventhouse_request(payload)
+    except _EventhouseError as error:
+        logging.warning("rayfin_kusto_v1: rejected the request with %s", error.code)
+        return _error_response(error.message, error.code, error.category, error.details)
 
-    query_service_uri = input_data.get("queryServiceUri")
-    database_name = input_data.get("databaseName")
-    is_command = operation == "executeCommand"
-    # Prefer the field that matches the operation; fall back to the other so a caller
-    # that set only one of query/command still works.
-    if is_command:
-        csl = input_data.get("command") or input_data.get("query")
-    else:
-        csl = input_data.get("query") or input_data.get("command")
-
-    if not query_service_uri or not database_name or not csl:
-        raise ValueError("queryServiceUri, databaseName and query/command are required")
-
-    query_service_uri = _validate_kusto_endpoint(query_service_uri)
-
-    parameters = input_data.get("parameters", {})
-    if not isinstance(parameters, dict) or any(
-        not isinstance(name, str)
-        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name, re.ASCII) is None
-        or not isinstance(value, str)
-        for name, value in parameters.items()
-    ):
-        logging.warning("rayfin_kusto_v1: rejected invalid query parameters")
-        raise ValueError("parameters must map parameter names to Kusto literal strings")
-
-    client_request_id = (
-        input_data.get("clientRequestId")
-        or f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
-    )
-
-    # BaaS no longer forwards a raw accesstoken. FuncSet resolves the Kusto generic
-    # connection (audienceType="Kusto") and injects a FabricItem whose
-    # get_access_token() returns a token-credential object; get_token().token is the
-    # pre-minted Kusto-audience bearer string.
     access_token = kustoClient.get_access_token().get_token().token
-
-    # executeCommand -> /v1/rest/mgmt ; executeQuery -> /v1/rest/query. Kusto keeps
-    # the endpoints apart at the protocol level; the caller's role decides authZ.
-    rest_verb = "mgmt" if is_command else "query"
-    url = f"{query_service_uri.rstrip('/')}/v1/rest/{rest_verb}"
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Content-Type": _JSON_MEDIA_TYPE,
+        "Accept": _JSON_MEDIA_TYPE,
         "x-ms-client-request-id": client_request_id,
-    }
-    body = {
-        "db": database_name,
-        "csl": csl,
-        "properties": json.dumps({
-            "Options": {
-                "request_readonly": True,
-                "request_readonly_hardline": True,
-            },
-            "Parameters": dict(parameters),
-        }),
     }
 
     session = await _get_session()
-
     resp = await session.post(url, json=body, headers=headers, allow_redirects=False)
 
     if resp.status != 200:
-        # Surface upstream status + body; the Fabric app backend sanitizes non-2xx.
         detail = await resp.text()
         await resp.release()
         return fn.StreamResponse(
@@ -486,24 +1026,11 @@ async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.Strea
             status_code=resp.status,
         )
 
-    # True streaming: relay the Kusto v1 response body chunk-by-chunk without
-    # buffering, parsing, or re-serializing it — a pure byte pump, mirroring
-    # rayfin_semantic_model_v1. The v1 {Tables} document is transformed to the
-    # Rayfin connector output shape client-side in the SDK
-    # (packages/typescript-sdk/connector-kusto/src), so the UDF keeps constant
-    # memory and TTFB stays ~= Kusto's TTFB. The `x-ms-client-request-id` header
-    # was set from the SDK-supplied clientRequestId above, so the SDK can
-    # correlate without reading the body; `x-ms-activity-id` is not relayed
-    # (accepted loss, same as the semantic-model path).
     async def relay():
         try:
-            # iter_any() yields each TCP read as soon as it lands -> lowest latency.
             async for chunk in resp.content.iter_any():
                 yield chunk
         finally:
-            # Release the response so its connection returns to the pool (or is
-            # closed if the client disconnected mid-stream). Do NOT close the
-            # shared session here.
             await resp.release()
 
     return fn.StreamResponse(relay(), media_type=_JSON_MEDIA_TYPE)
