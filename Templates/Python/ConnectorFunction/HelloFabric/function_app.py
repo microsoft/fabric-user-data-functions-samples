@@ -618,7 +618,9 @@ _EVENTHOUSE_GUID_PATTERN = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 _EVENTHOUSE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}", re.ASCII)
-_EVENTHOUSE_PARAMETER_TYPES = frozenset({"string", "long", "real", "bool", "datetime", "guid"})
+_EVENTHOUSE_PARAMETER_TYPES = frozenset({
+    "string", "long", "real", "bool", "datetime", "guid", "timespan", "dynamic",
+})
 _EVENTHOUSE_COMMAND_SPACE = r"[ \t\r\n]+"
 _EVENTHOUSE_ENTITY_NAME = (
     r"(?:[A-Za-z_][A-Za-z0-9_]{0,127}|\['[A-Za-z_][A-Za-z0-9_ .-]{0,127}'\])"
@@ -648,6 +650,14 @@ _EVENTHOUSE_DATETIME_PATTERN = re.compile(
     r"(?:Z|([+-])(\d{2}):(\d{2}))",
     re.ASCII,
 )
+# 7d, -1.5h, 100ms or [-][d.]hh:mm:ss[.fffffff]
+_EVENTHOUSE_TIMESPAN_PATTERN = re.compile(
+    r"-?[0-9]{1,7}(?:\.[0-9]{1,7})?(?:d|h|m|s|ms)"
+    r"|-?(?:[0-9]{1,7}\.)?(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,7})?",
+    re.ASCII,
+)
+_EVENTHOUSE_MAXIMUM_DYNAMIC_ITEMS = 1000
+_EVENTHOUSE_MAXIMUM_DYNAMIC_LITERAL_LENGTH = 100000
 _EVENTHOUSE_LITERAL_ESCAPES = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
@@ -787,7 +797,7 @@ def _eventhouse_validate_template(template: object) -> None:
     ):
         raise _eventhouse_invalid_policy(
             "Parameters require simple identifier names and one of string, long, real, bool, "
-            "datetime, guid."
+            "datetime, guid, timespan, dynamic."
         )
 
     roles = template["roles"]
@@ -930,6 +940,32 @@ def _eventhouse_datetime_literal(value: str) -> Optional[str]:
     )
 
 
+def _eventhouse_dynamic_literal(value: object) -> Optional[str]:
+    # Only a flat array of scalars; json.dumps emits exactly one literal.
+    if type(value) is not list or len(value) > _EVENTHOUSE_MAXIMUM_DYNAMIC_ITEMS:
+        return None
+    for item in value:
+        if item is None or type(item) is bool:
+            continue
+        if type(item) is int:
+            if not -(2 ** 63) <= item < 2 ** 63:
+                return None
+        elif type(item) is float:
+            if not math.isfinite(item):
+                return None
+        elif type(item) is str:
+            if _eventhouse_has_lone_surrogate(item):
+                return None
+        else:
+            return None
+    literal = "dynamic(" + json.dumps(
+        value, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+    ) + ")"
+    if len(literal) > _EVENTHOUSE_MAXIMUM_DYNAMIC_LITERAL_LENGTH:
+        return None
+    return literal
+
+
 def _eventhouse_literal(value: object, kind: str) -> Optional[str]:
     if kind == "string":
         if isinstance(value, str) and not _eventhouse_has_lone_surrogate(value):
@@ -954,6 +990,11 @@ def _eventhouse_literal(value: object, kind: str) -> Optional[str]:
     elif kind == "guid":
         if isinstance(value, str) and _EVENTHOUSE_GUID_PATTERN.fullmatch(value):
             return f"guid({value.lower()})"
+    elif kind == "timespan":
+        if isinstance(value, str) and _EVENTHOUSE_TIMESPAN_PATTERN.fullmatch(value):
+            return f"timespan({value})"
+    elif kind == "dynamic":
+        return _eventhouse_dynamic_literal(value)
     return None
 
 
@@ -1044,8 +1085,10 @@ def _eventhouse_request(payload: object) -> tuple:
         literal = _eventhouse_literal(supplied[name], kind)
         if literal is None:
             raise _eventhouse_invalid_input(
-                "A parameter does not match its declared JSON scalar type; datetime requires "
-                "ISO 8601 with an explicit time zone, and guid requires the hyphenated format."
+                "A parameter does not match its declared JSON type; datetime requires ISO 8601 "
+                "with an explicit time zone, guid requires the hyphenated format, timespan "
+                "requires a Kusto timespan such as 7d or 01:30:00, and dynamic requires a flat "
+                "array of scalars."
             )
         literals[name] = literal
 

@@ -487,7 +487,10 @@ def _invalid_template_variants():
         dict(base, parameters={"p-q": "string"}),
         dict(base, parameters={"p": "int"}),
         dict(base, parameters={"p": "String"}),
-        dict(base, parameters={"p": "dynamic"}),
+        dict(base, parameters={"p": "Dynamic"}),
+        dict(base, parameters={"p": "TimeSpan"}),
+        dict(base, parameters={"p": "decimal"}),
+        dict(base, parameters={"p": "datetime "}),
         dict(base, parameters={"p": None}),
         dict(base, parameters={"p": 1}),
         dict(base, roles=None),
@@ -521,6 +524,7 @@ def test_invalid_templates_reject_every_invocation(app, monkeypatch, template):
     _template(text="T" * 65536, parameters={}),
     _template(text="T" * 65534 + "\U0001f600", parameters={}),
     _template(parameters={f"p{index}": "string" for index in range(128)}),
+    _template(parameters={"t": "timespan", "v": "dynamic"}),
     _template(roles=[f"r{index}" for index in range(128)]),
     _template(roles=["a" * 128]),
     _template(roles=["\U0001f600" * 64]),
@@ -840,6 +844,29 @@ def test_roles_are_checked_before_parameters(app, monkeypatch):
 
 
 LITERALS = [
+    ("timespan", "7d", "timespan(7d)"),
+    ("timespan", "-1h", "timespan(-1h)"),
+    ("timespan", "100ms", "timespan(100ms)"),
+    ("timespan", "30m", "timespan(30m)"),
+    ("timespan", "45s", "timespan(45s)"),
+    ("timespan", "1.5h", "timespan(1.5h)"),
+    ("timespan", "9999999d", "timespan(9999999d)"),
+    ("timespan", "-9999999.9999999d", "timespan(-9999999.9999999d)"),
+    ("timespan", "00:30:00", "timespan(00:30:00)"),
+    ("timespan", "23:59:59", "timespan(23:59:59)"),
+    ("timespan", "1.02:03:04.5", "timespan(1.02:03:04.5)"),
+    ("timespan", "-1.02:03:04", "timespan(-1.02:03:04)"),
+    ("timespan", "9999999.23:59:59.9999999", "timespan(9999999.23:59:59.9999999)"),
+    ("dynamic", [], "dynamic([])"),
+    ("dynamic", ["TEXAS", "FLORIDA"], 'dynamic(["TEXAS","FLORIDA"])'),
+    ("dynamic", [1, 2.5, True, None, -3, False], "dynamic([1,2.5,true,null,-3,false])"),
+    ("dynamic", [9223372036854775807, -9223372036854775808],
+     "dynamic([9223372036854775807,-9223372036854775808])"),
+    ("dynamic", [1e300, 5e-324, -0.0], "dynamic([1e+300,5e-324,-0.0])"),
+    ("dynamic", ['a"b', "c\\d", "x)y", "'q'", "line\nbreak", "e\x00f", "", "])|take 1"],
+     'dynamic(["a\\"b","c\\\\d","x)y","\'q\'","line\\nbreak","e\\u0000f","","])|take 1"])'),
+    ("dynamic", ["\u05e9\u05dc\u05d5\u05dd", "\U0001f600"],
+     'dynamic(["\\u05e9\\u05dc\\u05d5\\u05dd","\\ud83d\\ude00"])'),
     ("string", "TEXAS", '"TEXAS"'),
     ("string", "", '""'),
     ("string", 'say "hi"', '"say \\"hi\\""'),
@@ -891,6 +918,34 @@ def test_values_become_typed_kusto_literals(app, monkeypatch, kind, value, liter
     assert _properties(session) == {"Options": READ_ONLY, "Parameters": {"v": literal}}
 
 
+def _dynamic_template():
+    return _template(text="declare query_parameters(v:dynamic);\nprint v", parameters={"v": "dynamic"})
+
+
+def test_dynamic_boundaries(app, monkeypatch):
+    settings = _settings({"Q": _dynamic_template()})
+    _, _, session = _accept(app, monkeypatch, _payload({"v": list(range(1000))}), settings=settings)
+    assert json.loads(_properties(session)["Parameters"]["v"][8:-1]) == list(range(1000))
+    longest = ["x" * 99987]
+    _, _, session = _accept(app, monkeypatch, _payload({"v": longest}), settings=settings)
+    assert len(_properties(session)["Parameters"]["v"]) == 100000
+    assert _code(app, monkeypatch, _payload({"v": list(range(1001))}), settings=settings) == (
+        "INVALID_QUERY_INPUT"
+    )
+    assert _code(app, monkeypatch, _payload({"v": ["x" * 99988]}), settings=settings) == (
+        "INVALID_QUERY_INPUT"
+    )
+
+
+def test_dynamic_literal_is_always_one_json_array(app, monkeypatch):
+    values = ["]) | take 1000 //", ")", "dynamic([1]) | take 1", '"]);print 1;//']
+    settings = _settings({"Q": _dynamic_template()})
+    _, _, session = _accept(app, monkeypatch, _payload({"v": values}), settings=settings)
+    literal = _properties(session)["Parameters"]["v"]
+    assert literal.startswith("dynamic([") and literal.endswith("])")
+    assert json.loads(literal[len("dynamic("):-1]) == values
+
+
 def test_long_strings_are_accepted(app, monkeypatch):
     queries = {"Q": _template(text="declare query_parameters(v:string);\nprint v", parameters={"v": "string"})}
     _, _, session = _accept(app, monkeypatch, _payload({"v": "x" * 100000}), settings=_settings(queries))
@@ -898,6 +953,23 @@ def test_long_strings_are_accepted(app, monkeypatch):
 
 
 INVALID_VALUES = [
+    ("timespan", ""), ("timespan", "+"), ("timespan", "+7d"), ("timespan", "7"), ("timespan", 7),
+    ("timespan", 7.5), ("timespan", True), ("timespan", None), ("timespan", ["7d"]),
+    ("timespan", "7D"), ("timespan", "7 d"), ("timespan", " 7d"), ("timespan", "7d "),
+    ("timespan", "7d\n"), ("timespan", "7days"), ("timespan", "7dd"), ("timespan", "1w"),
+    ("timespan", "1y"), ("timespan", "1us"), ("timespan", "1tick"), ("timespan", "1microsecond"),
+    ("timespan", "12345678d"), ("timespan", "1.12345678h"), ("timespan", ".5h"), ("timespan", "5.h"),
+    ("timespan", "--1h"), ("timespan", "1.2.3h"), ("timespan", "P1D"), ("timespan", "PT1H"),
+    ("timespan", "24:00:00"), ("timespan", "1:00:00"), ("timespan", "00:60:00"),
+    ("timespan", "00:00:60"), ("timespan", "00:00"), ("timespan", "00:00:00.12345678"),
+    ("timespan", "12345678.00:00:00"), ("timespan", "1.00:00:00."), ("timespan", "7d) | take 1"),
+    ("timespan", "\uff17d"), ("timespan", "\u0667d"), ("timespan", f"{VALUE_MARKER}"),
+    ("dynamic", ""), ("dynamic", "[]"), ("dynamic", '["a"]'), ("dynamic", None), ("dynamic", 5),
+    ("dynamic", True), ("dynamic", {}), ("dynamic", {"a": 1}), ("dynamic", ("a",)),
+    ("dynamic", [[1]]), ("dynamic", [{"a": 1}]), ("dynamic", [[]]), ("dynamic", [float("nan")]),
+    ("dynamic", [float("inf")]), ("dynamic", [float("-inf")]), ("dynamic", [2 ** 63]),
+    ("dynamic", [-(2 ** 63) - 1]), ("dynamic", ["\ud800"]), ("dynamic", ["a\udc00b"]),
+    ("dynamic", [1, ["x"]]), ("dynamic", [VALUE_MARKER, {"x": 1}]),
     ("string", 5), ("string", True), ("string", ["a"]), ("string", {"a": 1}),
     ("string", "\ud800"), ("string", "a\udc00b"), ("string", "\udc00\ud800"),
     ("long", ""), ("long", "5"), ("long", 5.0), ("long", 5.5), ("long", True),
