@@ -1019,7 +1019,7 @@ def _eventhouse_request(payload: object) -> tuple:
             "An authenticated caller with a permitted template role is required.",
             details="403",
         )
-    roles = {_eventhouse_role(role) for role in caller_roles} or {_EVENTHOUSE_AUTHENTICATED_ROLE}
+    roles = {_eventhouse_role(role) for role in caller_roles} | {_EVENTHOUSE_AUTHENTICATED_ROLE}
     if not any(_eventhouse_role(role) in roles for role in template["roles"]):
         raise _EventhouseError(
             "QUERY_ROLE_NOT_ALLOWED",

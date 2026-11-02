@@ -726,7 +726,7 @@ def test_command_template_cannot_run_as_query(app, monkeypatch):
     (["admin"], _caller([])),
     (["admin"], _caller(["Admin"])),
     (["admin"], _caller(["admin "])),
-    (["authenticated"], _caller(["viewer"])),
+    (["admin"], _caller(["viewer"])),
     (["anonymous"], _caller([])),
     (["viewer"], _caller(["authenticated"])),
 ])
@@ -748,10 +748,27 @@ def test_roles_that_do_not_match_are_rejected(app, monkeypatch, template_roles, 
     (["admin"], ["viewer", "admin"]),
     (["viewer", "admin"], ["admin"]),
     (["GetDataAnalyst"], ["GetDataAnalyst"]),
+    (["authenticated"], ["admin"]),
+    (["authenticated"], ["viewer"]),
+    (["Authenticated"], ["viewer", "GetDataAnalyst"]),
 ])
 def test_matching_roles_are_accepted(app, monkeypatch, template_roles, caller_roles):
     settings = _settings({"Q": _template(roles=template_roles)})
     _accept(app, monkeypatch, _texas(), settings=settings, caller=_caller(caller_roles))
+
+
+@pytest.mark.parametrize("template_roles,caller_roles", [
+    (["Admin"], ["admin"]),
+    (["admin"], ["ADMIN"]),
+    (["GetDataAnalyst"], ["getdataanalyst"]),
+    (["admin"], ["authenticated"]),
+])
+def test_custom_roles_are_case_sensitive_and_not_implied(app, monkeypatch, template_roles,
+                                                          caller_roles):
+    settings = _settings({"Q": _template(roles=template_roles)})
+    assert _code(app, monkeypatch, _texas(), settings=settings, caller=_caller(caller_roles)) == (
+        "QUERY_ROLE_NOT_ALLOWED"
+    )
 
 
 @pytest.mark.parametrize("template_roles,caller_roles", [
@@ -774,10 +791,21 @@ def test_anonymous_callers_are_rejected_even_when_authenticated(
 
 @pytest.mark.parametrize("role", ["authent\u0131cated", "AUTHENT\u0130CATED", "anonymou\u017f"])
 def test_built_in_role_names_match_only_ascii_case_variants(app, monkeypatch, role):
-    settings = _settings({"Q": _template(roles=["authenticated", "anonymous"])})
+    # A lookalike is a custom role: it neither grants nor matches a built-in role.
+    settings = _settings({"Q": _template(roles=[role])})
+    assert _code(app, monkeypatch, _texas(), settings=settings,
+                 caller=_caller(["authenticated", "viewer"])) == (
+        "QUERY_ROLE_NOT_ALLOWED"
+    )
+    settings = _settings({"Q": _template(roles=["admin"])})
     assert _code(app, monkeypatch, _texas(), settings=settings, caller=_caller([role])) == (
         "QUERY_ROLE_NOT_ALLOWED"
     )
+
+
+def test_anonymous_lookalike_is_a_custom_role(app, monkeypatch):
+    settings = _settings({"Q": _template(roles=["anonymou\u017f"])})
+    _accept(app, monkeypatch, _texas(), settings=settings, caller=_caller(["anonymou\u017f"]))
 
 
 # --- parameters ------------------------------------------------------------------
