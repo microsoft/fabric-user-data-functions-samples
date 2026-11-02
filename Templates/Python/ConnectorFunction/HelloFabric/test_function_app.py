@@ -148,6 +148,14 @@ def _caller():
     return {"isAuthenticated": True, "roles": []}
 
 
+def _host_fields(operation):
+    return {
+        "additionalPayload": _settings(),
+        "binding": {"function": "rayfin_kusto_v1", "operation": operation},
+        "callerContext": _caller(),
+    }
+
+
 def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
     return {
         "operation": "executeQuery",
@@ -156,6 +164,7 @@ def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
             "parameters": {"rows": 1},
             "clientRequestId": client_request_id,
         },
+        **_host_fields("executeQuery"),
     }
 
 
@@ -166,6 +175,7 @@ def _command_payload(client_request_id="KPC.rayfin_kusto_v1;cmd-id"):
             "queryId": "tables",
             "clientRequestId": client_request_id,
         },
+        **_host_fields("executeCommand"),
     }
 
 
@@ -179,7 +189,7 @@ async def _invoke(chunks, payload):
 
     mod._get_session = _fake_get_session  # type: ignore[attr-defined]
 
-    result = await mod.rayfin_kusto_v1(payload, _settings(), _caller(), _FakeKustoClient())
+    result = await mod.rayfin_kusto_v1(payload, _FakeKustoClient())
 
     body = []
     async for chunk in result.body:

@@ -567,10 +567,12 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
 # ---------------------------------------------------------------------------
 # Eventhouse -- saved, parameterized queries
 # ---------------------------------------------------------------------------
-# The host supplies two arguments that the caller cannot write:
+# Next to operation and input, the host adds payload fields that the caller
+# cannot write:
 #   additionalPayload: the connector settings saved by the app builder
 #       {"queryServiceUri": ..., "database": <KQL database item ID>,
 #        "queries": {queryId: {"operation", "text", "parameters", "roles"}}}
+#   binding: the invocation the host authorized, e.g. {"function", "operation", ...}
 #   callerContext: the authenticated caller {"isAuthenticated": bool, "roles": [...]}
 # The caller selects a saved template by queryId and supplies typed values. The
 # template text is sent unchanged and the values travel as Kusto query
@@ -578,13 +580,20 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
 _EVENTHOUSE_TARGET_FIELD = "queryServiceUri"
 _EVENTHOUSE_DATABASE_FIELD = "database"
 _EVENTHOUSE_QUERIES_FIELD = "queries"
+_EVENTHOUSE_SETTINGS_PAYLOAD_FIELD = "additionalPayload"
+_EVENTHOUSE_BINDING_PAYLOAD_FIELD = "binding"
+_EVENTHOUSE_CALLER_PAYLOAD_FIELD = "callerContext"
+_EVENTHOUSE_FUNCTION_NAME = "rayfin_kusto_v1"
 _EVENTHOUSE_AUTHENTICATED_FIELD = "isAuthenticated"
 _EVENTHOUSE_ROLES_FIELD = "roles"
 _EVENTHOUSE_SETTINGS_FIELDS = frozenset({
     _EVENTHOUSE_TARGET_FIELD, _EVENTHOUSE_DATABASE_FIELD, _EVENTHOUSE_QUERIES_FIELD,
 })
 _EVENTHOUSE_TEMPLATE_FIELDS = frozenset({"operation", "text", "parameters", "roles"})
-_EVENTHOUSE_PAYLOAD_FIELDS = frozenset({"operation", "input"})
+_EVENTHOUSE_PAYLOAD_FIELDS = frozenset({
+    "operation", "input", _EVENTHOUSE_SETTINGS_PAYLOAD_FIELD,
+    _EVENTHOUSE_BINDING_PAYLOAD_FIELD, _EVENTHOUSE_CALLER_PAYLOAD_FIELD,
+})
 # workspaceId, itemId and baasItemId are injected by the platform from the
 # saved connector configuration; every other routing field is refused.
 _EVENTHOUSE_INPUT_FIELDS = frozenset({
@@ -948,14 +957,30 @@ def _eventhouse_literal(value: object, kind: str) -> Optional[str]:
     return None
 
 
-def _eventhouse_request(payload: object, additional_payload: object,
-                        caller_context: object) -> tuple:
-    endpoint, database, queries = _eventhouse_settings(additional_payload)
-    is_authenticated, caller_roles = _eventhouse_caller(caller_context)
+def _eventhouse_binding(binding: object, operation: object) -> None:
+    if (
+        not isinstance(binding, dict)
+        or ("operation" in binding and binding["operation"] != operation)
+        or ("function" in binding and binding["function"] != _EVENTHOUSE_FUNCTION_NAME)
+    ):
+        raise _eventhouse_invalid_policy(
+            "The host binding does not match this function and operation."
+        )
+
+
+def _eventhouse_request(payload: object) -> tuple:
+    if not isinstance(payload, dict):
+        raise _eventhouse_invalid_input("The request payload must be an object.")
+    endpoint, database, queries = _eventhouse_settings(
+        payload.get(_EVENTHOUSE_SETTINGS_PAYLOAD_FIELD)
+    )
+    _eventhouse_binding(payload.get(_EVENTHOUSE_BINDING_PAYLOAD_FIELD), payload.get("operation"))
+    is_authenticated, caller_roles = _eventhouse_caller(
+        payload.get(_EVENTHOUSE_CALLER_PAYLOAD_FIELD)
+    )
 
     if (
-        not isinstance(payload, dict)
-        or not set(payload) <= _EVENTHOUSE_PAYLOAD_FIELDS
+        not set(payload) <= _EVENTHOUSE_PAYLOAD_FIELDS
         or not isinstance(payload.get("operation"), str)
         or not isinstance(payload.get("input"), dict)
         or not set(payload["input"]) <= _EVENTHOUSE_INPUT_FIELDS
@@ -1057,12 +1082,9 @@ def _eventhouse_request(payload: object, additional_payload: object,
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
-async def rayfin_kusto_v1(payload: dict, additionalPayload: dict, callerContext: dict,
-                          kustoClient: fn.FabricItem) -> fn.StreamResponse:
+async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
     try:
-        url, body, client_request_id = _eventhouse_request(
-            payload, additionalPayload, callerContext
-        )
+        url, body, client_request_id = _eventhouse_request(payload)
     except _EventhouseError as error:
         logging.warning("rayfin_kusto_v1: rejected the request with %s", error.code)
         return _error_response(error.message, error.code, error.category, error.details)

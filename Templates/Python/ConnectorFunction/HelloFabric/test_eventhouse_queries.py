@@ -29,6 +29,7 @@ READ_ONLY = {
     "request_remote_entities_disabled": True,
 }
 DEFAULT = object()
+MISSING = object()
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +117,32 @@ def _texas():
     return _payload({"state": "TEXAS"})
 
 
-def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, response=None):
+def _binding(payload):
+    return {
+        "appId": "app", "workspaceId": "workspace", "connector": "events",
+        "operation": payload.get("operation"), "function": "rayfin_kusto_v1",
+        "artifactId": "artifact", "revision": 1, "sha256": "0" * 64,
+    }
+
+
+def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
+    if not isinstance(payload, dict):
+        return payload
+    request = deepcopy(payload)
+    for name, value, default in (
+        ("additionalPayload", settings, _settings),
+        ("binding", binding, lambda: _binding(payload)),
+        ("callerContext", caller, _caller),
+    ):
+        if value is DEFAULT:
+            request[name] = default()
+        elif value is not MISSING:
+            request[name] = value
+    return request
+
+
+def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, response=None,
+            binding=DEFAULT):
     session = _Session(response or _FakeResponse([b'{"Tables":[]}']))
 
     async def get_session():
@@ -126,10 +152,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, respons
 
     async def invoke():
         result = await app.rayfin_kusto_v1(
-            payload,
-            _settings() if settings is DEFAULT else settings,
-            _caller() if caller is DEFAULT else caller,
-            _FakeKustoClient(),
+            _host(payload, settings, caller, binding), _FakeKustoClient()
         )
         if hasattr(result.body, "__aiter__"):
             return result, [chunk async for chunk in result.body]
@@ -140,7 +163,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, respons
     return result, chunks, session
 
 
-def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT):
+def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
     async def no_session():
         pytest.fail("No HTTP session may be created before validation passes.")
 
@@ -148,10 +171,7 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT):
 
     async def invoke():
         result = await app.rayfin_kusto_v1(
-            payload,
-            _settings() if settings is DEFAULT else settings,
-            _caller() if caller is DEFAULT else caller,
-            _NoCredentials(),
+            _host(payload, settings, caller, binding), _NoCredentials()
         )
         return result, b"".join(list(result.body))
 
@@ -166,8 +186,8 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT):
     return document["error"]["code"], document["status"]
 
 
-def _code(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT):
-    return _reject(app, monkeypatch, payload, settings, caller)[0]
+def _code(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
+    return _reject(app, monkeypatch, payload, settings, caller, binding)[0]
 
 
 def _properties(session):
@@ -192,19 +212,13 @@ def test_signature_matches_function_metadata(app):
     ]
     assert entry["fabricProperties"] == {
         "fabricFunctionReturnType": "StreamResponse",
-        "fabricFunctionParameters": [
-            {"name": "payload", "dataType": "dict"},
-            {"name": "additionalPayload", "dataType": "dict"},
-            {"name": "callerContext", "dataType": "dict"},
-        ],
+        "fabricFunctionParameters": [{"name": "payload", "dataType": "dict"}],
     }
-    assert list(inspect.signature(app.rayfin_kusto_v1).parameters) == [
-        "payload", "additionalPayload", "callerContext", "kustoClient",
-    ]
+    assert list(inspect.signature(app.rayfin_kusto_v1).parameters) == ["payload", "kustoClient"]
     assert not hasattr(app, "rayfin_eventhouse_v1")
 
 
-@pytest.mark.parametrize("settings", [None, {}])
+@pytest.mark.parametrize("settings", [MISSING, None, {}])
 def test_missing_settings_require_a_policy(app, monkeypatch, settings):
     assert _reject(app, monkeypatch, _texas(), settings=settings) == (
         "QUERY_POLICY_REQUIRED", "BadRequest"
@@ -230,6 +244,7 @@ def test_queries_under_config_are_rejected(app, monkeypatch):
 
 
 @pytest.mark.parametrize("caller", [
+    MISSING,
     None,
     [],
     "authenticated",
@@ -250,10 +265,72 @@ def test_malformed_caller_context_fails_closed(app, monkeypatch, caller):
         pytest.fail("No HTTP session may be created before validation passes.")
 
     monkeypatch.setattr(app, "_get_session", no_session)
-    result = asyncio.run(app.rayfin_kusto_v1(_texas(), _settings(), caller, _NoCredentials()))
+    result = asyncio.run(app.rayfin_kusto_v1(_host(_texas(), caller=caller), _NoCredentials()))
     document = json.loads(b"".join(list(result.body)))
     assert document["error"]["code"] == "INVALID_CALLER_CONTEXT"
     assert document["status"] == "Failed"
+
+
+@pytest.mark.parametrize("arguments", [
+    {"additionalPayload": {}}, {"binding": {}}, {"callerContext": {}},
+    {"additionalPayload": {}, "binding": {}, "callerContext": {}},
+])
+def test_host_fields_are_not_top_level_parameters(app, arguments):
+    with pytest.raises(TypeError):
+        app.rayfin_kusto_v1(_texas(), kustoClient=_FakeKustoClient(), **arguments)
+    with pytest.raises(TypeError):
+        app.rayfin_kusto_v1(_texas(), *arguments.values(), _FakeKustoClient())
+
+
+@pytest.mark.parametrize("binding", [
+    MISSING, None, "rayfin_kusto_v1", [], ["rayfin_kusto_v1"], True, 1,
+])
+def test_binding_must_be_an_object(app, monkeypatch, binding):
+    assert _reject(app, monkeypatch, _texas(), binding=binding) == (
+        "INVALID_QUERY_POLICY", "BadRequest"
+    )
+
+
+@pytest.mark.parametrize("changes", [
+    {"operation": "executeCommand"},
+    {"operation": "executequery"},
+    {"operation": None},
+    {"operation": ["executeQuery"]},
+    {"function": "rayfin_eventhouse_v1"},
+    {"function": "rayfin_kusto_v2"},
+    {"function": "RAYFIN_KUSTO_V1"},
+    {"function": None},
+    {"function": {"name": "rayfin_kusto_v1"}},
+])
+def test_binding_must_match_the_function_and_operation(app, monkeypatch, changes):
+    binding = dict(_binding(_texas()), **changes)
+    assert _code(app, monkeypatch, _texas(), binding=binding) == "INVALID_QUERY_POLICY"
+
+
+@pytest.mark.parametrize("binding", [
+    {},
+    {"function": "rayfin_kusto_v1"},
+    {"operation": "executeQuery"},
+    {"appId": "app", "artifactId": "a"},
+    dict(_binding(_texas()), extra="ignored"),
+])
+def test_binding_fields_other_than_function_and_operation_are_optional(
+    app, monkeypatch, binding
+):
+    _accept(app, monkeypatch, _texas(), binding=binding)
+
+
+def test_binding_is_checked_before_the_caller(app, monkeypatch):
+    binding = dict(_binding(_texas()), function="other")
+    assert _code(app, monkeypatch, _texas(), caller=MISSING, binding=binding) == (
+        "INVALID_QUERY_POLICY"
+    )
+
+
+def test_settings_are_checked_before_the_binding(app, monkeypatch):
+    assert _code(app, monkeypatch, _texas(), settings=MISSING, binding=MISSING) == (
+        "QUERY_POLICY_REQUIRED"
+    )
 
 
 def test_caller_context_ignores_extra_fields(app, monkeypatch):
@@ -573,18 +650,20 @@ def test_malformed_payloads_are_rejected(app, monkeypatch, payload):
 
 
 @pytest.mark.parametrize("name", [
-    "additionalPayload", "callerContext", "queryServiceUri", "databaseName", "query",
-    "command", "roles", "options", "properties", "accesstoken", "kustoClient",
+    "queryServiceUri", "databaseName", "query", "command", "roles", "role", "options",
+    "properties", "accesstoken", "accessToken", "kustoClient", "AdditionalPayload",
+    "callercontext", "Binding", "settings",
 ])
 def test_payload_root_fields_are_rejected(app, monkeypatch, name):
     payload = _texas()
-    payload[name] = _settings() if name == "additionalPayload" else "x"
+    payload[name] = ["admin"] if name == "roles" else "x"
     assert _code(app, monkeypatch, payload) == "INVALID_QUERY_INPUT"
 
 
 @pytest.mark.parametrize("name,value", [
     ("additionalPayload", _settings({"Q": _template(roles=["anyone"])})),
     ("callerContext", {"isAuthenticated": True, "roles": ["admin"]}),
+    ("binding", {"function": "rayfin_kusto_v1", "operation": "executeQuery"}),
     ("roles", ["admin"]),
     ("role", "admin"),
     ("query", "StormEvents | take 1000"),
@@ -962,6 +1041,7 @@ def _odd_requests():
             ("settings", "queries", "Q", "parameters"), ("settings", "queries", "Q", "parameters", "state"),
             ("settings", "queries", "Q", "roles"), ("settings", "queries", "Q", "roles", 0),
             ("caller",), ("caller", "isAuthenticated"), ("caller", "roles"), ("caller", "roles", 0),
+            ("binding",), ("binding", "operation"), ("binding", "function"),
         ]:
             yield path, value
 
@@ -972,6 +1052,7 @@ def test_unexpected_json_types_never_raise(app, monkeypatch, path, value):
         "payload": _payload({"state": "TEXAS"}, clientRequestId="id", itemId=DATABASE),
         "settings": _settings(),
         "caller": _caller(["authenticated"]),
+        "binding": _binding(_texas()),
     }
     if len(path) == 1:
         request[path[0]] = value
@@ -990,7 +1071,8 @@ def test_unexpected_json_types_never_raise(app, monkeypatch, path, value):
 
     async def invoke():
         result = await app.rayfin_kusto_v1(
-            request["payload"], request["settings"], request["caller"], _FakeKustoClient()
+            _host(request["payload"], request["settings"], request["caller"], request["binding"]),
+            _FakeKustoClient(),
         )
         if hasattr(result.body, "__aiter__"):
             return result, [chunk async for chunk in result.body]
