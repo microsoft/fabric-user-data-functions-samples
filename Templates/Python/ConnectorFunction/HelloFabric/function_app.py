@@ -572,7 +572,7 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
 #   additionalPayload: the connector settings saved by the app builder
 #       {"queryServiceUri": ..., "database": <KQL database item ID>,
 #        "queries": {queryId: {"operation", "text", "parameters", "roles"}}}
-#   binding: the invocation the host authorized, e.g. {"function", "operation", ...}
+#   binding (optional): the invocation the host authorized, e.g. {"function", "operation", ...}
 #   callerContext: the authenticated caller {"isAuthenticated": bool, "roles": [...]}
 # The caller selects a saved template by queryId and supplies typed values. The
 # template text is sent unchanged and the values travel as Kusto query
@@ -1015,7 +1015,8 @@ def _eventhouse_request(payload: object) -> tuple:
     endpoint, database, queries = _eventhouse_settings(
         payload.get(_EVENTHOUSE_SETTINGS_PAYLOAD_FIELD)
     )
-    _eventhouse_binding(payload.get(_EVENTHOUSE_BINDING_PAYLOAD_FIELD), payload.get("operation"))
+    if _EVENTHOUSE_BINDING_PAYLOAD_FIELD in payload:
+        _eventhouse_binding(payload[_EVENTHOUSE_BINDING_PAYLOAD_FIELD], payload.get("operation"))
     is_authenticated, caller_roles = _eventhouse_caller(
         payload.get(_EVENTHOUSE_CALLER_PAYLOAD_FIELD)
     )

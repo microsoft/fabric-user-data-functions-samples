@@ -125,7 +125,7 @@ def _binding(payload):
     }
 
 
-def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
+def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
     if not isinstance(payload, dict):
         return payload
     request = deepcopy(payload)
@@ -142,7 +142,7 @@ def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
 
 
 def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, response=None,
-            binding=DEFAULT):
+            binding=MISSING):
     session = _Session(response or _FakeResponse([b'{"Tables":[]}']))
 
     async def get_session():
@@ -163,7 +163,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, respons
     return result, chunks, session
 
 
-def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
+def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
     async def no_session():
         pytest.fail("No HTTP session may be created before validation passes.")
 
@@ -186,7 +186,7 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding
     return document["error"]["code"], document["status"]
 
 
-def _code(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=DEFAULT):
+def _code(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
     return _reject(app, monkeypatch, payload, settings, caller, binding)[0]
 
 
@@ -282,8 +282,17 @@ def test_host_fields_are_not_top_level_parameters(app, arguments):
         app.rayfin_kusto_v1(_texas(), *arguments.values(), _FakeKustoClient())
 
 
+def test_binding_is_optional(app, monkeypatch):
+    _, _, session = _accept(app, monkeypatch, _texas())
+    assert session.captured_json["db"] == DATABASE
+
+
+def test_full_binding_is_accepted(app, monkeypatch):
+    _accept(app, monkeypatch, _texas(), binding=_binding(_texas()))
+
+
 @pytest.mark.parametrize("binding", [
-    MISSING, None, "rayfin_kusto_v1", [], ["rayfin_kusto_v1"], True, 1,
+    None, "rayfin_kusto_v1", [], ["rayfin_kusto_v1"], True, 1,
 ])
 def test_binding_must_be_an_object(app, monkeypatch, binding):
     assert _reject(app, monkeypatch, _texas(), binding=binding) == (
@@ -328,7 +337,8 @@ def test_binding_is_checked_before_the_caller(app, monkeypatch):
 
 
 def test_settings_are_checked_before_the_binding(app, monkeypatch):
-    assert _code(app, monkeypatch, _texas(), settings=MISSING, binding=MISSING) == (
+    binding = dict(_binding(_texas()), function="other")
+    assert _code(app, monkeypatch, _texas(), settings=MISSING, binding=binding) == (
         "QUERY_POLICY_REQUIRED"
     )
 

@@ -148,10 +148,9 @@ def _caller():
     return {"isAuthenticated": True, "roles": []}
 
 
-def _host_fields(operation):
+def _host_fields():
     return {
         "additionalPayload": _settings(),
-        "binding": {"function": "rayfin_kusto_v1", "operation": operation},
         "callerContext": _caller(),
     }
 
@@ -164,7 +163,7 @@ def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
             "parameters": {"rows": 1},
             "clientRequestId": client_request_id,
         },
-        **_host_fields("executeQuery"),
+        **_host_fields(),
     }
 
 
@@ -175,7 +174,7 @@ def _command_payload(client_request_id="KPC.rayfin_kusto_v1;cmd-id"):
             "queryId": "tables",
             "clientRequestId": client_request_id,
         },
-        **_host_fields("executeCommand"),
+        **_host_fields(),
     }
 
 
