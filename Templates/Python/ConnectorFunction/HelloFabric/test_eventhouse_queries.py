@@ -125,7 +125,7 @@ def _binding(payload):
     }
 
 
-def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
+def _host(payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
     if not isinstance(payload, dict):
         return payload
     request = deepcopy(payload)
@@ -141,7 +141,7 @@ def _host(payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
     return request
 
 
-def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, response=None,
+def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, response=None,
             binding=MISSING):
     session = _Session(response or _FakeResponse([b'{"Tables":[]}']))
 
@@ -163,7 +163,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, respons
     return result, chunks, session
 
 
-def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
+def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
     async def no_session():
         pytest.fail("No HTTP session may be created before validation passes.")
 
@@ -186,7 +186,7 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding
     return document["error"]["code"], document["status"]
 
 
-def _code(app, monkeypatch, payload, settings=DEFAULT, caller=DEFAULT, binding=MISSING):
+def _code(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
     return _reject(app, monkeypatch, payload, settings, caller, binding)[0]
 
 
@@ -244,7 +244,6 @@ def test_queries_under_config_are_rejected(app, monkeypatch):
 
 
 @pytest.mark.parametrize("caller", [
-    MISSING,
     None,
     [],
     "authenticated",
@@ -331,7 +330,7 @@ def test_binding_fields_other_than_function_and_operation_are_optional(
 
 def test_binding_is_checked_before_the_caller(app, monkeypatch):
     binding = dict(_binding(_texas()), function="other")
-    assert _code(app, monkeypatch, _texas(), caller=MISSING, binding=binding) == (
+    assert _code(app, monkeypatch, _texas(), caller=None, binding=binding) == (
         "INVALID_QUERY_POLICY"
     )
 
@@ -341,6 +340,40 @@ def test_settings_are_checked_before_the_binding(app, monkeypatch):
     assert _code(app, monkeypatch, _texas(), settings=MISSING, binding=binding) == (
         "QUERY_POLICY_REQUIRED"
     )
+
+
+def test_missing_caller_context_is_a_signed_in_user(app, monkeypatch):
+    _, _, session = _accept(app, monkeypatch, _texas(),
+                            settings=_settings({"Q": _template(roles=["authenticated"])}))
+    assert session.captured_json["csl"] == FILTER_TEXT
+
+
+@pytest.mark.parametrize("roles", [["admin"], ["Admin", "viewer"], ["anonymous"]])
+def test_missing_caller_context_has_no_custom_roles(app, monkeypatch, roles):
+    settings = _settings({"Q": _template(roles=roles)})
+    assert _reject(app, monkeypatch, _texas(), settings=settings) == (
+        "QUERY_ROLE_NOT_ALLOWED", "BadRequest"
+    )
+
+
+@pytest.mark.parametrize("caller", [MISSING, _caller([]), _caller(["admin"])])
+def test_template_roles_default_to_authenticated(app, monkeypatch, caller):
+    template = _template()
+    del template["roles"]
+    _accept(app, monkeypatch, _texas(), settings=_settings({"Q": template}), caller=caller)
+
+
+@pytest.mark.parametrize("caller,code", [
+    (_caller([], authenticated=False), "QUERY_ROLE_NOT_ALLOWED"),
+    (_caller(["anonymous"]), "QUERY_ROLE_NOT_ALLOWED"),
+    (None, "INVALID_CALLER_CONTEXT"),
+    ({}, "INVALID_CALLER_CONTEXT"),
+])
+def test_template_without_roles_still_checks_a_present_caller(app, monkeypatch, caller, code):
+    template = _template()
+    del template["roles"]
+    assert _code(app, monkeypatch, _texas(), settings=_settings({"Q": template}),
+                 caller=caller) == code
 
 
 def test_caller_context_ignores_extra_fields(app, monkeypatch):
@@ -464,7 +497,7 @@ def test_longest_template_id_is_accepted(app, monkeypatch):
 
 def _invalid_template_variants():
     base = _template()
-    missing = {key: deepcopy(base) for key in base}
+    missing = {key: deepcopy(base) for key in base if key != "roles"}
     for key, template in missing.items():
         del template[key]
     return [

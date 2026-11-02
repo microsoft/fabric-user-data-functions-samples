@@ -144,14 +144,9 @@ def _settings():
     }
 
 
-def _caller():
-    return {"isAuthenticated": True, "roles": []}
-
-
 def _host_fields():
     return {
         "additionalPayload": _settings(),
-        "callerContext": _caller(),
     }
 
 

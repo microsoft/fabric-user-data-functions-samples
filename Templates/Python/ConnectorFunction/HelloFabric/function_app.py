@@ -573,7 +573,9 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
 #       {"queryServiceUri": ..., "database": <KQL database item ID>,
 #        "queries": {queryId: {"operation", "text", "parameters", "roles"}}}
 #   binding (optional): the invocation the host authorized, e.g. {"function", "operation", ...}
-#   callerContext: the authenticated caller {"isAuthenticated": bool, "roles": [...]}
+#   callerContext (optional): the caller {"isAuthenticated": bool, "roles": [...]}.
+#       Without it the caller is a signed-in user with no custom roles; the host
+#       blocks anonymous callers and the function host accepts only host calls.
 # The caller selects a saved template by queryId and supplies typed values. The
 # template text is sent unchanged and the values travel as Kusto query
 # parameters, so a value can never change the query.
@@ -589,7 +591,8 @@ _EVENTHOUSE_ROLES_FIELD = "roles"
 _EVENTHOUSE_SETTINGS_FIELDS = frozenset({
     _EVENTHOUSE_TARGET_FIELD, _EVENTHOUSE_DATABASE_FIELD, _EVENTHOUSE_QUERIES_FIELD,
 })
-_EVENTHOUSE_TEMPLATE_FIELDS = frozenset({"operation", "text", "parameters", "roles"})
+_EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS = frozenset({"operation", "text", "parameters"})
+_EVENTHOUSE_TEMPLATE_FIELDS = _EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS | {"roles"}
 _EVENTHOUSE_PAYLOAD_FIELDS = frozenset({
     "operation", "input", _EVENTHOUSE_SETTINGS_PAYLOAD_FIELD,
     _EVENTHOUSE_BINDING_PAYLOAD_FIELD, _EVENTHOUSE_CALLER_PAYLOAD_FIELD,
@@ -749,9 +752,12 @@ def _eventhouse_is_query_text(text: str) -> bool:
 
 
 def _eventhouse_validate_template(template: object) -> None:
-    if not isinstance(template, dict) or set(template) != _EVENTHOUSE_TEMPLATE_FIELDS:
+    if (
+        not isinstance(template, dict)
+        or not _EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS <= set(template) <= _EVENTHOUSE_TEMPLATE_FIELDS
+    ):
         raise _eventhouse_invalid_policy(
-            "Each query requires exactly operation, text, parameters, and roles."
+            "Each query requires operation, text, and parameters, and accepts only roles besides."
         )
 
     operation = template["operation"]
@@ -800,6 +806,8 @@ def _eventhouse_validate_template(template: object) -> None:
             "datetime, guid, timespan, dynamic."
         )
 
+    if "roles" not in template:
+        return
     roles = template["roles"]
     if (
         not isinstance(roles, list)
@@ -1017,9 +1025,12 @@ def _eventhouse_request(payload: object) -> tuple:
     )
     if _EVENTHOUSE_BINDING_PAYLOAD_FIELD in payload:
         _eventhouse_binding(payload[_EVENTHOUSE_BINDING_PAYLOAD_FIELD], payload.get("operation"))
-    is_authenticated, caller_roles = _eventhouse_caller(
-        payload.get(_EVENTHOUSE_CALLER_PAYLOAD_FIELD)
-    )
+    if _EVENTHOUSE_CALLER_PAYLOAD_FIELD in payload:
+        is_authenticated, caller_roles = _eventhouse_caller(
+            payload[_EVENTHOUSE_CALLER_PAYLOAD_FIELD]
+        )
+    else:
+        is_authenticated, caller_roles = True, []
 
     if (
         not set(payload) <= _EVENTHOUSE_PAYLOAD_FIELDS
@@ -1062,7 +1073,8 @@ def _eventhouse_request(payload: object) -> tuple:
             details="403",
         )
     roles = {_eventhouse_role(role) for role in caller_roles} | {_EVENTHOUSE_AUTHENTICATED_ROLE}
-    if not any(_eventhouse_role(role) in roles for role in template["roles"]):
+    template_roles = template.get("roles", [_EVENTHOUSE_AUTHENTICATED_ROLE])
+    if not any(_eventhouse_role(role) in roles for role in template_roles):
         raise _EventhouseError(
             "QUERY_ROLE_NOT_ALLOWED",
             "The caller role is not permitted for this template.",
