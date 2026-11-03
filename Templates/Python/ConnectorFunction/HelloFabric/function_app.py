@@ -585,7 +585,7 @@ _EVENTHOUSE_QUERIES_FIELD = "queries"
 _EVENTHOUSE_SETTINGS_PAYLOAD_FIELD = "additionalPayload"
 _EVENTHOUSE_BINDING_PAYLOAD_FIELD = "binding"
 _EVENTHOUSE_CALLER_PAYLOAD_FIELD = "callerContext"
-_EVENTHOUSE_FUNCTION_NAME = "rayfin_kusto_v1"
+_EVENTHOUSE_FUNCTION_NAME = "rayfin_eventhouse_v1"
 _EVENTHOUSE_AUTHENTICATED_FIELD = "isAuthenticated"
 _EVENTHOUSE_ROLES_FIELD = "roles"
 _EVENTHOUSE_SETTINGS_FIELDS = frozenset({
@@ -1105,7 +1105,7 @@ def _eventhouse_request(payload: object) -> tuple:
             )
         literals[name] = literal
 
-    client_request_id = f"KPC.rayfin_kusto_v1;{uuid.uuid4()}"
+    client_request_id = f"KPC.rayfin_eventhouse_v1;{uuid.uuid4()}"
     if "clientRequestId" in input_data:
         client_request_id = input_data["clientRequestId"]
         if (
@@ -1138,11 +1138,11 @@ def _eventhouse_request(payload: object) -> tuple:
 
 @udf.generic_connection(argName="kustoClient", audienceType="Kusto")
 @udf.streaming_function()
-async def rayfin_kusto_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
+async def rayfin_eventhouse_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.StreamResponse:
     try:
         url, body, client_request_id = _eventhouse_request(payload)
     except _EventhouseError as error:
-        logging.warning("rayfin_kusto_v1: rejected the request with %s", error.code)
+        logging.warning("rayfin_eventhouse_v1: rejected the request with %s", error.code)
         return _error_response(error.message, error.code, error.category, error.details)
 
     access_token = kustoClient.get_access_token().get_token().token
