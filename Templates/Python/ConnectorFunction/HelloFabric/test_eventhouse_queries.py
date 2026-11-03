@@ -22,7 +22,7 @@ ROOT = Path(__file__).parent
 
 def load_app():
     spec = importlib.util.spec_from_file_location(
-        "kusto_test_app", ROOT / "function_app.py"
+        "eventhouse_test_app", ROOT / "function_app.py"
     )
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
@@ -117,7 +117,7 @@ def bind_session(app, monkeypatch, response):
 
 
 async def invoke(app, request, client):
-    result = await app.rayfin_kusto_v1(request, client)
+    result = await app.rayfin_eventhouse_v1(request, client)
     return result, [chunk async for chunk in result.content]
 
 
@@ -212,7 +212,7 @@ def _texas():
 def _binding(payload):
     return {
         "appId": "app", "workspaceId": "workspace", "connector": "events",
-        "operation": payload.get("operation"), "function": "rayfin_kusto_v1",
+        "operation": payload.get("operation"), "function": "rayfin_eventhouse_v1",
         "artifactId": "artifact", "revision": 1, "sha256": "0" * 64,
     }
 
@@ -243,7 +243,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, respons
     monkeypatch.setattr(app, "_get_session", get_session)
 
     async def invoke():
-        result = await app.rayfin_kusto_v1(
+        result = await app.rayfin_eventhouse_v1(
             _host(payload, settings, caller, binding), _FakeKustoClient()
         )
         if hasattr(result.content, "__aiter__"):
@@ -262,7 +262,7 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding
     monkeypatch.setattr(app, "_get_session", no_session)
 
     async def invoke():
-        result = await app.rayfin_kusto_v1(
+        result = await app.rayfin_eventhouse_v1(
             _host(payload, settings, caller, binding), _NoCredentials()
         )
         return result, b"".join(list(result.content))
@@ -294,20 +294,20 @@ def test_signature_matches_function_metadata(app):
     with open(path, encoding="utf-8") as handle:
         entries = {entry["name"]: entry for entry in json.load(handle)}
 
-    assert "rayfin_eventhouse_v1" not in entries
-    entry = entries["rayfin_kusto_v1"]
+    assert "rayfin_kusto_v1" not in entries
+    entry = entries["rayfin_eventhouse_v1"]
     assert entry["scriptFile"] == "function_app.py"
     assert entry["bindings"] == [
         {"name": "req", "direction": "In", "type": "httpTrigger", "methods": ["post"],
-         "route": "rayfin_kusto_v1", "authLevel": "Anonymous"},
+         "route": "rayfin_eventhouse_v1", "authLevel": "Anonymous"},
         {"name": "kustoClient", "direction": "In", "type": "FabricItem", "audienceType": "Kusto"},
     ]
     assert entry["fabricProperties"] == {
         "fabricFunctionReturnType": "StreamResponse",
         "fabricFunctionParameters": [{"name": "payload", "dataType": "dict"}],
     }
-    assert list(inspect.signature(app.rayfin_kusto_v1).parameters) == ["payload", "kustoClient"]
-    assert not hasattr(app, "rayfin_eventhouse_v1")
+    assert list(inspect.signature(app.rayfin_eventhouse_v1).parameters) == ["payload", "kustoClient"]
+    assert not hasattr(app, "rayfin_kusto_v1")
 
 
 @pytest.mark.parametrize("settings", [MISSING, None, {}])
@@ -356,7 +356,7 @@ def test_malformed_caller_context_fails_closed(app, monkeypatch, caller):
         pytest.fail("No HTTP session may be created before validation passes.")
 
     monkeypatch.setattr(app, "_get_session", no_session)
-    result = asyncio.run(app.rayfin_kusto_v1(_host(_texas(), caller=caller), _NoCredentials()))
+    result = asyncio.run(app.rayfin_eventhouse_v1(_host(_texas(), caller=caller), _NoCredentials()))
     document = json.loads(b"".join(list(result.content)))
     assert document["error"]["code"] == "INVALID_CALLER_CONTEXT"
     assert document["status"] == "Failed"
@@ -368,9 +368,9 @@ def test_malformed_caller_context_fails_closed(app, monkeypatch, caller):
 ])
 def test_host_fields_are_not_top_level_parameters(app, arguments):
     with pytest.raises(TypeError):
-        app.rayfin_kusto_v1(_texas(), kustoClient=_FakeKustoClient(), **arguments)
+        app.rayfin_eventhouse_v1(_texas(), kustoClient=_FakeKustoClient(), **arguments)
     with pytest.raises(TypeError):
-        app.rayfin_kusto_v1(_texas(), *arguments.values(), _FakeKustoClient())
+        app.rayfin_eventhouse_v1(_texas(), *arguments.values(), _FakeKustoClient())
 
 
 def test_binding_is_optional(app, monkeypatch):
@@ -383,7 +383,7 @@ def test_full_binding_is_accepted(app, monkeypatch):
 
 
 @pytest.mark.parametrize("binding", [
-    None, "rayfin_kusto_v1", [], ["rayfin_kusto_v1"], True, 1,
+    None, "rayfin_eventhouse_v1", [], ["rayfin_eventhouse_v1"], True, 1,
 ])
 def test_binding_must_be_an_object(app, monkeypatch, binding):
     assert _reject(app, monkeypatch, _texas(), binding=binding) == (
@@ -396,11 +396,11 @@ def test_binding_must_be_an_object(app, monkeypatch, binding):
     {"operation": "executequery"},
     {"operation": None},
     {"operation": ["executeQuery"]},
-    {"function": "rayfin_eventhouse_v1"},
+    {"function": "rayfin_kusto_v1"},
     {"function": "rayfin_kusto_v2"},
     {"function": "RAYFIN_KUSTO_V1"},
     {"function": None},
-    {"function": {"name": "rayfin_kusto_v1"}},
+    {"function": {"name": "rayfin_eventhouse_v1"}},
 ])
 def test_binding_must_match_the_function_and_operation(app, monkeypatch, changes):
     binding = dict(_binding(_texas()), **changes)
@@ -409,7 +409,7 @@ def test_binding_must_match_the_function_and_operation(app, monkeypatch, changes
 
 @pytest.mark.parametrize("binding", [
     {},
-    {"function": "rayfin_kusto_v1"},
+    {"function": "rayfin_eventhouse_v1"},
     {"operation": "executeQuery"},
     {"appId": "app", "artifactId": "a"},
     dict(_binding(_texas()), extra="ignored"),
@@ -802,7 +802,7 @@ def test_payload_root_fields_are_rejected(app, monkeypatch, name):
 @pytest.mark.parametrize("name,value", [
     ("additionalPayload", _settings({"Q": _template(roles=["anyone"])})),
     ("callerContext", {"isAuthenticated": True, "roles": ["admin"]}),
-    ("binding", {"function": "rayfin_kusto_v1", "operation": "executeQuery"}),
+    ("binding", {"function": "rayfin_eventhouse_v1", "operation": "executeQuery"}),
     ("roles", ["admin"]),
     ("role", "admin"),
     ("query", "StormEvents | take 1000"),
@@ -1156,10 +1156,19 @@ def test_client_request_id_is_forwarded(app, monkeypatch):
     assert session.captured_headers["x-ms-client-request-id"] == "KPC.app;1234"
 
 
+@pytest.mark.parametrize("request_id", [
+    "KPC.rayfin_eventhouse_v1;1234", "KPC.rayfin_kusto_v1;1234", "any;value",
+])
+def test_caller_request_ids_pass_through_unchanged(app, monkeypatch, request_id):
+    payload = _payload({"state": "TEXAS"}, clientRequestId=request_id)
+    _, _, session = _accept(app, monkeypatch, payload)
+    assert session.captured_headers["x-ms-client-request-id"] == request_id
+
+
 def test_client_request_id_defaults_to_the_function_prefix(app, monkeypatch):
     _, _, session = _accept(app, monkeypatch, _texas())
     prefix, _, suffix = session.captured_headers["x-ms-client-request-id"].partition(";")
-    assert prefix == "KPC.rayfin_kusto_v1"
+    assert prefix == "KPC.rayfin_eventhouse_v1"
     assert len(suffix) == 36
 
 
@@ -1305,7 +1314,7 @@ def test_unexpected_json_types_never_raise(app, monkeypatch, path, value):
     monkeypatch.setattr(app, "_get_session", get_session)
 
     async def invoke():
-        result = await app.rayfin_kusto_v1(
+        result = await app.rayfin_eventhouse_v1(
             _host(request["payload"], request["settings"], request["caller"], request["binding"]),
             _FakeKustoClient(),
         )
@@ -1325,7 +1334,7 @@ def test_stream_starts_before_body_is_read(app, monkeypatch):
     bind_session(app, monkeypatch, response)
 
     async def check():
-        result = await app.rayfin_kusto_v1(_host(_texas()), KustoClient())
+        result = await app.rayfin_eventhouse_v1(_host(_texas()), KustoClient())
         assert response.chunk_reads == response.release_calls == 0
         stream = result.content
         first = await stream.__anext__()
@@ -1346,7 +1355,7 @@ def test_interrupted_stream_releases_response(app, monkeypatch, ending):
     bind_session(app, monkeypatch, response)
 
     async def check():
-        result = await app.rayfin_kusto_v1(_host(_texas()), KustoClient())
+        result = await app.rayfin_eventhouse_v1(_host(_texas()), KustoClient())
         stream = result.content
         assert await stream.__anext__() == b"first"
         if ending == "close":
@@ -1379,7 +1388,7 @@ def test_credential_and_transport_failures_propagate(app, monkeypatch, stage, fa
         monkeypatch.setattr(session, "post", fail)
 
     with pytest.raises(type(failure)):
-        asyncio.run(app.rayfin_kusto_v1(_host(_texas()), client))
+        asyncio.run(app.rayfin_eventhouse_v1(_host(_texas()), client))
     assert response.chunk_reads == response.text_calls == response.release_calls == 0
 
 
@@ -1390,10 +1399,11 @@ def test_metadata_matches_real_runtime_binding(monkeypatch):
     entries = json.loads((ROOT / "functions.metadata").read_text())
     functions = {f.get_function_name(): f for f in app.udf.get_functions()}
     assert set(functions) == {entry["name"] for entry in entries} == {
-        "rayfin_semantic_model_v1", "rayfin_fabriciq_mcp_v1", "rayfin_kusto_v1",
+        "rayfin_semantic_model_v1", "rayfin_fabriciq_mcp_v1", "rayfin_eventhouse_v1",
         "rayfin_data_agent_v1", "rayfin_telemetry_v1",
     }
-    entry = next(entry for entry in entries if entry["name"] == "rayfin_kusto_v1")
+    assert not hasattr(app, "rayfin_kusto_v1")
+    entry = next(entry for entry in entries if entry["name"] == "rayfin_eventhouse_v1")
     assert entry["scriptFile"] == "function_app.py"
     assert entry["bindings"] == [
         {
