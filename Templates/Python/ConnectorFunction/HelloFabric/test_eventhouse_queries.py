@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import os
 import socket
 from copy import deepcopy
@@ -23,10 +24,11 @@ FILTER_TEXT = (
     f"// {TEMPLATE_MARKER}\ndeclare query_parameters(state:string);\n"
     "StormEvents\n| where State == state"
 )
-READ_ONLY = {
+REQUEST_OPTIONS = {
     "request_readonly": True,
     "request_readonly_hardline": True,
     "request_remote_entities_disabled": True,
+    "request_callout_disabled": True,
 }
 DEFAULT = object()
 MISSING = object()
@@ -163,7 +165,7 @@ def _accept(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, respons
     return result, chunks, session
 
 
-def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
+def _rejected(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
     async def no_session():
         pytest.fail("No HTTP session may be created before validation passes.")
 
@@ -183,11 +185,20 @@ def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding
     assert "fake-kusto-token" not in text
     document = json.loads(text)
     assert result.headers["x-fabric-udf-status"] == document["status"]
+    return document
+
+
+def _reject(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
+    document = _rejected(app, monkeypatch, payload, settings, caller, binding)
     return document["error"]["code"], document["status"]
 
 
 def _code(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
     return _reject(app, monkeypatch, payload, settings, caller, binding)[0]
+
+
+def _message(app, monkeypatch, payload, settings=DEFAULT, caller=MISSING, binding=MISSING):
+    return _rejected(app, monkeypatch, payload, settings, caller, binding)["error"]["message"]
 
 
 def _properties(session):
@@ -563,6 +574,41 @@ def test_invalid_templates_reject_every_invocation(app, monkeypatch, template):
     assert _code(app, monkeypatch, _texas(), settings=_settings(queries)) == "INVALID_QUERY_POLICY"
 
 
+@pytest.mark.parametrize("template", _invalid_template_variants())
+def test_template_errors_name_the_query(app, monkeypatch, template):
+    queries = {"Q": _template(), "Other": template}
+    assert _message(app, monkeypatch, _texas(), settings=_settings(queries)).startswith(
+        "Query 'Other': "
+    )
+
+
+def test_unsupported_parameter_type_names_the_query_and_parameter(app, monkeypatch):
+    queries = {"salesByRegion": _template(parameters={"from": "int"})}
+    payload = _payload({"from": 1}, query_id="salesByRegion")
+    assert _message(app, monkeypatch, payload, settings=_settings(queries)) == (
+        "Query 'salesByRegion': parameter 'from' has unsupported type 'int'. Use string, long, "
+        "real, bool, datetime, guid, timespan, or dynamic."
+    )
+
+
+@pytest.mark.parametrize("kind", [None, 1, ["string"], "datetime ", "x' or 1", "a" * 129])
+def test_unsupported_type_is_named_only_when_it_is_an_identifier(app, monkeypatch, kind):
+    queries = {"Q": _template(parameters={"p": kind})}
+    assert _message(app, monkeypatch, _texas(), settings=_settings(queries)) == (
+        "Query 'Q': parameter 'p' has unsupported type. Use string, long, real, bool, "
+        "datetime, guid, timespan, or dynamic."
+    )
+
+
+@pytest.mark.parametrize("name", ["", "1p", "p-q", "p q", "\u00e4", "a" * 129])
+def test_invalid_parameter_names_are_not_repeated(app, monkeypatch, name):
+    queries = {"Q": _template(parameters={name: "string"})}
+    assert _message(app, monkeypatch, _texas(), settings=_settings(queries)) == (
+        "Query 'Q': parameter names must be 1 to 128 ASCII letters, digits, or underscores "
+        "and must not start with a digit."
+    )
+
+
 @pytest.mark.parametrize("template", [
     _template(text="T" * 65536, parameters={}),
     _template(text="T" * 65534 + "\U0001f600", parameters={}),
@@ -584,7 +630,6 @@ ALLOWED_COMMANDS = [
     ".SHOW TABLES",
     "  \t\r\n.show   tables \n",
     ".show table StormEvents",
-    ".show table StormEvents schema",
     ".show table StormEvents schema as json",
     ".show table StormEvents cslschema",
     ".show table ['Storm Events-1.x'] schema as json",
@@ -615,6 +660,9 @@ def test_allowed_metadata_commands(app, monkeypatch, command):
     ".show tables details",
     ".show table StormEvents details",
     ".show table StormEvents extents",
+    ".show table StormEvents schema",
+    ".show table ['Storm Events-1.x'] schema",
+    ".show table StormEvents schema as csl",
     ".show external tables",
     ".show database Other schema",
     ".show database schema as csl",
@@ -641,6 +689,25 @@ def test_rejected_metadata_commands(app, monkeypatch, command):
     assert _code(app, monkeypatch, _texas(), settings=_settings(queries)) == "INVALID_QUERY_POLICY"
 
 
+def test_listed_command_forms_are_the_allowed_forms(app):
+    forms = app._EVENTHOUSE_METADATA_COMMANDS.split(", ")
+    assert len(forms) == 10
+    for form in forms:
+        assert app._EVENTHOUSE_METADATA_COMMAND_PATTERN.fullmatch(form), form
+
+
+def test_command_policy_error_lists_the_allowed_forms(app, monkeypatch):
+    command = f".show table {TEMPLATE_MARKER} schema"
+    queries = {"Q": _template(), "listTables": _template("executeCommand", command, {})}
+    assert _message(app, monkeypatch, _texas(), settings=_settings(queries)) == (
+        "Query 'listTables': command templates allow only one of these commands for the bound "
+        "database: .show tables, .show table T, .show table T schema as json, .show table T "
+        "cslschema, .show database schema, .show database schema as json, .show database "
+        "cslschema, .show functions, .show function F, .show materialized-views. Do not use "
+        "comments, pipes, multiple statements, or database names."
+    )
+
+
 @pytest.mark.parametrize("text", [
     ".drop table StormEvents",
     "  .show tables",
@@ -649,26 +716,42 @@ def test_rejected_metadata_commands(app, monkeypatch, command):
     "\u2028.show tables",
     "// comment\n.show tables",
     "// comment\r.show tables",
-    "/* comment */.show tables",
-    "/* outer /* inner */ still outer */ .show tables",
     "// only a comment",
-    "/* unterminated",
-    "/* outer /* inner */ unterminated",
-    "/* comment */",
+    "// first\n// second",
 ])
 def test_query_templates_reject_commands_and_comment_only_text(app, monkeypatch, text):
     queries = {"Q": _template(), "Other": _template(text=text, parameters={})}
     assert _code(app, monkeypatch, _texas(), settings=_settings(queries)) == "INVALID_QUERY_POLICY"
 
 
+@pytest.mark.parametrize("operation,text", [
+    ("executeQuery", f"/* {TEMPLATE_MARKER} */ StormEvents"),
+    ("executeQuery", "/* outer /* inner */ */ StormEvents"),
+    ("executeQuery", "StormEvents\n/* trailing"),
+    ("executeQuery", "StormEvents | where Path has '/*'"),
+    ("executeQuery", "/* comment */.show tables"),
+    ("executeQuery", "/* outer /* inner */ still outer */ .show tables"),
+    ("executeQuery", "/* unterminated"),
+    ("executeQuery", "/* comment */"),
+    ("executeCommand", "/* comment */ .show tables"),
+    ("executeCommand", ".show tables /* comment */"),
+])
+def test_block_comments_are_rejected(app, monkeypatch, operation, text):
+    queries = {"Q": _template(), "Other": _template(operation, text, {})}
+    error = _rejected(app, monkeypatch, _texas(), settings=_settings(queries))["error"]
+    assert error["code"] == "INVALID_QUERY_POLICY"
+    assert error["message"] == "Query 'Other': KQL supports only // comments."
+
+
 @pytest.mark.parametrize("text", [
     "print 1",
     "// comment\nStormEvents | take 1",
-    "/* outer /* inner */ */ StormEvents",
+    "// header\nlet x = 1;\n// middle\nprint x",
     "\u3000StormEvents",
     "\x1cStormEvents",
     "let x = 1; print x",
     "StormEvents | where Note == '.show tables'",
+    "print '*/'",
 ])
 def test_query_templates_accept_query_text(app, monkeypatch, text):
     queries = {"Q": _template(text=text, parameters={})}
@@ -877,7 +960,7 @@ def test_parameters_are_optional_when_none_are_declared(app, monkeypatch):
     queries = {"Q": _template(text="print 1", parameters={})}
     _, _, session = _accept(app, monkeypatch, {"operation": "executeQuery", "input": {"queryId": "Q"}},
                             settings=_settings(queries))
-    assert _properties(session) == {"Options": READ_ONLY, "Parameters": {}}
+    assert _properties(session) == {"Options": REQUEST_OPTIONS, "Parameters": {}}
 
 
 def test_roles_are_checked_before_parameters(app, monkeypatch):
@@ -958,7 +1041,7 @@ LITERALS = [
 def test_values_become_typed_kusto_literals(app, monkeypatch, kind, value, literal):
     queries = {"Q": _template(text=f"declare query_parameters(v:{kind});\nprint v", parameters={"v": kind})}
     _, _, session = _accept(app, monkeypatch, _payload({"v": value}), settings=_settings(queries))
-    assert _properties(session) == {"Options": READ_ONLY, "Parameters": {"v": literal}}
+    assert _properties(session) == {"Options": REQUEST_OPTIONS, "Parameters": {"v": literal}}
 
 
 def _dynamic_template():
@@ -989,10 +1072,42 @@ def test_dynamic_literal_is_always_one_json_array(app, monkeypatch):
     assert json.loads(literal[len("dynamic("):-1]) == values
 
 
-def test_long_strings_are_accepted(app, monkeypatch):
-    queries = {"Q": _template(text="declare query_parameters(v:string);\nprint v", parameters={"v": "string"})}
-    _, _, session = _accept(app, monkeypatch, _payload({"v": "x" * 100000}), settings=_settings(queries))
-    assert _properties(session)["Parameters"]["v"] == '"' + "x" * 100000 + '"'
+def _string_template(names=("v",)):
+    return _template(text="print 1", parameters={name: "string" for name in names})
+
+
+def test_string_values_are_capped_at_65536_utf16_units(app, monkeypatch):
+    settings = _settings({"Q": _string_template()})
+    for value in ["x" * 65536, "\U0001f600" * 32768]:
+        _, _, session = _accept(app, monkeypatch, _payload({"v": value}), settings=settings)
+        assert json.loads(_properties(session)["Parameters"]["v"]) == value
+    for value in ["x" * 65537, "\U0001f600" * 32768 + "x", VALUE_MARKER * 3000]:
+        error = _rejected(app, monkeypatch, _payload({"v": value}), settings=settings)["error"]
+        assert error["code"] == "INVALID_QUERY_INPUT"
+        assert error["message"] == "Parameter 'v' exceeds 65536 characters."
+
+
+def test_parameter_literals_have_a_total_size_limit(app, monkeypatch):
+    names = [f"p{index}" for index in range(16)]
+    settings = _settings({"Q": _string_template(names)})
+    values = {name: "x" * 65536 for name in names[:15]}
+    _, _, session = _accept(app, monkeypatch, _payload(dict(values, p15="x" * 65504)),
+                            settings=settings)
+    assert sum(len(literal) for literal in _properties(session)["Parameters"].values()) == 1048576
+    error = _rejected(app, monkeypatch, _payload(dict(values, p15="x" * 65505)),
+                      settings=settings)["error"]
+    assert error["code"] == "INVALID_QUERY_INPUT"
+    assert error["message"] == (
+        "The parameter values exceed the total size limit of 1048576 characters."
+    )
+
+
+def test_total_size_limit_counts_escaped_literals(app, monkeypatch):
+    emoji = "\U0001f600" * 32768
+    settings = _settings({"Q": _string_template(["a", "b", "c"])})
+    _accept(app, monkeypatch, _payload({"a": emoji, "b": emoji, "c": ""}), settings=settings)
+    assert _code(app, monkeypatch, _payload({"a": emoji, "b": emoji, "c": emoji}),
+                 settings=settings) == "INVALID_QUERY_INPUT"
 
 
 INVALID_VALUES = [
@@ -1116,23 +1231,38 @@ def test_request_is_bound_to_the_saved_template(app, monkeypatch, operation, rou
     assert session.captured_json["db"] == DATABASE
     assert session.captured_json["csl"] == text
     expected = {"state": '"TEXAS"'} if values else {}
-    assert _properties(session) == {"Options": READ_ONLY, "Parameters": expected}
+    assert _properties(session) == {"Options": REQUEST_OPTIONS, "Parameters": expected}
 
 
 @pytest.mark.parametrize("operation,route,text", [
     ("executeQuery", "query", "print 1"),
     ("executeCommand", "mgmt", ".show tables"),
 ])
-def test_every_route_sends_read_only_and_local_only_options(app, monkeypatch, operation, route, text):
+def test_every_route_sends_the_restrictive_request_options(app, monkeypatch, operation, route,
+                                                           text):
     queries = {"Q": _template(operation, text, {})}
     _, _, session = _accept(app, monkeypatch, _payload({}, operation=operation),
                             settings=_settings(queries))
     assert session.captured_url.endswith(f"/v1/rest/{route}")
-    assert _properties(session)["Options"] == {
-        "request_readonly": True,
-        "request_readonly_hardline": True,
-        "request_remote_entities_disabled": True,
-    }
+    assert _properties(session)["Options"] == REQUEST_OPTIONS
+
+
+@pytest.mark.parametrize("operation,text,parameters,values", [
+    ("executeQuery", "print 1", {}, {}),
+    ("executeQuery", FILTER_TEXT, {"state": "string"}, {"state": "TEXAS"}),
+    ("executeQuery", "T | evaluate pivot(State)", {}, {}),
+    ("executeQuery", "print v", {"v": "dynamic"}, {"v": [1, "x"]}),
+    ("executeCommand", ".show tables", {}, {}),
+    ("executeCommand", ".show database schema as json", {}, {}),
+])
+def test_callouts_are_always_disabled(app, monkeypatch, operation, text, parameters, values):
+    queries = {"Q": _template(operation, text, parameters)}
+    _, _, session = _accept(app, monkeypatch, _payload(values, operation=operation),
+                            settings=_settings(queries))
+    options = _properties(session)["Options"]
+    assert options["request_callout_disabled"] is True
+    # Shortcut tables need impersonation, so it stays enabled.
+    assert "request_impersonation_disabled" not in options
 
 
 def test_values_never_change_the_template_text(app, monkeypatch):
@@ -1161,6 +1291,63 @@ def test_non_success_status_is_relayed_without_following(app, monkeypatch, statu
     assert result.status_code == status
     assert result.media_type == "application/json; charset=utf-8"
     assert body == [b'{"error":{"code":"Upstream"}}']
+    assert response.released is True
+
+
+class _FailingSession(_Session):
+    def __init__(self, error):
+        super().__init__(None)
+        self._error = error
+
+    async def post(self, url, json=None, headers=None, *, allow_redirects=True):
+        await super().post(url, json, headers, allow_redirects=allow_redirects)
+        raise self._error
+
+
+class _UnreadableErrorResponse(_ErrorResponse):
+    async def text(self):
+        raise aiohttp.ClientPayloadError(f"Response payload from {ENDPOINT} is not completed")
+
+
+def _unreachable(app, monkeypatch, caplog, session):
+    async def get_session():
+        return session
+
+    monkeypatch.setattr(app, "_get_session", get_session)
+    caplog.set_level(logging.WARNING)
+    result = asyncio.run(app.rayfin_eventhouse_v1(_host(_texas()), _FakeKustoClient()))
+    text = b"".join(list(result.body)).decode("utf-8")
+    assert session.calls == 1
+    assert result.status_code == 200
+    assert result.headers["x-fabric-udf-status"] == "Failed"
+    for secret in (ENDPOINT.split("//")[1], "fake-kusto-token", "TEXAS", TEMPLATE_MARKER):
+        assert secret not in text
+        assert secret not in caplog.text
+    assert json.loads(text)["error"] == {
+        "message": "The Eventhouse endpoint could not be reached. Try again later.",
+        "code": "EVENTHOUSE_UNREACHABLE",
+        "category": "network",
+        "details": "502",
+    }
+    return caplog.text
+
+
+@pytest.mark.parametrize("error", [
+    aiohttp.ServerDisconnectedError(),
+    aiohttp.ClientConnectionError(f"Cannot connect to host {ENDPOINT[8:]}:443"),
+    aiohttp.ClientOSError(61, f"Connect call failed {ENDPOINT[8:]}"),
+    aiohttp.ServerTimeoutError(f"Timeout on reading data from {ENDPOINT}"),
+    asyncio.TimeoutError(),
+])
+def test_network_errors_return_a_static_unreachable_error(app, monkeypatch, caplog, error):
+    logs = _unreachable(app, monkeypatch, caplog, _FailingSession(error))
+    assert type(error).__name__ in logs
+
+
+def test_unreadable_error_body_returns_a_static_unreachable_error(app, monkeypatch, caplog):
+    response = _UnreadableErrorResponse(503, "", "application/json")
+    logs = _unreachable(app, monkeypatch, caplog, _Session(response))
+    assert "ClientPayloadError" in logs
     assert response.released is True
 
 

@@ -574,8 +574,10 @@ async def rayfin_data_agent_v1(payload: dict, fabricClient: fn.FabricItem) -> fn
 #        "queries": {queryId: {"operation", "text", "parameters", "roles"}}}
 #   binding (optional): the invocation the host authorized, e.g. {"function", "operation", ...}
 #   callerContext (optional): the caller {"isAuthenticated": bool, "roles": [...]}.
-#       Without it the caller is a signed-in user with no custom roles; the host
-#       blocks anonymous callers and the function host accepts only host calls.
+#       Without it, the caller counts as signed in with no custom roles. The
+#       adapter relies on the platform to block anonymous callers (BaaS sign-in)
+#       and calls that skip BaaS (the FuncSet guard that requires a BaaS origin
+#       for this function).
 # The caller selects a saved template by queryId and supplies typed values. The
 # template text is sent unchanged and the values travel as Kusto query
 # parameters, so a value can never change the query.
@@ -609,6 +611,9 @@ _EVENTHOUSE_MAXIMUM_PARAMETERS = 128
 _EVENTHOUSE_MAXIMUM_ROLES = 128
 _EVENTHOUSE_MAXIMUM_ROLE_LENGTH = 128
 _EVENTHOUSE_MAXIMUM_REQUEST_ID_LENGTH = 256
+_EVENTHOUSE_MAXIMUM_STRING_LENGTH = 65536
+# Fits one maximum-length string even when every character needs a \uXXXX escape.
+_EVENTHOUSE_MAXIMUM_PARAMETER_LITERALS_LENGTH = 1048576
 _EVENTHOUSE_AUTHENTICATED_ROLE = "authenticated"
 _EVENTHOUSE_ANONYMOUS_ROLE = "anonymous"
 _EVENTHOUSE_ENDPOINT_PATTERN = re.compile(
@@ -633,13 +638,18 @@ _EVENTHOUSE_ENTITY_NAME = (
 _EVENTHOUSE_METADATA_COMMAND_PATTERN = re.compile(
     r"[ \t\r\n]*\.show" + _EVENTHOUSE_COMMAND_SPACE
     + r"(?:tables|table" + _EVENTHOUSE_COMMAND_SPACE + _EVENTHOUSE_ENTITY_NAME
-    + r"(?:" + _EVENTHOUSE_COMMAND_SPACE + r"(?:schema(?:" + _EVENTHOUSE_COMMAND_SPACE
-    + r"as" + _EVENTHOUSE_COMMAND_SPACE + r"json)?|cslschema))?|database"
+    + r"(?:" + _EVENTHOUSE_COMMAND_SPACE + r"(?:schema" + _EVENTHOUSE_COMMAND_SPACE
+    + r"as" + _EVENTHOUSE_COMMAND_SPACE + r"json|cslschema))?|database"
     + _EVENTHOUSE_COMMAND_SPACE + r"(?:schema(?:" + _EVENTHOUSE_COMMAND_SPACE + r"as"
     + _EVENTHOUSE_COMMAND_SPACE + r"json)?|cslschema)|functions|function"
     + _EVENTHOUSE_COMMAND_SPACE + _EVENTHOUSE_ENTITY_NAME
     + r"|materialized-views)[ \t\r\n]*",
     re.IGNORECASE | re.ASCII,
+)
+_EVENTHOUSE_METADATA_COMMANDS = (
+    ".show tables, .show table T, .show table T schema as json, .show table T cslschema, "
+    ".show database schema, .show database schema as json, .show database cslschema, "
+    ".show functions, .show function F, .show materialized-views"
 )
 # The characters that .NET treats as white space; the query policy is shared
 # with the platform, so blank and trim checks use the same set.
@@ -722,8 +732,8 @@ def _eventhouse_endpoint(value: object) -> Optional[str]:
 
 
 def _eventhouse_is_query_text(text: str) -> bool:
-    # Skip white space and nested comments; the first remaining character must
-    # not start a management command.
+    # Skip white space and // comments; the first remaining character must not
+    # start a management command.
     index = 0
     while index < len(text):
         if text[index] in _EVENTHOUSE_LEADING_SPACE:
@@ -732,37 +742,26 @@ def _eventhouse_is_query_text(text: str) -> bool:
             index += 2
             while index < len(text) and text[index] not in "\r\n":
                 index += 1
-        elif text.startswith("/*", index):
-            index += 2
-            depth = 1
-            while index < len(text) and depth > 0:
-                if text.startswith("/*", index):
-                    depth += 1
-                    index += 2
-                elif text.startswith("*/", index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            if depth > 0:
-                return False
         else:
             return text[index] != "."
     return False
 
 
-def _eventhouse_validate_template(template: object) -> None:
+def _eventhouse_validate_template(query_id: str, template: object) -> None:
     if (
         not isinstance(template, dict)
         or not _EVENTHOUSE_TEMPLATE_REQUIRED_FIELDS <= set(template) <= _EVENTHOUSE_TEMPLATE_FIELDS
     ):
         raise _eventhouse_invalid_policy(
-            "Each query requires operation, text, and parameters, and accepts only roles besides."
+            f"Query '{query_id}': a template requires operation, text, and parameters, and "
+            "accepts only roles besides."
         )
 
     operation = template["operation"]
     if not isinstance(operation, str) or operation not in _EVENTHOUSE_ROUTES:
-        raise _eventhouse_invalid_policy("Query operation must be executeQuery or executeCommand.")
+        raise _eventhouse_invalid_policy(
+            f"Query '{query_id}': operation must be executeQuery or executeCommand."
+        )
 
     text = template["text"]
     if (
@@ -772,39 +771,44 @@ def _eventhouse_validate_template(template: object) -> None:
         or "\0" in text
     ):
         raise _eventhouse_invalid_policy(
-            "Query text must be nonblank, contain no NUL, and not exceed 65536 characters."
+            f"Query '{query_id}': text must be nonblank, contain no NUL, and not exceed "
+            "65536 characters."
         )
+    if "/*" in text:
+        raise _eventhouse_invalid_policy(f"Query '{query_id}': KQL supports only // comments.")
     if operation == "executeCommand" and (
         not text.isascii() or _EVENTHOUSE_METADATA_COMMAND_PATTERN.fullmatch(text) is None
     ):
         raise _eventhouse_invalid_policy(
-            "Command templates require one allowed database-scoped .show metadata command "
-            "for the bound database. Use .show tables or .show database schema; do not use "
-            "comments, pipes, multiple statements, or explicit database names."
+            f"Query '{query_id}': command templates allow only one of these commands for the "
+            f"bound database: {_EVENTHOUSE_METADATA_COMMANDS}. Do not use comments, pipes, "
+            "multiple statements, or database names."
         )
     if operation == "executeQuery" and not _eventhouse_is_query_text(text):
         raise _eventhouse_invalid_policy(
-            "Query templates require query text, not a management command or an "
-            "empty/comment-only query. Register allowed metadata commands with operation "
+            f"Query '{query_id}': query templates require query text, not a management "
+            "command or comment-only text. Register allowed .show commands with operation "
             "executeCommand."
         )
 
     parameters = template["parameters"]
     if not isinstance(parameters, dict) or len(parameters) > _EVENTHOUSE_MAXIMUM_PARAMETERS:
         raise _eventhouse_invalid_policy(
-            "Each query requires an explicit parameters dictionary with at most 128 entries; "
+            f"Query '{query_id}': parameters must be a dictionary with at most 128 entries; "
             "use {} for none."
         )
-    if any(
-        not _eventhouse_is_identifier(name)
-        or not isinstance(kind, str)
-        or kind not in _EVENTHOUSE_PARAMETER_TYPES
-        for name, kind in parameters.items()
-    ):
-        raise _eventhouse_invalid_policy(
-            "Parameters require simple identifier names and one of string, long, real, bool, "
-            "datetime, guid, timespan, dynamic."
-        )
+    for name, kind in parameters.items():
+        if not _eventhouse_is_identifier(name):
+            raise _eventhouse_invalid_policy(
+                f"Query '{query_id}': parameter names must be 1 to 128 ASCII letters, digits, "
+                "or underscores and must not start with a digit."
+            )
+        if not isinstance(kind, str) or kind not in _EVENTHOUSE_PARAMETER_TYPES:
+            shown = f" '{kind}'" if _eventhouse_is_identifier(kind) else ""
+            raise _eventhouse_invalid_policy(
+                f"Query '{query_id}': parameter '{name}' has unsupported type{shown}. Use "
+                "string, long, real, bool, datetime, guid, timespan, or dynamic."
+            )
 
     if "roles" not in template:
         return
@@ -823,8 +827,8 @@ def _eventhouse_validate_template(template: object) -> None:
         or len(set(roles)) != len(roles)
     ):
         raise _eventhouse_invalid_policy(
-            "Each query requires 1 to 128 distinct, nonblank role names of at most 128 "
-            "characters without surrounding whitespace or control characters."
+            f"Query '{query_id}': roles must be 1 to 128 distinct, nonblank names of at most "
+            "128 characters without surrounding white space or control characters."
         )
 
 
@@ -865,7 +869,7 @@ def _eventhouse_settings(settings: object) -> tuple:
             raise _eventhouse_invalid_policy(
                 "Query IDs must be simple identifiers of 1 to 128 characters with a template object."
             )
-        _eventhouse_validate_template(template)
+        _eventhouse_validate_template(query_id, template)
     return endpoint, database, queries
 
 
@@ -1090,18 +1094,30 @@ def _eventhouse_request(payload: object) -> tuple:
             "Supply exactly the required template parameters, without additional names."
         )
     literals = {}
+    literals_length = 0
     for name, kind in declared.items():
-        if supplied.get(name) is None:
+        value = supplied.get(name)
+        if value is None:
             raise _eventhouse_invalid_input(
                 "All template parameters are required and must be non-null."
             )
-        literal = _eventhouse_literal(supplied[name], kind)
+        if kind == "string" and isinstance(value, str) and (
+            len(value) > _EVENTHOUSE_MAXIMUM_STRING_LENGTH
+            or _eventhouse_length(value) > _EVENTHOUSE_MAXIMUM_STRING_LENGTH
+        ):
+            raise _eventhouse_invalid_input(f"Parameter '{name}' exceeds 65536 characters.")
+        literal = _eventhouse_literal(value, kind)
         if literal is None:
             raise _eventhouse_invalid_input(
                 "A parameter does not match its declared JSON type; datetime requires ISO 8601 "
                 "with an explicit time zone, guid requires the hyphenated format, timespan "
                 "requires a Kusto timespan such as 7d or 01:30:00, and dynamic requires a flat "
                 "array of scalars."
+            )
+        literals_length += len(literal)
+        if literals_length > _EVENTHOUSE_MAXIMUM_PARAMETER_LITERALS_LENGTH:
+            raise _eventhouse_invalid_input(
+                "The parameter values exceed the total size limit of 1048576 characters."
             )
         literals[name] = literal
 
@@ -1129,6 +1145,7 @@ def _eventhouse_request(payload: object) -> tuple:
                 "request_readonly": True,
                 "request_readonly_hardline": True,
                 "request_remote_entities_disabled": True,
+                "request_callout_disabled": True,
             },
             "Parameters": literals,
         }),
@@ -1154,15 +1171,25 @@ async def rayfin_eventhouse_v1(payload: dict, kustoClient: fn.FabricItem) -> fn.
     }
 
     session = await _get_session()
-    resp = await session.post(url, json=body, headers=headers, allow_redirects=False)
-
-    if resp.status != 200:
-        detail = await resp.text()
-        await resp.release()
-        return fn.StreamResponse(
-            iter([detail.encode("utf-8")]),
-            media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
-            status_code=resp.status,
+    try:
+        resp = await session.post(url, json=body, headers=headers, allow_redirects=False)
+        if resp.status != 200:
+            try:
+                detail = await resp.text()
+            finally:
+                await resp.release()
+            return fn.StreamResponse(
+                iter([detail.encode("utf-8")]),
+                media_type=resp.headers.get("Content-Type", _JSON_MEDIA_TYPE),
+                status_code=resp.status,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        # Type name only: the message can embed the endpoint.
+        logging.warning("rayfin_eventhouse_v1: the Kusto request failed with %s",
+                        type(error).__name__)
+        return _error_response(
+            "The Eventhouse endpoint could not be reached. Try again later.",
+            "EVENTHOUSE_UNREACHABLE", "network", "502",
         )
 
     async def relay():
