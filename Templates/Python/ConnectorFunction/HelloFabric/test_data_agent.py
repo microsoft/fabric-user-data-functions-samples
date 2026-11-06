@@ -431,7 +431,10 @@ class ArchiveTests(unittest.TestCase):
                     for attr in ("external_attr", "internal_attr", "create_system", "create_version",
                                  "extract_version", "date_time", "compress_type", "comment", "extra"):
                         self.assertEqual(getattr(entry, attr), getattr(packed, attr))
-                    if entry.filename not in ("function_app.py", "fabric_lib/functions.metadata"):
+                    if entry.filename == "requirements.txt":
+                        self.assertEqual(after.read(entry.filename),
+                                         before.read(entry) + b"\nazure-connectors==0.5.0b1\n")
+                    elif entry.filename not in ("function_app.py", "fabric_lib/functions.metadata"):
                         self.assertEqual(before.read(entry), after.read(entry.filename))
 
 
