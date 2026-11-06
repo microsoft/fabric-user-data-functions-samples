@@ -1,10 +1,11 @@
 """
-Standalone streaming tests for the `rayfin_kusto_v1` connector function.
+Standalone streaming tests for the `rayfin_eventhouse_v1` connector function.
 
 These verify the byte-pump contract without the Fabric runtime: a minimal
 `fabric.functions` stub is injected so `function_app` imports, and the shared
 aiohttp session is replaced with a fake whose response yields several body
-chunks. The tests assert that the 200 path:
+chunks. Each request selects a saved query template by queryId. The tests
+assert that the 200 path:
 
   * relays MORE THAN ONE chunk for a multi-chunk result (true streaming),
   * never buffers or parses the body (`resp.text()` is never called), and
@@ -94,10 +95,14 @@ class _FakeSession:
         self._response = response
         self.captured_headers = None
         self.captured_url = None
+        self.captured_json = None
+        self.captured_allow_redirects = None
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, *, allow_redirects=True):
         self.captured_url = url
         self.captured_headers = headers
+        self.captured_json = json
+        self.captured_allow_redirects = allow_redirects
         return self._response
 
 
@@ -114,26 +119,57 @@ class _FakeKustoClient:
         return _FakeCredential()
 
 
-def _payload(client_request_id="KPC.rayfin_kusto_v1;test-id"):
+_DATABASE = "813f7fc1-66ff-4faa-aee5-0f0686f74217"
+_QUERY_TEXT = "declare query_parameters(rows:long);\nT | take rows"
+
+
+def _settings():
     return {
-        "input": {
-            "queryServiceUri": "https://cluster.kusto.fabric.microsoft.com",
-            "databaseName": "db",
-            "query": "T | take 1",
-            "clientRequestId": client_request_id,
-        }
+        "queryServiceUri": "https://cluster.kusto.fabric.microsoft.com",
+        "database": _DATABASE,
+        "queries": {
+            "firstRows": {
+                "operation": "executeQuery",
+                "text": _QUERY_TEXT,
+                "parameters": {"rows": "long"},
+                "roles": ["authenticated"],
+            },
+            "tables": {
+                "operation": "executeCommand",
+                "text": ".show tables",
+                "parameters": {},
+                "roles": ["authenticated"],
+            },
+        },
     }
 
 
-def _command_payload(client_request_id="KPC.rayfin_kusto_v1;cmd-id"):
+def _host_fields():
+    return {
+        "additionalPayload": _settings(),
+    }
+
+
+def _payload(client_request_id="KPC.rayfin_eventhouse_v1;test-id"):
+    return {
+        "operation": "executeQuery",
+        "input": {
+            "queryId": "firstRows",
+            "parameters": {"rows": 1},
+            "clientRequestId": client_request_id,
+        },
+        **_host_fields(),
+    }
+
+
+def _command_payload(client_request_id="KPC.rayfin_eventhouse_v1;cmd-id"):
     return {
         "operation": "executeCommand",
         "input": {
-            "queryServiceUri": "https://cluster.kusto.fabric.microsoft.com",
-            "databaseName": "db",
-            "command": ".show tables",
+            "queryId": "tables",
             "clientRequestId": client_request_id,
         },
+        **_host_fields(),
     }
 
 
@@ -147,7 +183,7 @@ async def _invoke(chunks, payload):
 
     mod._get_session = _fake_get_session  # type: ignore[attr-defined]
 
-    result = await mod.rayfin_kusto_v1(payload, _FakeKustoClient())
+    result = await mod.rayfin_eventhouse_v1(payload, _FakeKustoClient())
 
     body = []
     async for chunk in result.body:
@@ -172,15 +208,20 @@ async def _check_streams_multiple_chunks_without_buffering():
 async def _check_forwards_client_request_id_header():
     chunks = [b'{"Tables":[]}']
     _mod, _result, _body, _response, session = await _invoke(
-        chunks, _payload("KPC.rayfin_kusto_v1;abc-123")
+        chunks, _payload("KPC.rayfin_eventhouse_v1;abc-123")
     )
     assert session.captured_headers is not None
     assert (
         session.captured_headers.get("x-ms-client-request-id")
-        == "KPC.rayfin_kusto_v1;abc-123"
+        == "KPC.rayfin_eventhouse_v1;abc-123"
     ), "SDK-supplied clientRequestId must be forwarded as the header"
-    # And the query endpoint (not mgmt) is used for executeQuery.
+    # And the query endpoint (not mgmt) is used for executeQuery, with the
+    # saved template text and the typed parameter.
     assert session.captured_url.endswith("/v1/rest/query")
+    assert session.captured_json["db"] == _DATABASE
+    assert session.captured_json["csl"] == _QUERY_TEXT
+    assert json.loads(session.captured_json["properties"])["Parameters"] == {"rows": "long(1)"}
+    assert session.captured_allow_redirects is False
 
 
 async def _check_execute_command_routes_to_mgmt_and_streams():
@@ -188,7 +229,7 @@ async def _check_execute_command_routes_to_mgmt_and_streams():
     # the v1 {Tables} body as a pure byte pump, exactly like executeQuery.
     chunks = [b'{"Tables":[', b'{"TableName":"T","Rows":[["x"]]}', b"]}"]
     _mod, _result, body, response, session = await _invoke(
-        chunks, _command_payload("KPC.rayfin_kusto_v1;cmd-1")
+        chunks, _command_payload("KPC.rayfin_eventhouse_v1;cmd-1")
     )
     assert session.captured_url.endswith(
         "/v1/rest/mgmt"
@@ -197,8 +238,9 @@ async def _check_execute_command_routes_to_mgmt_and_streams():
     assert response.text_called is False, "executeCommand must not call resp.text()"
     assert (
         session.captured_headers.get("x-ms-client-request-id")
-        == "KPC.rayfin_kusto_v1;cmd-1"
+        == "KPC.rayfin_eventhouse_v1;cmd-1"
     ), "clientRequestId is forwarded for executeCommand too"
+    assert session.captured_json["csl"] == ".show tables"
 
 
 # --- rayfin_office365users_v1: optional accessToken vs managed identity -------
