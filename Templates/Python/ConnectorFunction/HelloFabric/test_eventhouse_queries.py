@@ -1565,6 +1565,10 @@ def test_metadata_matches_real_runtime_binding(monkeypatch):
     assert set(functions) == {entry["name"] for entry in entries} == {
         "rayfin_semantic_model_v1", "rayfin_fabriciq_mcp_v1", "rayfin_eventhouse_v1",
         "rayfin_data_agent_v1", "rayfin_telemetry_v1",
+        "rayfin_office365users_v1", "rayfin_sharepointonline_v1", "rayfin_office365_v1",
+        "rayfin_excelonlinebusiness_v1", "rayfin_teams_v1", "rayfin_onedriveforbusiness_v1",
+        "rayfin_office365groups_v1", "rayfin_microsoftforms_v1", "rayfin_planner_v1",
+        "rayfin_azuread_v1",
     }
     assert not hasattr(app, "rayfin_kusto_v1")
     entry = next(entry for entry in entries if entry["name"] == "rayfin_eventhouse_v1")
