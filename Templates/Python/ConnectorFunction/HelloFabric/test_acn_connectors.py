@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +33,7 @@ class FakeClient:
     tokens = []
     result = {"value": []}
     error = None
+    close_error = None
 
     def __init__(self, connection_runtime_url, token_provider=None, options=None):
         self.url = connection_runtime_url
@@ -40,6 +42,8 @@ class FakeClient:
     def __getattr__(self, name):
         async def call(**kwargs):
             FakeClient.calls.append((name, kwargs))
+            if name == "close" and FakeClient.close_error is not None:
+                raise FakeClient.close_error
             if FakeClient.error is not None:
                 raise FakeClient.error
             return FakeClient.result
@@ -84,13 +88,25 @@ def _install_stubs():
 
 def _load_function_app():
     _install_stubs()
-    spec = importlib.util.spec_from_file_location("function_app", ROOT / "function_app.py")
+    spec = importlib.util.spec_from_file_location("acn_test_function_app", ROOT / "function_app.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-app = _load_function_app()
+# Stubs live only for this module's tests so they don't leak into other test files.
+_modules = patch.dict(sys.modules)
+app = None
+
+
+def setUpModule():
+    global app
+    _modules.start()
+    app = _load_function_app()
+
+
+def tearDownModule():
+    _modules.stop()
 
 
 def _invoke(slug, operation, **input_data):
@@ -116,6 +132,7 @@ def _error(response):
 class AcnAdapterTests(unittest.TestCase):
     def setUp(self):
         FakeClient.calls, FakeClient.tokens, FakeClient.result, FakeClient.error = [], [], {"value": []}, None
+        FakeClient.close_error = None
         app._acn_clients.clear()
 
     def test_every_connector_is_registered_and_exposed(self):
@@ -381,6 +398,43 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("planner", "listMyTasksAsync")
         _invoke("office365groups", "listOwnedGroupsAsync")
         self.assertEqual(len(app._acn_clients), 2)
+
+    def assertClientCreationFails(self, details, **input_data):
+        with self.assertLogs(level="WARNING") as logs:
+            response = _invoke("planner", "listMyTasksAsync", **input_data)
+        error = _error(response)
+        self.assertEqual((error["code"], error["category"], error["details"]), ("InternalError", "unknown", details))
+        self.assertIn("planner", error["message"])
+        self.assertNotIn("connection-id", response[1] + "\n".join(logs.output))
+        self.assertEqual(app._acn_clients, {})
+
+    def test_client_construction_failure_returns_error_envelope(self):
+        boom = RuntimeError("leaks /apim/x/connection-id")
+        for input_data in ({}, {"accessToken": "tok"}):
+            with self.subTest(access_token=bool(input_data)), \
+                    patch.object(app, "_new_acn_client", side_effect=boom):
+                self.assertClientCreationFails("RuntimeError", **input_data)
+
+    def test_token_provider_failure_returns_error_envelope(self):
+        auth = sys.modules["azure.connectors.sdk.authentication"]
+        with patch.object(auth, "ConnectionStringTokenProvider",
+                          side_effect=ValueError("leaks /apim/x/connection-id")):
+            self.assertClientCreationFails("ValueError", accessToken="tok")
+
+    def test_missing_connector_module_returns_error_envelope(self):
+        with patch.dict(sys.modules, {"azure.connectors.planner": None}):
+            self.assertClientCreationFails("ModuleNotFoundError")
+
+    def test_close_failure_is_logged_and_does_not_mask_result(self):
+        FakeClient.result = {"value": [{"id": "t1"}]}
+        FakeClient.close_error = RuntimeError("leaks /apim/x/connection-id")
+        with self.assertLogs(level="WARNING") as logs:
+            status, body = _invoke("planner", "listMyTasksAsync", accessToken="tok")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"value": [{"id": "t1"}]})
+        self.assertEqual(FakeClient.calls[-1], ("close", {}))
+        self.assertIn("closing connector client", "\n".join(logs.output))
+        self.assertNotIn("connection-id", "\n".join(logs.output))
 
     def test_metadata_and_archives_declare_every_function(self):
         expected = {f"rayfin_{slug}_v1" for slug in SLUGS}

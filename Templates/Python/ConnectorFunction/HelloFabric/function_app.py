@@ -817,25 +817,52 @@ async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamRe
     # fresh, uncached client that is closed after the call; otherwise the cached
     # managed-identity client is reused.
     accessToken = input_data.get("accessToken")
-    if accessToken:
-        from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
+    try:
+        if accessToken:
+            from azure.connectors.sdk.authentication import ConnectionStringTokenProvider
 
-        client = _new_acn_client(
-            slug, connectionRuntimeUrl, token_provider=ConnectionStringTokenProvider(accessToken)
+            client = _new_acn_client(
+                slug, connectionRuntimeUrl, token_provider=ConnectionStringTokenProvider(accessToken)
+            )
+        else:
+            client = await _get_acn_client(slug, connectionRuntimeUrl)
+    except Exception as exc:
+        # Type name only: the message can embed the connection URL.
+        logging.error(
+            "%s: connector client for '%s' could not be created: %s",
+            functionName,
+            slug,
+            type(exc).__name__,
         )
-    else:
-        client = await _get_acn_client(slug, connectionRuntimeUrl)
+        return _error_response(
+            f"connector '{slug}' is unavailable", "InternalError", "unknown", type(exc).__name__
+        )
 
     try:
         return await _call_acn(client, methodName, kwargs, functionName, operation)
     finally:
         if accessToken:
-            await client.close()
+            try:
+                await client.close()
+            except Exception as exc:
+                # The call already completed; a failed close must not replace its result.
+                logging.warning(
+                    "%s: closing connector client for '%s' failed: %s",
+                    functionName,
+                    slug,
+                    type(exc).__name__,
+                )
 
 
 async def _call_acn(client, methodName: str, kwargs: dict, functionName: str,
                     operation: str) -> fn.StreamResponse:
-    from azure.connectors import ConnectorException
+    try:
+        from azure.connectors import ConnectorException
+    except ImportError:
+        # Without the SDK exception type, connector errors fall through to the
+        # generic handler below.
+        class ConnectorException(Exception):
+            pass
 
     try:
         result = await getattr(client, methodName)(**kwargs)
