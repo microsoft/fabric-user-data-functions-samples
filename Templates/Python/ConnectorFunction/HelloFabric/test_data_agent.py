@@ -223,7 +223,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(body), rpc(ANSWER, request["id"]))
         self.assertEqual(self.records[2][0], request)
         self.assertFalse(any(m["method"] == "tools/list" for m, _ in self.records))
-        self.assertTrue(self.resolved[0].startswith(TEST_ORIGIN))
+        self.assertEqual(self.resolved[0], f"{TEST_ORIGIN}/v1/mcp/workspaces/{WORKSPACE}/dataagents/{ITEM}/agent")
 
     async def test_rpc_method_cannot_bypass_the_authorized_connector_operation(self):
         for operation in ("getInfo", "getTask", "getTaskResult", "cancelTask"):
@@ -411,6 +411,14 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(archive.read("fabric_lib/functions.metadata"), metadata)
                 self.assertNotIn(b"\r\n", archive.read("function_app.py"))
                 self.assertFalse(any("test_" in member or "__pycache__" in member for member in archive.namelist()))
+            loader = zipimport.zipimporter(str(path))
+            spec = importlib.util.spec_from_loader("function_app", loader)
+            module = importlib.util.module_from_spec(spec)
+            with _without_api_environment():
+                loader.exec_module(module)
+            self.assertEqual(module._POWERBI_BASE, f"{TEST_ORIGIN}/v1.0/myorg")
+            self.assertEqual(module._data_agent_endpoint(payload()["input"]),
+                             f"{TEST_ORIGIN}/v1/mcp/workspaces/{WORKSPACE}/dataagents/{ITEM}/agent")
             for ring, powerbi, fabric in RING_ROUTES:
                 loader = zipimport.zipimporter(str(path))
                 spec = importlib.util.spec_from_loader("function_app", loader)
@@ -424,8 +432,10 @@ class ArchiveTests(unittest.TestCase):
     def test_archives_preserve_peer_metadata_members_and_permissions(self):
         baseline = self.baseline()
         definitions = json.loads((ROOT / "functions.metadata").read_bytes())
-        self.assertEqual([d for d in definitions if d["name"] != "rayfin_data_agent_v1"],
-                         json.loads((baseline / "functions.metadata").read_bytes()))
+        baseline_definitions = json.loads((baseline / "functions.metadata").read_bytes())
+        baseline_names = {d["name"] for d in baseline_definitions}
+        self.assertEqual([d for d in definitions if d["name"] in baseline_names],
+                         baseline_definitions)
         for name in ("SourceCode.zip", "Deploy.zip"):
             with zipfile.ZipFile(baseline / name) as before, zipfile.ZipFile(ROOT / name) as after:
                 self.assertEqual(before.namelist(), after.namelist())
