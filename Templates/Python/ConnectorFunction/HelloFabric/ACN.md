@@ -13,8 +13,8 @@ they are never interpreted as API keys or cached across callers.
 
 List operations fetch exactly one SDK page and return its original JSON envelope,
 including null fields and continuation metadata. They do not automatically fetch
-all pages. `searchUserAsync` rejects a nonempty `skipToken`: the released SDK no
-longer exposes that argument. The adapter does not accept arbitrary next-link URLs.
+all pages. `searchUserAsync` has no continuation-token input in SDK 1.0.
+The adapter does not accept arbitrary next-link URLs.
 
 Planner PATCH operations use the SDK's empty-success response handling. A 204
 returns JSON `null`, not an error. Connector and transport failures retain the
