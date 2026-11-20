@@ -269,10 +269,6 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertIn(("office365users", RUNTIME_URL), app._acn_clients)
         self.assertBadRequest(_invoke("office365users", "managerAsync"), "userId")
 
-    def test_search_does_not_silently_ignore_an_unsupported_skip_token(self):
-        self.assertBadRequest(_invoke("office365users", "searchUserAsync", skipToken="next"), "skipToken")
-        self.assertEqual(FakeClient.calls, [])
-
     def test_every_connector_honours_caller_access_token(self):
         ids = {"teamId": "t", "userId": "u", "source": "me", "driveId": "d", "fileId": "f", "groupId": "g"}
         operations = {

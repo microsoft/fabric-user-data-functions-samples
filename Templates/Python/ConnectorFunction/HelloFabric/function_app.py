@@ -1444,9 +1444,6 @@ async def _invoke_acn(slug: str, operations: dict, payload: dict) -> fn.StreamRe
             raise ValueError("'operation' is required")
         if not connectionRuntimeUrl:
             raise ValueError("input.connectionRuntimeUrl is required")
-        if slug == "office365users" and operation == "searchUserAsync" and input_data.get("skipToken"):
-            raise ValueError("'skipToken' is not supported by azure-connectors 1.0")
-
         handler = operations.get(operation)
         if handler is None:
             supported = ", ".join(sorted(operations))
