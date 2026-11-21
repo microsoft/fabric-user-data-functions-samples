@@ -1330,17 +1330,22 @@ async def rayfin_office365users_v1(payload: dict) -> fn.StreamResponse:
     return await _invoke_acn("office365users", _OFFICE365USERS_OPERATIONS, payload)
 
 
+def _integer(value, name: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"'{name}' must be an integer") from None
+    if isinstance(value, bool) or (not isinstance(value, str) and number != value):
+        raise ValueError(f"'{name}' must be an integer")
+    return number
+
+
 def _query(input_data: dict, name: str, *, as_string: bool = False):
     value = input_data.get(name)
     if value is None:
         return None
     if name in ("top", "skip", "maxFileCount"):
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            raise ValueError(f"'{name}' must be an integer") from None
-        if isinstance(value, bool) or (not isinstance(value, str) and number != value):
-            raise ValueError(f"'{name}' must be an integer")
+        number = _integer(value, name)
         if name == "top" and number < 1:
             raise ValueError("'top' must be a positive integer")
         if name == "skip" and number < 0:
@@ -1608,7 +1613,7 @@ _SHAREPOINTONLINE_OPERATIONS = {
         "table": _required(d, "listName"),
         # Not `itemId`: BaaS reserves that name for the Fabric item and strips it
         # from the caller's input before invoking, so it never reaches the adapter.
-        "id": int(_required_key(d, "id")),
+        "id": _integer(_required_key(d, "id"), "id"),
     }),
     "postItemAsync": ("post_item", lambda d: {
         **_sharepoint_list(d),
@@ -1616,12 +1621,12 @@ _SHAREPOINTONLINE_OPERATIONS = {
     }),
     "patchItemAsync": ("patch_item", lambda d: {
         **_sharepoint_list(d),
-        "id": int(_required_key(d, "id")),
+        "id": _integer(_required_key(d, "id"), "id"),
         "input": _required(d, "item"),
     }),
     "deleteItemAsync": ("delete_item", lambda d: {
         **_sharepoint_list(d),
-        "id": int(_required_key(d, "id")),
+        "id": _integer(_required_key(d, "id"), "id"),
     }),
     "getItemAttachmentsAsync": ("list_item_attachments", lambda d: {
         **_sharepoint_list(d),

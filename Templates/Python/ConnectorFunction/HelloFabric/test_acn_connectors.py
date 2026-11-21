@@ -262,6 +262,31 @@ class AcnAdapterTests(unittest.TestCase):
             "group_id": "g", "event": "e", "input": {"subject": "x"}}))
         self.assertEqual(FakeClient.calls[5], ("assign_users", {"id": "t", "input": {"assignments": "u1;u2"}}))
 
+    def test_sharepoint_item_ids_reject_lossy_coercion_before_dispatch(self):
+        for operation in ("getItemAsync", "patchItemAsync", "deleteItemAsync"):
+            for value in (7.9, True, False, "7.9", float("inf"), float("nan")):
+                with self.subTest(operation=operation, value=value):
+                    FakeClient.calls = []
+                    self.assertBadRequest(
+                        _invoke("sharepointonline", operation,
+                                siteUrl="https://contoso.sharepoint.com/sites/x", listName="Tasks",
+                                id=value, item={"Title": "updated"}),
+                        "id")
+                    self.assertEqual(FakeClient.calls, [])
+
+    def test_sharepoint_item_ids_preserve_integer_inputs(self):
+        for operation in ("getItemAsync", "patchItemAsync", "deleteItemAsync"):
+            for value in (0, 7, "7", 7.0):
+                with self.subTest(operation=operation, value=value):
+                    FakeClient.calls = []
+                    _invoke("sharepointonline", operation,
+                            siteUrl="https://contoso.sharepoint.com/sites/x", listName="Tasks",
+                            id=value, item={"Title": "updated"})
+                    self.assertEqual(len(FakeClient.calls), 1)
+                    actual = FakeClient.calls[0][1]["id"]
+                    self.assertIs(type(actual), int)
+                    self.assertEqual(actual, int(value))
+
     def test_office365users_uses_shared_adapter(self):
         _invoke("office365users", "searchUserAsync", searchTerm="ada", top=5, isSearchTermRequired=False)
         self.assertEqual(FakeClient.calls[0], ("list_search_user", {
