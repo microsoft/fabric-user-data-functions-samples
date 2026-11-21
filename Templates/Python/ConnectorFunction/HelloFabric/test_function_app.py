@@ -12,8 +12,8 @@ assert that the 200 path:
   * forwards the SDK-supplied clientRequestId as the `x-ms-client-request-id`
     request header.
 
-Run directly (`python3 test_function_app.py`) or under pytest. Only requires
-aiohttp to be importable (function_app imports it at module load).
+Run directly (`python3 test_function_app.py`) or under pytest. Requires
+aiohttp and azure-connectors==1.0.0.
 """
 
 import asyncio
@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import types
+from unittest.mock import patch
 
 
 def _install_fabric_stub():
@@ -253,24 +254,17 @@ class _FakeConnectorException(Exception):
         self.response_body = response_body
 
 
-class _FakeTokenProvider:
-    def __init__(self, api_key):
-        if not api_key:
-            raise ValueError("empty")
-        self.api_key = api_key
-
-
 class _FakeO365Client:
     instances: list = []
 
-    def __init__(self, url, token_provider=None, options=None):
+    def __init__(self, url, credential):
         self.url = url
-        self.token_provider = token_provider
+        self.credential = credential
         self.closed = False
         self.fail_with = None
         _FakeO365Client.instances.append(self)
 
-    async def manager_async(self, **kwargs):
+    async def manager(self, **kwargs):
         if self.fail_with is not None:
             raise self.fail_with
         return {"displayName": "Boss", "kwargs": kwargs}
@@ -280,25 +274,14 @@ class _FakeO365Client:
 
 
 def _install_connectors_stub():
-    azure = types.ModuleType("azure")
     connectors = types.ModuleType("azure.connectors")
     connectors.ConnectorException = _FakeConnectorException
-    o365 = types.ModuleType("azure.connectors.office365users")
-    o365.Office365usersClient = _FakeO365Client
-    sdk = types.ModuleType("azure.connectors.sdk")
-    auth = types.ModuleType("azure.connectors.sdk.authentication")
-    auth.ConnectionStringTokenProvider = _FakeTokenProvider
-    azure.connectors = connectors
-    connectors.office365users = o365
-    connectors.sdk = sdk
-    sdk.authentication = auth
+    o365 = types.ModuleType("azure.connectors.office365_users")
+    o365.Office365UsersClient = _FakeO365Client
     sys.modules.update(
         {
-            "azure": azure,
             "azure.connectors": connectors,
-            "azure.connectors.office365users": o365,
-            "azure.connectors.sdk": sdk,
-            "azure.connectors.sdk.authentication": auth,
+            "azure.connectors.office365_users": o365,
         }
     )
 
@@ -328,7 +311,8 @@ async def _check_o365_without_token_uses_cached_msi_client():
     assert r1.status_code == 200 and r2.status_code == 200
     assert len(_FakeO365Client.instances) == 1, "MSI client must be cached"
     client = _FakeO365Client.instances[0]
-    assert client.token_provider is None, "no token -> SDK default (MSI)"
+    from azure.identity.aio import DefaultAzureCredential
+    assert isinstance(client.credential, DefaultAzureCredential)
     assert client.closed is False, "cached MSI client must not be closed"
 
 
@@ -341,28 +325,28 @@ async def _check_o365_with_token_uses_fresh_client_and_closes():
     assert b"Boss" in _body(response)
     assert len(_FakeO365Client.instances) == 1
     client = _FakeO365Client.instances[0]
-    assert isinstance(client.token_provider, _FakeTokenProvider)
-    assert client.token_provider.api_key == "abc.def", "token passed as-is"
+    assert isinstance(client.credential, mod._AcnAccessTokenCredential)
+    assert client.credential.token == "abc.def", "token passed as-is"
     assert client.closed is True, "per-call token client must be closed"
     assert mod._acn_clients == {}, "token client must not be cached"
-    called = await client.manager_async(userId="u1")
+    called = await client.manager(userId="u1")
     assert "accessToken" not in called["kwargs"], "token never reaches SDK kwargs"
 
 
 async def _check_o365_with_token_closes_on_connector_error():
     mod = _o365_setup()
-    original = _FakeO365Client.manager_async
+    original = _FakeO365Client.manager
 
     async def failing(self, **kwargs):
         raise _FakeConnectorException(403, '{"error":"forbidden"}')
 
-    _FakeO365Client.manager_async = failing
+    _FakeO365Client.manager = failing
     try:
         response = await mod.rayfin_office365users_v1(
             _o365_payload(accessToken="tok")
         )
     finally:
-        _FakeO365Client.manager_async = original
+        _FakeO365Client.manager = original
     assert response.status_code == 200
     assert response.headers == {"x-fabric-udf-status": "BadRequest"}
     error = {"message": "forbidden", "code": "Http403", "category": "api", "details": "403"}
@@ -382,15 +366,18 @@ async def _check_o365_with_token_closes_on_connector_error():
 
 
 def test_o365_without_token_uses_cached_msi_client():
-    asyncio.run(_check_o365_without_token_uses_cached_msi_client())
+    with patch.dict(sys.modules):
+        asyncio.run(_check_o365_without_token_uses_cached_msi_client())
 
 
 def test_o365_with_token_uses_fresh_client_and_closes():
-    asyncio.run(_check_o365_with_token_uses_fresh_client_and_closes())
+    with patch.dict(sys.modules):
+        asyncio.run(_check_o365_with_token_uses_fresh_client_and_closes())
 
 
 def test_o365_with_token_closes_on_connector_error():
-    asyncio.run(_check_o365_with_token_closes_on_connector_error())
+    with patch.dict(sys.modules):
+        asyncio.run(_check_o365_with_token_closes_on_connector_error())
 
 
 def test_streams_multiple_chunks_without_buffering():
