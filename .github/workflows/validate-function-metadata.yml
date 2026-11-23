@@ -22,3 +22,7 @@ jobs:
           python-version: '3.12'
       - name: Check functions.metadata matches declared functions
         run: python .github/scripts/check_function_metadata.py
+      - name: Install released ACN SDK
+        run: python -m pip install azure-connectors==1.0.0
+      - name: Check ACN adapter contracts
+        run: python -B -m unittest discover -s Templates/Python/ConnectorFunction/HelloFabric -p "test_acn*.py"
