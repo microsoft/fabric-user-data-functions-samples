@@ -1,7 +1,7 @@
 """Run with python -B test_acn_connectors.py.
 
-Exercises the shared ACN adapter against fake azure.connectors clients, so the
-real SDK is not required.
+Exercises the shared ACN adapter against fake clients. Install azure-connectors==1.0.0
+for the Azure Core credential and paging contracts.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import types
 import unittest
 from unittest.mock import patch
 import zipfile
+import azure.connectors
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME_URL = "https://example.azure-apim.net/apim/x/11111111111111111111111111111111"
@@ -35,9 +36,9 @@ class FakeClient:
     error = None
     close_error = None
 
-    def __init__(self, connection_runtime_url, token_provider=None, options=None):
+    def __init__(self, connection_runtime_url, credential):
         self.url = connection_runtime_url
-        FakeClient.tokens.append(token_provider)
+        FakeClient.tokens.append(credential)
 
     def __getattr__(self, name):
         async def call(**kwargs):
@@ -70,19 +71,19 @@ def _install_stubs():
     fabric.functions = functions
     sys.modules["fabric"], sys.modules["fabric.functions"] = fabric, functions
 
-    azure = sys.modules.setdefault("azure", types.ModuleType("azure"))
     connectors = types.ModuleType("azure.connectors")
     connectors.ConnectorException = ConnectorException
-    azure.connectors = connectors
     sys.modules["azure.connectors"] = connectors
-    authentication = types.ModuleType("azure.connectors.sdk.authentication")
-    authentication.ConnectionStringTokenProvider = type(
-        "ConnectionStringTokenProvider", (), {"__init__": lambda self, token: setattr(self, "token", token)})
-    sys.modules["azure.connectors.sdk"] = types.ModuleType("azure.connectors.sdk")
-    sys.modules[authentication.__name__] = authentication
-    for slug in SLUGS:
-        module = types.ModuleType(f"azure.connectors.{slug}")
-        setattr(module, slug.capitalize() + "Client", FakeClient)
+    clients = {
+        "office365_users": "Office365UsersClient", "sharepoint_online": "SharePointOnlineClient",
+        "office365": "Office365Client", "excel_online_business": "ExcelOnlineBusinessClient",
+        "teams": "TeamsClient", "onedrive_for_business": "OneDriveForBusinessClient",
+        "office365_groups": "Office365GroupsClient", "microsoft_forms": "MicrosoftFormsClient",
+        "planner": "PlannerClient", "azure_ad": "AzureADClient",
+    }
+    for module_name, class_name in clients.items():
+        module = types.ModuleType(f"azure.connectors.{module_name}")
+        setattr(module, class_name, FakeClient)
         sys.modules[module.__name__] = module
 
 
@@ -148,20 +149,20 @@ class AcnAdapterTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"value": [{"Title": "a"}]})
         method, kwargs = FakeClient.calls[0]
-        self.assertEqual(method, "get_items_async")
+        self.assertEqual(method, "list_items")
         self.assertEqual(kwargs["dataset"], "https://contoso.sharepoint.com/sites/x")
         self.assertEqual(kwargs["table"], "Tasks")
-        self.assertEqual(kwargs["top"], "5")
+        self.assertEqual(kwargs["top"], 5)
 
     def test_null_result_returns_json_null(self):
         FakeClient.result = None
         self.assertEqual(_invoke("teams", "getAllChannelsForTeamAsync", teamId="t1"), (200, "null"))
 
-    def test_query_flags_are_stringified(self):
+    def test_query_numbers_are_typed(self):
         _invoke("office365", "getEventsCalendarViewAsync", calendarId="c1",
                 startDateTimeUtc="2026-01-01T00:00:00Z", endDateTimeUtc="2026-01-02T00:00:00Z", top=5)
         _, kwargs = FakeClient.calls[0]
-        self.assertEqual(kwargs["top"], "5")
+        self.assertEqual(kwargs["top"], 5)
         self.assertEqual(kwargs["calendar_id"], "c1")
 
     def test_owner_wide_reads_dispatch(self):
@@ -169,12 +170,12 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("office365", "getEmailsAsync", top=3)
         _invoke("teams", "getMessagesFromChatAsync", chatId="19:abc")
         _invoke("onedriveforbusiness", "getFileMetadataByPathAsync", path="/Shared/a.xlsx")
-        self.assertEqual(FakeClient.calls[0], ("calendar_get_tables_async", {}))
-        self.assertEqual(FakeClient.calls[1][0], "get_emails_async")
-        self.assertEqual(FakeClient.calls[1][1]["include_attachments"], "false")
-        self.assertEqual(FakeClient.calls[1][1]["top"], "3")
+        self.assertEqual(FakeClient.calls[0], ("list_calendar_get_tables", {}))
+        self.assertEqual(FakeClient.calls[1][0], "list_emails")
+        self.assertEqual(FakeClient.calls[1][1]["include_attachments"], False)
+        self.assertEqual(FakeClient.calls[1][1]["top"], 3)
         self.assertEqual(FakeClient.calls[2][1]["chat_id"], "19:abc")
-        self.assertEqual(FakeClient.calls[3], ("get_file_metadata_by_path_async", {"path": "/Shared/a.xlsx"}))
+        self.assertEqual(FakeClient.calls[3], ("get_file_metadata_by_path", {"path": "/Shared/a.xlsx"}))
 
     def test_post_bodies_use_wire_names(self):
         _invoke("azuread", "checkMemberGroupsAsync", userId="u1", groupIds=["g1"])
@@ -204,14 +205,14 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("onedriveforbusiness", "copyDriveFileAsync", fileId="f1",
                 destination="/Backup/a.txt", overwrite=True)
         self.assertEqual(FakeClient.calls[0],
-                         ("send_email_async", {"input": {"To": "a@b.c", "Subject": "s"}}))
-        self.assertEqual(FakeClient.calls[1], ("reply_to_async", {
+                         ("send_email", {"input": {"To": "a@b.c", "Subject": "s"}}))
+        self.assertEqual(FakeClient.calls[1], ("reply_to", {
             "message_id": "m1", "input": {"Body": "hi"}, "mailbox_address": None}))
-        self.assertEqual(FakeClient.calls[2], ("post_message_to_conversation_async", {
+        self.assertEqual(FakeClient.calls[2], ("post_message_to_conversation", {
             "poster": "Flow bot", "location": "Channel", "input": {"recipient": {"groupId": "g"}}}))
-        self.assertEqual(FakeClient.calls[3], ("create_file_async", {
+        self.assertEqual(FakeClient.calls[3], ("create_file", {
             "folder_path": "/Docs", "name": "a.txt", "input": b"hello"}))
-        self.assertEqual(FakeClient.calls[4][1]["overwrite"], "true")
+        self.assertEqual(FakeClient.calls[4][1]["overwrite"], True)
 
     def test_create_file_rejects_non_base64_content(self):
         response = _invoke("onedriveforbusiness", "createFileAsync",
@@ -226,12 +227,12 @@ class AcnAdapterTests(unittest.TestCase):
             _invoke("onedriveforbusiness", "createFileAsync", folderPath="/Docs", name="a.txt"), "content")
 
     def test_top_must_be_positive(self):
-        for value in (0, "0", -1, "abc"):
+        for value in (0, "0", -1, "abc", True, 1.5):
             with self.subTest(value=value):
                 self.assertBadRequest(_invoke("office365groups", "listGroupsAsync", top=value), "top")
         self.assertEqual(FakeClient.calls, [])
         _invoke("office365groups", "listGroupsAsync", top=3)
-        self.assertEqual(FakeClient.calls[0][1]["top"], "3")
+        self.assertEqual(FakeClient.calls[0][1]["top"], 3)
 
     def test_boolean_flags_accept_string_false(self):
         for value, expected in (("false", False), ("False", False), ("0", False), ("true", True), (True, True)):
@@ -249,22 +250,47 @@ class AcnAdapterTests(unittest.TestCase):
                 tableName="T", item={"A": 1})
         _invoke("office365groups", "updateCalendarEventAsync", groupId="g", eventId="e", request={"subject": "x"})
         _invoke("planner", "assignUsersAsync", taskId="t", request={"assignments": "u1;u2"})
-        self.assertEqual(FakeClient.calls[0], ("post_item_async", {
+        self.assertEqual(FakeClient.calls[0], ("post_item", {
             "dataset": site, "table": "Tasks", "input": {"Title": "a"}}))
-        self.assertEqual(FakeClient.calls[1], ("patch_item_async", {
-            "dataset": site, "table": "Tasks", "id": "7", "input": {"Title": "b"}}))
-        self.assertEqual(FakeClient.calls[2], ("get_item_attachments_async", {
+        self.assertEqual(FakeClient.calls[1], ("patch_item", {
+            "dataset": site, "table": "Tasks", "id": 7, "input": {"Title": "b"}}))
+        self.assertEqual(FakeClient.calls[2], ("list_item_attachments", {
             "dataset": site, "table": "Tasks", "item_id": "7"}))
-        self.assertEqual(FakeClient.calls[3], ("add_row_async", {
+        self.assertEqual(FakeClient.calls[3], ("add_row", {
             "source": "me", "drive": "d", "file": "f", "table": "T", "input": {"A": 1}}))
-        self.assertEqual(FakeClient.calls[4], ("update_calendar_event_async", {
+        self.assertEqual(FakeClient.calls[4], ("update_calendar_event", {
             "group_id": "g", "event": "e", "input": {"subject": "x"}}))
-        self.assertEqual(FakeClient.calls[5], ("assign_users_async", {"id": "t", "input": {"assignments": "u1;u2"}}))
+        self.assertEqual(FakeClient.calls[5], ("assign_users", {"id": "t", "input": {"assignments": "u1;u2"}}))
+
+    def test_sharepoint_item_ids_reject_lossy_coercion_before_dispatch(self):
+        for operation in ("getItemAsync", "patchItemAsync", "deleteItemAsync"):
+            for value in (7.9, True, False, "7.9", float("inf"), float("nan")):
+                with self.subTest(operation=operation, value=value):
+                    FakeClient.calls = []
+                    self.assertBadRequest(
+                        _invoke("sharepointonline", operation,
+                                siteUrl="https://contoso.sharepoint.com/sites/x", listName="Tasks",
+                                id=value, item={"Title": "updated"}),
+                        "id")
+                    self.assertEqual(FakeClient.calls, [])
+
+    def test_sharepoint_item_ids_preserve_integer_inputs(self):
+        for operation in ("getItemAsync", "patchItemAsync", "deleteItemAsync"):
+            for value in (0, 7, "7", 7.0):
+                with self.subTest(operation=operation, value=value):
+                    FakeClient.calls = []
+                    _invoke("sharepointonline", operation,
+                            siteUrl="https://contoso.sharepoint.com/sites/x", listName="Tasks",
+                            id=value, item={"Title": "updated"})
+                    self.assertEqual(len(FakeClient.calls), 1)
+                    actual = FakeClient.calls[0][1]["id"]
+                    self.assertIs(type(actual), int)
+                    self.assertEqual(actual, int(value))
 
     def test_office365users_uses_shared_adapter(self):
         _invoke("office365users", "searchUserAsync", searchTerm="ada", top=5, isSearchTermRequired=False)
-        self.assertEqual(FakeClient.calls[0], ("search_user_async", {
-            "search_term": "ada", "top": "5", "is_search_term_required": "false", "skip_token": None}))
+        self.assertEqual(FakeClient.calls[0], ("list_search_user", {
+            "search_term": "ada", "top": 5, "is_search_term_required": False}))
         self.assertIn(("office365users", RUNTIME_URL), app._acn_clients)
         self.assertBadRequest(_invoke("office365users", "managerAsync"), "userId")
 
@@ -293,7 +319,7 @@ class AcnAdapterTests(unittest.TestCase):
         _invoke("office365", "getEmailAsync", messageId="m1", includeAttachments="false")
         _invoke("office365", "getEmailAsync", messageId="m1", includeAttachments="true")
         self.assertEqual([kwargs["include_attachments"] for _, kwargs in FakeClient.calls],
-                         ["false", "true", "false", "true"])
+                         [False, True, False, True])
 
     def test_missing_operation_and_runtime_url_return_400(self):
         def run(payload):
@@ -305,7 +331,7 @@ class AcnAdapterTests(unittest.TestCase):
     def test_sharepoint_get_item_reads_id_not_reserved_item_id(self):
         site = "https://contoso.sharepoint.com/sites/x"
         _invoke("sharepointonline", "getItemAsync", siteUrl=site, listName="Tasks", id=0)
-        self.assertEqual(FakeClient.calls[0], ("get_item_async", {"dataset": site, "table": "Tasks", "id": 0}))
+        self.assertEqual(FakeClient.calls[0], ("get_item", {"dataset": site, "table": "Tasks", "id": 0}))
         self.assertBadRequest(
             _invoke("sharepointonline", "getItemAsync", siteUrl=site, listName="Tasks", itemId=7), "'id'")
 
@@ -416,8 +442,7 @@ class AcnAdapterTests(unittest.TestCase):
                 self.assertClientCreationFails("RuntimeError", **input_data)
 
     def test_token_provider_failure_returns_error_envelope(self):
-        auth = sys.modules["azure.connectors.sdk.authentication"]
-        with patch.object(auth, "ConnectionStringTokenProvider",
+        with patch.object(app, "_AcnAccessTokenCredential",
                           side_effect=ValueError("leaks /apim/x/connection-id")):
             self.assertClientCreationFails("ValueError", accessToken="tok")
 
